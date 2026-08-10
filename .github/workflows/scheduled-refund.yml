@@ -1,0 +1,41 @@
+# 定时退订 · 真·24/7 服务端调度（不依赖你自己的电脑/浏览器）
+#
+# 原理：GitHub 的服务器每分钟/每10分钟跑一次 scheduled_refund.py，
+#       脚本从 Supabase 读取你的定时设置与 AK/SK，到点（含过期补跑）自动退订。
+#       即使你关机、关浏览器、睡觉，GitHub 服务器照常执行。
+#
+# 启用（一次性，约 2 分钟）：
+#   1) 本仓库推到 GitHub（公开仓库 Actions 免费无限时长；私有仓库免费额度 2000 分钟/月，
+#      每 10 分钟一次约 2160 分钟/月，略超；可把下面 cron 改成 '*/15 * * * *' 即可稳在额度内）。
+#   2) 仓库里已包含 scheduled_refund.py（仅含公开的 Supabase anon key，AK/SK 运行时从 Supabase 读取，不会入库）。
+#   3) 在 GitHub 仓库 → Settings → Secrets 里无需添加任何密钥（anon key 已写死在脚本中）。
+#   4) Actions 页打开本 workflow 即可。也可手动 Run workflow 立即试一次。
+#
+# 注意：脚本通过 anon key 读取 user_data；请确保你的 user_data 行里已写入 ak_id/ak_secret
+#       （站点「设置」里填过 AK/SK 即会自动同步到云端）。
+
+name: scheduled-refund
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'     # 每 10 分钟检查一次（含过期补跑，错过整点也会补）
+  workflow_dispatch: {}        # 允许在 Actions 页手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  refund:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run scheduled refund
+        run: python3 scheduled_refund.py

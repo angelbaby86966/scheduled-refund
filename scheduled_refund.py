@@ -15,6 +15,7 @@
 """
 import hmac, hashlib, base64, uuid, urllib.request, urllib.parse, json, time
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 SUPABASE_URL = "https://vgddxxgjcogxcpiycsej.supabase.co"
 SUPABASE_ANON_KEY = "sb_publishable_AqRbhxlzaDzPNR1nZTw-4A_c1VQ1Nch"
@@ -29,6 +30,11 @@ REGIONS = {
 }
 
 RETRY_GAP_MIN = 2  # 第 1 轮失败后的重试间隔（分钟）
+
+# 退订并发参数（提速核心）
+BATCH_SIZE = 50        # 每个地区每批「并行」退订的实例数（≤50 一批）
+BATCH_GAP_SEC = 3      # 同一地区每批退完后，间隔多少秒再退下一批
+REGION_WORKERS = len(REGIONS)  # 6 个地区之间「并行」退订（不用串行）
 
 # 当日窗口上限：设定时间之后多久之内允许补跑（防止"几天没开机"后突然退订造成困惑）。
 # 设为 24 小时 = 只要当天任意时刻上线都补跑。None 表示不限制。
@@ -124,40 +130,79 @@ def update_user_data(username, updates):
 
 
 def execute_refund_for_user(username, ak_id, ak_secret, round_label):
-    """对单个用户执行退订，返回 {success, fail, skip}"""
-    log(f"  👤 {username}: {round_label} - 开始查询实例...")
-    all_instances = []
-    for rid in REGIONS:
+    """对单个用户执行退订，返回 {success, fail, skip}
+
+    提速设计（用户要求）：
+      - 查询阶段：6 个地区「并行」查询实例；
+      - 退订阶段：6 个地区「并行」退订（不再串行）；
+      - 地区内：每 BATCH_SIZE(50) 台「并发」退一批，批间间隔 BATCH_GAP_SEC(3s) 再退下一批。
+    退订请求本身带 ClientToken，天然幂等，重试轮重跑安全。
+    """
+    log(f"  👤 {username}: {round_label} - 并行查询 {REGION_WORKERS} 个地区实例...")
+
+    # ---- 查询阶段：各地区并行 ----
+    region_instances = {}  # rid -> [(iid, name), ...]
+
+    def fetch_region(rid):
         try:
             result = list_instances(ak_id, ak_secret, rid)
-            for inst in (result.get("Instances") or []):
-                all_instances.append((rid, inst["InstanceId"], inst.get("InstanceName", "")))
+            insts = [(inst["InstanceId"], inst.get("InstanceName", ""))
+                     for inst in (result.get("Instances") or [])]
+            return rid, insts
         except Exception as e:
             log(f"    ⚠️ {REGIONS[rid]}: 查询失败 - {e}")
+            return rid, []
 
-    if not all_instances:
+    with ThreadPoolExecutor(max_workers=REGION_WORKERS) as ex:
+        for rid, insts in ex.map(fetch_region, list(REGIONS.keys())):
+            region_instances[rid] = insts
+
+    total = sum(len(v) for v in region_instances.values())
+    if total == 0:
         log(f"  👤 {username}: 无实例，跳过")
         return {"success": 0, "fail": 0, "skip": 0}
+    log(f"  👤 {username}: 共 {total} 台实例，开始地区并行退订（每地区每批{BATCH_SIZE}台并发，批间{BATCH_GAP_SEC}s）...")
 
-    log(f"  👤 {username}: 共 {len(all_instances)} 台实例，开始退订...")
-    success, fail, skip = 0, 0, 0
-    for rid, iid, name in all_instances:
+    # ---- 退订阶段：地区内分批并发、地区间并行 ----
+    def refund_one(rid, iid, name):
         try:
             result = refund_instance(ak_id, ak_secret, iid)
             code = result.get("Code", "")
             if code == "200" or result.get("Success"):
-                success += 1
                 log(f"    ✅ [{REGIONS[rid]}] {iid} 退订成功")
+                return 1
             elif code in ("ResourceNotExists", "InvalidInstanceId.NotFound"):
-                skip += 1
                 log(f"    ⚪ [{REGIONS[rid]}] {iid} 已不存在，跳过")
+                return 2
             else:
-                fail += 1
                 log(f"    ❌ [{REGIONS[rid]}] {iid} 失败: {result.get('Message', code)}")
+                return 0
         except Exception as e:
-            fail += 1
             log(f"    ❌ [{REGIONS[rid]}] {iid} 异常: {e}")
-        time.sleep(0.3)
+            return 0
+
+    def refund_region(rid):
+        insts = region_instances[rid]
+        s = f = sk = 0
+        n = len(insts)
+        for i in range(0, n, BATCH_SIZE):
+            batch = insts[i:i + BATCH_SIZE]
+            with ThreadPoolExecutor(max_workers=len(batch)) as ex:
+                rs = list(ex.map(lambda t: refund_one(rid, t[0], t[1]), batch))
+            for r in rs:
+                if r == 1: s += 1
+                elif r == 2: sk += 1
+                else: f += 1
+            if i + BATCH_SIZE < n:
+                log(f"    ⏳ [{REGIONS[rid]}] 本批 {len(batch)} 台已退，{BATCH_GAP_SEC}s 后再退下一批")
+                time.sleep(BATCH_GAP_SEC)
+        return rid, s, f, sk
+
+    success, fail, skip = 0, 0, 0
+    with ThreadPoolExecutor(max_workers=REGION_WORKERS) as ex:
+        for rid, s, f, sk in ex.map(refund_region, list(REGIONS.keys())):
+            success += s; fail += f; skip += sk
+            log(f"  🏁 [{REGIONS[rid]}] 完成 - 成功{s} 跳过{sk} 失败{f}")
 
     log(f"  👤 {username}: {round_label} 完成 - 成功{success} 跳过{skip} 失败{fail}")
     return {"success": success, "fail": fail, "skip": skip}

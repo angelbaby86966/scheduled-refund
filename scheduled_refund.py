@@ -14,10 +14,11 @@ REGIONS = {
     "cn-hangzhou": "杭州", "cn-beijing": "北京", "cn-shanghai": "上海",
     "cn-shenzhen": "深圳", "cn-chengdu": "成都", "cn-guangzhou": "广州",
 }
-RETRY_GAP_MIN = 2
+RETRY_GAP_MIN = 10
 MAX_OVERDUE_HOURS = 24
 BATCH_SIZE = 50
 BATCH_INTERVAL = 3
+MAX_RETRIES = 2          # 第1轮退完后最多再检查2次
 
 
 def log(msg):
@@ -117,26 +118,39 @@ def _collect_region(ak_id, ak_secret, rid, per_region):
 
 def _refund_region(ak_id, ak_secret, rid, instances, stats):
     batches = [instances[i:i + BATCH_SIZE] for i in range(0, len(instances), BATCH_SIZE)]
-    log(f"    🌏 {REGIONS[rid]}: 共 {len(instances)} 台，分 {len(batches)} 批退订")
+    log(f"    🌏 {REGIONS[rid]}: 共 {len(instances)} 台，分 {len(batches)} 批并行退订（每批 {BATCH_SIZE} 台并发，批间 {BATCH_INTERVAL}s）")
     s = f = k = 0
     for bi, batch in enumerate(batches):
-        for iid, name in batch:
+        batch_results = [None] * len(batch)
+        threads = []
+        def _refund_one(idx, iid):
             try:
                 result = refund_instance(ak_id, ak_secret, iid)
                 code = result.get("Code", "")
                 if code == "200" or result.get("Success"):
-                    s += 1
-                    log(f"    ✅ [{REGIONS[rid]}] {iid} 退订成功")
+                    batch_results[idx] = ('ok', iid, '')
                 elif code in ("ResourceNotExists", "InvalidInstanceId.NotFound"):
-                    k += 1
-                    log(f"    ⚪ [{REGIONS[rid]}] {iid} 已不存在，跳过")
+                    batch_results[idx] = ('skip', iid, '')
                 else:
-                    f += 1
-                    log(f"    ❌ [{REGIONS[rid]}] {iid} 失败: {result.get('Message', code)}")
+                    batch_results[idx] = ('fail', iid, result.get('Message', code))
             except Exception as e:
+                batch_results[idx] = ('fail', iid, str(e))
+        for idx, (iid, name) in enumerate(batch):
+            t = threading.Thread(target=_refund_one, args=(idx, iid))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+        for r in batch_results:
+            if r[0] == 'ok':
+                s += 1
+                log(f"    ✅ [{REGIONS[rid]}] {r[1]} 退订成功")
+            elif r[0] == 'skip':
+                k += 1
+                log(f"    ⚪ [{REGIONS[rid]}] {r[1]} 已不存在，跳过")
+            else:
                 f += 1
-                log(f"    ❌ [{REGIONS[rid]}] {iid} 异常: {e}")
-            time.sleep(0.3)
+                log(f"    ❌ [{REGIONS[rid]}] {r[1]} 失败: {r[2]}")
         if bi < len(batches) - 1:
             time.sleep(BATCH_INTERVAL)
     stats[rid] = [s, f, k]
@@ -215,7 +229,6 @@ def main(now_override=None):
                 update_user_data(username, {"schedule_retry_at": "", "schedule_retry_done": True})
             continue
         schedule_dt = bj.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-        retry_dt = schedule_dt + timedelta(minutes=RETRY_GAP_MIN)
         if MAX_OVERDUE_HOURS is not None:
             overdue = (now_bj - schedule_dt).total_seconds() / 3600.0
             if overdue > MAX_OVERDUE_HOURS:
@@ -245,32 +258,28 @@ def main(now_override=None):
                         "schedule_retry_done": True,
                     })
             continue
+        # ===== 定时退订：第1轮 + 2次重试（每次间隔10分钟，全部在本次执行内完成） =====
         ran_any = True
-        log(f"  👤 {username}: 🕐 第1轮触发 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")
+        log(f"  👤 {username}: 🕐 第1轮退订 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")
         result = execute_refund_for_user(username, ak_id, ak_secret, "第1轮")
-        if result["fail"] == 0:
-            log(f"  👤 {username}: ✅ 全部成功，今日任务完成")
-            update_user_data(username, {
-                "schedule_last_executed_date": today,
-                "schedule_retry_at": "",
-                "schedule_retry_done": True,
-            })
-            continue
-        if now_bj >= retry_dt:
-            log(f"  👤 {username}: 🔄 第2轮重试触发（已过等待窗口，立即补跑）")
-            execute_refund_for_user(username, ak_id, ak_secret, "第2轮重试")
-            update_user_data(username, {
-                "schedule_last_executed_date": today,
-                "schedule_retry_at": "",
-                "schedule_retry_done": True,
-            })
+        total_fail = result["fail"]
+        for retry_i in range(1, MAX_RETRIES + 1):
+            if total_fail == 0:
+                break
+            log(f"  👤 {username}: ⏳ 第{retry_i}轮有 {total_fail} 台失败，等待 {RETRY_GAP_MIN} 分钟后重试...")
+            time.sleep(RETRY_GAP_MIN * 60)
+            log(f"  👤 {username}: 🔄 第{retry_i + 1}轮重试开始")
+            result = execute_refund_for_user(username, ak_id, ak_secret, f"第{retry_i + 1}轮重试")
+            total_fail = result["fail"]
+        if total_fail == 0:
+            log(f"  👤 {username}: ✅ 全部退订成功，今日任务完成")
         else:
-            retry_str = retry_dt.strftime("%H:%M")
-            log(f"  👤 {username}: ⚠️ {result['fail']}台失败，{RETRY_GAP_MIN}分钟后({retry_str})重试")
-            update_user_data(username, {
-                "schedule_retry_at": retry_str,
-                "schedule_retry_done": False,
-            })
+            log(f"  👤 {username}: ⚠️ 已重试 {MAX_RETRIES} 次，仍有 {total_fail} 台未退订，不再检查")
+        update_user_data(username, {
+            "schedule_last_executed_date": today,
+            "schedule_retry_at": "",
+            "schedule_retry_done": True,
+        })
         continue
     if not ran_any:
         log("  无账号需要执行")

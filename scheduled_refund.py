@@ -221,6 +221,29 @@ def main(now_override=None):
             if overdue > MAX_OVERDUE_HOURS:
                 continue
         if now_bj < schedule_dt:
+            # Before today's scheduled time.
+            # Check if yesterday's schedule was missed (GitHub Actions cron runs
+            # every 2-4 hours, might have skipped the window between yesterday's
+            # scheduled time and midnight — this is the core bug that caused
+            # "browser closed = no refund").
+            yesterday_dt = bj - timedelta(days=1)
+            yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
+            if last_date != yesterday_str:
+                y_schedule_dt = schedule_dt - timedelta(days=1)
+                y_overdue = (now_bj - y_schedule_dt).total_seconds() / 3600.0
+                if 0 <= y_overdue <= MAX_OVERDUE_HOURS:
+                    ran_any = True
+                    log(f"  👤 {username}: 🔄 补跑昨天({yesterday_str})漏掉的 {int(h):02d}:{int(m):02d} 定时退订（现在 {current_hm}）")
+                    result = execute_refund_for_user(username, ak_id, ak_secret, f"补跑{yesterday_str}")
+                    if result["fail"] == 0:
+                        log(f"  👤 {username}: ✅ 补跑成功，标记 {yesterday_str} 已完成")
+                    else:
+                        log(f"  👤 {username}: ⚠️ 补跑完成但有 {result['fail']} 台失败（不再重试，已标记完成）")
+                    update_user_data(username, {
+                        "schedule_last_executed_date": yesterday_str,
+                        "schedule_retry_at": "",
+                        "schedule_retry_done": True,
+                    })
             continue
         ran_any = True
         log(f"  👤 {username}: 🕐 第1轮触发 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")

@@ -188,6 +188,84 @@ def execute_refund_for_user(username, ak_id, ak_secret, round_label):
     return {"success": success, "fail": fail, "skip": skip}
 
 
+def _process_user(ud, bj, today, current_hm, now_bj):
+    """处理单个账号的定时退订（在独立线程中运行，与其他账号互不干扰）。"""
+    username = ud.get("username", "")
+    d = ud.get("data", {}) or {}
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except Exception:
+            d = {}
+    enabled = d.get("schedule_enabled")
+    h = d.get("schedule_hour")
+    m = d.get("schedule_minute")
+    last_date = d.get("schedule_last_executed_date", "")
+    retry_at = d.get("schedule_retry_at", "")
+    retry_done = d.get("schedule_retry_done", False)
+    if not enabled or h is None or m is None:
+        return
+    ak_id = d.get("ak_id", "")
+    ak_secret = d.get("ak_secret", "")
+    if not ak_id or not ak_secret:
+        log(f"  👤 {username}: 已开启定时但缺少 AK/SK，跳过")
+        return
+    if last_date == today:
+        if retry_at or not retry_done:
+            update_user_data(username, {"schedule_retry_at": "", "schedule_retry_done": True})
+        return
+    schedule_dt = bj.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+    if MAX_OVERDUE_HOURS is not None:
+        overdue = (now_bj - schedule_dt).total_seconds() / 3600.0
+        if overdue > MAX_OVERDUE_HOURS:
+            return
+    if now_bj < schedule_dt:
+        # Before today's scheduled time.
+        # Check if yesterday's schedule was missed (GitHub Actions cron runs
+        # every 2-4 hours, might have skipped the window between yesterday's
+        # scheduled time and midnight — this is the core bug that caused
+        # "browser closed = no refund").
+        yesterday_dt = bj - timedelta(days=1)
+        yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
+        if last_date != yesterday_str:
+            y_schedule_dt = schedule_dt - timedelta(days=1)
+            y_overdue = (now_bj - y_schedule_dt).total_seconds() / 3600.0
+            if 0 <= y_overdue <= MAX_OVERDUE_HOURS:
+                log(f"  👤 {username}: 🔄 补跑昨天({yesterday_str})漏掉的 {int(h):02d}:{int(m):02d} 定时退订（现在 {current_hm}）")
+                result = execute_refund_for_user(username, ak_id, ak_secret, f"补跑{yesterday_str}")
+                if result["fail"] == 0:
+                    log(f"  👤 {username}: ✅ 补跑成功，标记 {yesterday_str} 已完成")
+                else:
+                    log(f"  👤 {username}: ⚠️ 补跑完成但有 {result['fail']} 台失败（不再重试，已标记完成）")
+                update_user_data(username, {
+                    "schedule_last_executed_date": yesterday_str,
+                    "schedule_retry_at": "",
+                    "schedule_retry_done": True,
+                })
+        return
+    # ===== 定时退订：第1轮 + 2次重试（每次间隔10分钟，全部在本次执行内完成） =====
+    log(f"  👤 {username}: 🕐 第1轮退订 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")
+    result = execute_refund_for_user(username, ak_id, ak_secret, "第1轮")
+    total_fail = result["fail"]
+    for retry_i in range(1, MAX_RETRIES + 1):
+        if total_fail == 0:
+            break
+        log(f"  👤 {username}: ⏳ 第{retry_i}轮有 {total_fail} 台失败，等待 {RETRY_GAP_MIN} 分钟后重试...")
+        time.sleep(RETRY_GAP_MIN * 60)
+        log(f"  👤 {username}: 🔄 第{retry_i + 1}轮重试开始")
+        result = execute_refund_for_user(username, ak_id, ak_secret, f"第{retry_i + 1}轮重试")
+        total_fail = result["fail"]
+    if total_fail == 0:
+        log(f"  👤 {username}: ✅ 全部退订成功，今日任务完成")
+    else:
+        log(f"  👤 {username}: ⚠️ 已重试 {MAX_RETRIES} 次，仍有 {total_fail} 台未退订，不再检查")
+    update_user_data(username, {
+        "schedule_last_executed_date": today,
+        "schedule_retry_at": "",
+        "schedule_retry_done": True,
+    })
+
+
 def main(now_override=None):
     if now_override is not None:
         bj = now_override
@@ -202,87 +280,15 @@ def main(now_override=None):
     if not users:
         log("  无用户数据")
         return
-    ran_any = False
+    # 所有账号并行处理，互不阻塞（一个账号的重试等待不会卡住其他账号）
+    threads = []
     for ud in users:
-        username = ud.get("username", "")
-        d = ud.get("data", {}) or {}
-        if isinstance(d, str):
-            try:
-                d = json.loads(d)
-            except Exception:
-                d = {}
-        enabled = d.get("schedule_enabled")
-        h = d.get("schedule_hour")
-        m = d.get("schedule_minute")
-        last_date = d.get("schedule_last_executed_date", "")
-        retry_at = d.get("schedule_retry_at", "")
-        retry_done = d.get("schedule_retry_done", False)
-        if not enabled or h is None or m is None:
-            continue
-        ak_id = d.get("ak_id", "")
-        ak_secret = d.get("ak_secret", "")
-        if not ak_id or not ak_secret:
-            log(f"  👤 {username}: 已开启定时但缺少 AK/SK，跳过")
-            continue
-        if last_date == today:
-            if retry_at or not retry_done:
-                update_user_data(username, {"schedule_retry_at": "", "schedule_retry_done": True})
-            continue
-        schedule_dt = bj.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-        if MAX_OVERDUE_HOURS is not None:
-            overdue = (now_bj - schedule_dt).total_seconds() / 3600.0
-            if overdue > MAX_OVERDUE_HOURS:
-                continue
-        if now_bj < schedule_dt:
-            # Before today's scheduled time.
-            # Check if yesterday's schedule was missed (GitHub Actions cron runs
-            # every 2-4 hours, might have skipped the window between yesterday's
-            # scheduled time and midnight — this is the core bug that caused
-            # "browser closed = no refund").
-            yesterday_dt = bj - timedelta(days=1)
-            yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
-            if last_date != yesterday_str:
-                y_schedule_dt = schedule_dt - timedelta(days=1)
-                y_overdue = (now_bj - y_schedule_dt).total_seconds() / 3600.0
-                if 0 <= y_overdue <= MAX_OVERDUE_HOURS:
-                    ran_any = True
-                    log(f"  👤 {username}: 🔄 补跑昨天({yesterday_str})漏掉的 {int(h):02d}:{int(m):02d} 定时退订（现在 {current_hm}）")
-                    result = execute_refund_for_user(username, ak_id, ak_secret, f"补跑{yesterday_str}")
-                    if result["fail"] == 0:
-                        log(f"  👤 {username}: ✅ 补跑成功，标记 {yesterday_str} 已完成")
-                    else:
-                        log(f"  👤 {username}: ⚠️ 补跑完成但有 {result['fail']} 台失败（不再重试，已标记完成）")
-                    update_user_data(username, {
-                        "schedule_last_executed_date": yesterday_str,
-                        "schedule_retry_at": "",
-                        "schedule_retry_done": True,
-                    })
-            continue
-        # ===== 定时退订：第1轮 + 2次重试（每次间隔10分钟，全部在本次执行内完成） =====
-        ran_any = True
-        log(f"  👤 {username}: 🕐 第1轮退订 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")
-        result = execute_refund_for_user(username, ak_id, ak_secret, "第1轮")
-        total_fail = result["fail"]
-        for retry_i in range(1, MAX_RETRIES + 1):
-            if total_fail == 0:
-                break
-            log(f"  👤 {username}: ⏳ 第{retry_i}轮有 {total_fail} 台失败，等待 {RETRY_GAP_MIN} 分钟后重试...")
-            time.sleep(RETRY_GAP_MIN * 60)
-            log(f"  👤 {username}: 🔄 第{retry_i + 1}轮重试开始")
-            result = execute_refund_for_user(username, ak_id, ak_secret, f"第{retry_i + 1}轮重试")
-            total_fail = result["fail"]
-        if total_fail == 0:
-            log(f"  👤 {username}: ✅ 全部退订成功，今日任务完成")
-        else:
-            log(f"  👤 {username}: ⚠️ 已重试 {MAX_RETRIES} 次，仍有 {total_fail} 台未退订，不再检查")
-        update_user_data(username, {
-            "schedule_last_executed_date": today,
-            "schedule_retry_at": "",
-            "schedule_retry_done": True,
-        })
-        continue
-    if not ran_any:
-        log("  无账号需要执行")
+        t = threading.Thread(target=_process_user, args=(ud, bj, today, current_hm, now_bj))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    log("  所有账号处理完毕")
 
 
 if __name__ == "__main__":

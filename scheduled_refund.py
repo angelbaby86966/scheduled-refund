@@ -316,16 +316,19 @@ def process_user(row):
         log(f"用户 {username}: 未配置定时时间，跳过", "WARN")
         return
 
+    # 定时时间只允许 23:35–23:59，其余时间不执行
+    if not (int(hour) == 23 and 35 <= int(minute) <= 59):
+        log(f"用户 {username}: 定时时间 {int(hour):02d}:{int(minute):02d} 不在允许范围(23:35–23:59)，跳过", "WARN")
+        return
+
     now_bj = beijing_now()
-    today_str = beijing_date_str()
-    last_date = data.get("schedule_last_executed_date")
+    # 仅允许在 23:35–23:59 窗口内执行
+    if not (now_bj.hour == 23 and now_bj.minute >= 35):
+        return
 
     scheduled_dt = now_bj.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
     if now_bj < scheduled_dt:
-        # 还没到设定的时间，本次 run 不执行（下次 cron 到点再说）
-        return
-    if last_date == today_str:
-        # 今天已经退过，防重
+        # 窗口内但还没到用户设定的具体分钟，本次 run 不执行（下次 cron tick 再说）
         return
 
     creds = build_credentials(data)
@@ -349,9 +352,9 @@ def process_user(row):
     log(f"🏁 用户 {username} 全部凭证退订完成：成功 {grand['success']} 跳过 {grand['skipped']} 锁定 {grand['locked']} 失败 {grand['fail']}",
         "SUCCESS" if (grand["fail"] == 0 and executed_any) else ("WARN" if executed_any else "ERROR"))
 
-    # 写回执行日期（无论成功失败都记今天，避免反复重试失败项）
+    # 记录最后执行日期（仅用于监控，不再作为「每天只跑一次」的闸门）
     if executed_any:
-        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
+        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": beijing_date_str()}, beijing_date_str())
 
 
 def main():

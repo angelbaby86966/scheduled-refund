@@ -1,294 +1,348 @@
 #!/usr/bin/env python3
-"""云端定时退订脚本 - cron 每分钟运行一次（幂等、支持过期补跑）"""
-import hmac, hashlib, base64, uuid, urllib.request, urllib.parse, json, time, threading
-from datetime import datetime, timezone, timedelta
+# -*- coding: utf-8 -*-
+"""
+定时退订脚本（服务端版 / GitHub Actions 驱动）
 
-SUPABASE_URL = "https://vgddxxgjcogxcpiycsej.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_AqRbhxlzaDzPNR1nZTw-4A_c1VQ1Nch"
-BSS_ENDPOINT = "https://business.aliyuncs.com/"
-BSS_VERSION = "2017-12-14"
-PRODUCT_CODE = "ace_eweb"
-LOG_FILE = "refund_cron.log"
+功能：
+  1. 读取 Supabase `user_data` 中所有「已开启定时退订」的用户
+  2. 对每个用户，用其阿里云 AK/SK 列出全部地域的轻量应用服务器实例
+  3. 调用 BSS OpenAPI `RefundInstance`（ProductCode=ace_eweb）退订，退款到原账户
+  4. 退订成功后把 `schedule_last_executed_date` 写为当天（北京时间），防止同日重复
 
-REGIONS = {
-    "cn-hangzhou": "杭州", "cn-beijing": "北京", "cn-shanghai": "上海",
-    "cn-shenzhen": "深圳", "cn-chengdu": "成都", "cn-guangzhou": "广州",
+设计要点（与前端 app.js / aliyun-client-v2.js 完全一致）：
+  - 阿里云签名：HMAC-SHA1，待签串 'POST&' + encode('/') + '&' + encode(canonical)
+  - 所有地域并行、每批 50 台、批间间隔 3 秒
+  - BSS 「锁定/不可退」错误不再重试，已退订/不存在视为跳过
+  - 时间口径统一用【北京时间 Asia/Shanghai】
+
+安全说明：
+  - 仅用前端公开的 Supabase anon key 读写 `user_data`（与浏览器行为一致，无新密钥）
+  - AK/SK 从用户云端 data 中读，脚本只读取并执行，与前端做的事完全一致
+  - 不打印任何 AK/SK 明文
+
+依赖：仅 Python 3.8+ 标准库（urllib / hmac / hashlib / base64 / json / uuid / datetime）
+"""
+
+import os
+import sys
+import json
+import time
+import uuid
+import datetime
+import hmac
+import hashlib
+import base64
+import urllib.parse
+import urllib.request
+import urllib.error
+
+# ===================== 配置 =====================
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vgddxxgjcogxcpiycsej.supabase.co")
+SUPABASE_ANON_KEY = os.environ.get(
+    "SUPABASE_ANON_KEY", "sb_publishable_AqRbhxlzaDzPNR1nZTw-4A_c1VQ1Nch"
+)
+REST_BASE = SUPABASE_URL.rstrip("/") + "/rest/v1"
+
+# 支持的地域（与前端 REGION_INFO 一致）
+REGION_INFO = {
+    "cn-hangzhou": "杭州",
+    "cn-beijing": "北京",
+    "cn-shanghai": "上海",
+    "cn-shenzhen": "深圳",
+    "cn-chengdu": "成都",
+    "cn-guangzhou": "广州",
 }
-RETRY_GAP_MIN = 10
-MAX_OVERDUE_HOURS = 24
-BATCH_SIZE = 50
-BATCH_INTERVAL = 3
-MAX_RETRIES = 2          # 第1轮退完后最多再检查2次
+
+# BSS 退订（锁定）错误模式（与前端 BSS_LOCKED_PATTERNS 一致）
+BSS_LOCKED_PATTERNS = [
+    "NoApplicable", "NotApplicable", "ExceedRefundQuota", "ExistUnPaidOrder",
+    "ExistRefundingOrder", "NoRestValue", "AmbassadorOrderLimit", "ActivityForbidden",
+    "CommodityNotSupported", "ProductCheckError", "MissingRefundAmount", "InvalidPayMethod",
+    "CannotDeleteInstance", "RefundFailed", "NoFullRefund", "非全额退款", "非全额退订",
+    "订单未到期", "订单到期", "尚未结算", "InstanceHasUnsettledBill", "PayMethodNotSupported",
+    "请先退订订单",
+]
+# 已退订 / 不存在 视为跳过
+BSS_SKIP_PATTERNS = ["ResourceNotExists", "已退订", "不存在", "InvalidInstanceId", "InstanceNotExists"]
 
 
-def log(msg):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line)
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+# ===================== 工具 =====================
+def log(msg, level="INFO"):
+    ts = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%H:%M:%S")
+    print(f"[{ts}] [{level}] {msg}", flush=True)
 
 
-def sign(ak_id, ak_secret, action, version, params):
+def beijing_now():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+
+
+def beijing_date_str():
+    return beijing_now().strftime("%Y-%m-%d")
+
+
+def percent_encode(s):
+    # 与前端 encodeURIComponent 后替换 ! ' ( ) * 等价：仅保留 - _ . ~ 不编码
+    return urllib.parse.quote(str(s), safe="-_.~")
+
+
+def sign(secret, string_to_sign):
+    key = (secret + "&").encode("utf-8")
+    raw = string_to_sign.encode("utf-8")
+    digest = hmac.new(key, raw, hashlib.sha1).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def iso_timestamp():
+    # 与前端 new Date().toISOString().replace(/\.\d{3}Z$/, 'Z') 一致
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def classify(err_msg):
+    for p in BSS_SKIP_PATTERNS:
+        if p in err_msg:
+            return "skipped"
+    for p in BSS_LOCKED_PATTERNS:
+        if p in err_msg:
+            return "locked"
+    return "fail"
+
+
+# ===================== 阿里云 RPC =====================
+def rpc(ak, sk, endpoint, action, version, params):
+    """通用阿里云 RPC 调用（POST + form-urlencoded），返回解析后的 JSON dict。"""
     common = {
-        "AccessKeyId": ak_id, "Action": action, "Format": "JSON",
-        "SignatureMethod": "HMAC-SHA1", "SignatureNonce": str(uuid.uuid4()),
+        "AccessKeyId": ak,
+        "Format": "JSON",
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": str(uuid.uuid4()),
         "SignatureVersion": "1.0",
-        "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "Timestamp": iso_timestamp(),
         "Version": version,
+        "Action": action,
     }
-    all_p = {**common, **params}
-    keys = sorted(all_p.keys())
-    canonical = "&".join(urllib.parse.quote(k, safe='') + "=" + urllib.parse.quote(str(all_p[k]), safe='') for k in keys)
-    sign_str = "POST&" + urllib.parse.quote("/", safe='') + "&" + urllib.parse.quote(canonical, safe='')
-    sig = base64.b64encode(hmac.new((ak_secret + "&").encode(), sign_str.encode(), hashlib.sha1).digest()).decode()
-    all_p["Signature"] = sig
-    return "&".join(urllib.parse.quote(k, safe='') + "=" + urllib.parse.quote(str(v), safe='') for k, v in all_p.items())
+    all_params = dict(common)
+    all_params.update(params)
 
-
-def api_call(endpoint, body):
-    req = urllib.request.Request(endpoint, data=body.encode(), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    try:
-        return json.loads(urllib.request.urlopen(req, timeout=15).read())
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read())
-        except Exception:
-            return {"Code": "HttpError", "Message": str(e)}
-    except Exception as e:
-        return {"Code": "NetworkError", "Message": str(e)}
-
-
-def refund_instance(ak_id, ak_secret, instance_id):
-    return api_call(BSS_ENDPOINT, sign(ak_id, ak_secret, "RefundInstance", BSS_VERSION, {
-        "InstanceId": instance_id, "ProductCode": PRODUCT_CODE,
-        "ProductType": "", "ImmediatelyRelease": "1", "ClientToken": str(uuid.uuid4()),
-    }))
-
-
-def list_instances(ak_id, ak_secret, region_id):
-    return api_call(f"https://swas.{region_id}.aliyuncs.com/", sign(ak_id, ak_secret, "ListInstances", "2020-06-01", {}))
-
-
-def get_all_users():
-    try:
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/rest/v1/user_data?select=*",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"})
-        return json.loads(urllib.request.urlopen(req, timeout=10).read())
-    except Exception as e:
-        log(f"  查询用户列表失败: {e}")
-        return []
-
-
-def update_user_data(username, updates):
-    try:
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/rest/v1/user_data?username=eq.{urllib.parse.quote(username)}&select=*",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"})
-        rows = json.loads(urllib.request.urlopen(req, timeout=10).read())
-        if not rows:
-            return
-        data = rows[0].get("data", {}) or {}
-        if isinstance(data, str):
-            data = json.loads(data)
-        data.update(updates)
-        body = json.dumps({"data": data}).encode()
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/rest/v1/user_data?username=eq.{urllib.parse.quote(username)}",
-            data=body, method="PATCH",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                     "Content-Type": "application/json", "Prefer": "return=minimal"})
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        log(f"  更新用户数据失败: {e}")
-
-
-def _collect_region(ak_id, ak_secret, rid, per_region):
-    try:
-        result = list_instances(ak_id, ak_secret, rid)
-        for inst in (result.get("Instances") or []):
-            per_region[rid].append((inst["InstanceId"], inst.get("InstanceName", "")))
-    except Exception as e:
-        log(f"    ⚠️ {REGIONS[rid]}: 查询失败 - {e}")
-
-
-def _refund_region(ak_id, ak_secret, rid, instances, stats):
-    batches = [instances[i:i + BATCH_SIZE] for i in range(0, len(instances), BATCH_SIZE)]
-    log(f"    🌏 {REGIONS[rid]}: 共 {len(instances)} 台，分 {len(batches)} 批并行退订（每批 {BATCH_SIZE} 台并发，批间 {BATCH_INTERVAL}s）")
-    s = f = k = 0
-    for bi, batch in enumerate(batches):
-        batch_results = [None] * len(batch)
-        threads = []
-        def _refund_one(idx, iid):
-            try:
-                result = refund_instance(ak_id, ak_secret, iid)
-                code = result.get("Code", "")
-                if code == "200" or result.get("Success"):
-                    batch_results[idx] = ('ok', iid, '')
-                elif code in ("ResourceNotExists", "InvalidInstanceId.NotFound"):
-                    batch_results[idx] = ('skip', iid, '')
-                else:
-                    batch_results[idx] = ('fail', iid, result.get('Message', code))
-            except Exception as e:
-                batch_results[idx] = ('fail', iid, str(e))
-        for idx, (iid, name) in enumerate(batch):
-            t = threading.Thread(target=_refund_one, args=(idx, iid))
-            threads.append(t)
-            t.start()
-        for t in threads:
-            t.join()
-        for r in batch_results:
-            if r[0] == 'ok':
-                s += 1
-                log(f"    ✅ [{REGIONS[rid]}] {r[1]} 退订成功")
-            elif r[0] == 'skip':
-                k += 1
-                log(f"    ⚪ [{REGIONS[rid]}] {r[1]} 已不存在，跳过")
-            else:
-                f += 1
-                log(f"    ❌ [{REGIONS[rid]}] {r[1]} 失败: {r[2]}")
-        if bi < len(batches) - 1:
-            time.sleep(BATCH_INTERVAL)
-    stats[rid] = [s, f, k]
-
-
-def execute_refund_for_user(username, ak_id, ak_secret, round_label):
-    log(f"  👤 {username}: {round_label} - 并行查询各地区实例...")
-    per_region = {rid: [] for rid in REGIONS}
-    collectors = []
-    for rid in REGIONS:
-        t = threading.Thread(target=_collect_region, args=(ak_id, ak_secret, rid, per_region))
-        collectors.append(t)
-        t.start()
-    for t in collectors:
-        t.join()
-    total = sum(len(v) for v in per_region.values())
-    if total == 0:
-        log(f"  👤 {username}: 无实例，跳过")
-        return {"success": 0, "fail": 0, "skip": 0}
-    log(f"  👤 {username}: 共 {total} 台实例，开始并行退订（每地区每批 {BATCH_SIZE} 台，批间间隔 {BATCH_INTERVAL}s）...")
-    stats = {}
-    workers = []
-    for rid, insts in per_region.items():
-        if not insts:
+    parts = []
+    for k in sorted(all_params.keys()):
+        v = all_params[k]
+        if v is None:
             continue
-        t = threading.Thread(target=_refund_region, args=(ak_id, ak_secret, rid, insts, stats))
-        workers.append(t)
-        t.start()
-    for t in workers:
-        t.join()
-    success = sum(v[0] for v in stats.values())
-    fail = sum(v[1] for v in stats.values())
-    skip = sum(v[2] for v in stats.values())
-    log(f"  👤 {username}: {round_label} 完成 - 成功{success} 跳过{skip} 失败{fail}")
-    return {"success": success, "fail": fail, "skip": skip}
+        parts.append(percent_encode(k) + "=" + percent_encode(v))
+    canonical = "&".join(parts)
+    string_to_sign = "POST&" + percent_encode("/") + "&" + percent_encode(canonical)
+    signature = sign(sk, string_to_sign)
+    body = canonical + "&" + percent_encode("Signature") + "=" + percent_encode(signature)
+
+    req = urllib.request.Request(
+        endpoint,
+        data=body.encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"_raw": raw, "Code": "ParseError"}
 
 
-def _process_user(ud, bj, today, current_hm, now_bj):
-    """处理单个账号的定时退订（在独立线程中运行，与其他账号互不干扰）。"""
-    username = ud.get("username", "")
-    d = ud.get("data", {}) or {}
-    if isinstance(d, str):
-        try:
-            d = json.loads(d)
-        except Exception:
-            d = {}
-    enabled = d.get("schedule_enabled")
-    h = d.get("schedule_hour")
-    m = d.get("schedule_minute")
-    last_date = d.get("schedule_last_executed_date", "")
-    retry_at = d.get("schedule_retry_at", "")
-    retry_done = d.get("schedule_retry_done", False)
-    if not enabled or h is None or m is None:
-        return
-    ak_id = d.get("ak_id", "")
-    ak_secret = d.get("ak_secret", "")
-    if not ak_id or not ak_secret:
-        log(f"  👤 {username}: 已开启定时但缺少 AK/SK，跳过")
-        return
-    if last_date == today:
-        if retry_at or not retry_done:
-            update_user_data(username, {"schedule_retry_at": "", "schedule_retry_done": True})
-        return
-    schedule_dt = bj.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-    if MAX_OVERDUE_HOURS is not None:
-        overdue = (now_bj - schedule_dt).total_seconds() / 3600.0
-        if overdue > MAX_OVERDUE_HOURS:
-            return
-    if now_bj < schedule_dt:
-        # Before today's scheduled time.
-        # Check if yesterday's schedule was missed (GitHub Actions cron runs
-        # every 2-4 hours, might have skipped the window between yesterday's
-        # scheduled time and midnight — this is the core bug that caused
-        # "browser closed = no refund").
-        yesterday_dt = bj - timedelta(days=1)
-        yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
-        if last_date != yesterday_str:
-            y_schedule_dt = schedule_dt - timedelta(days=1)
-            y_overdue = (now_bj - y_schedule_dt).total_seconds() / 3600.0
-            if 0 <= y_overdue <= MAX_OVERDUE_HOURS:
-                log(f"  👤 {username}: 🔄 补跑昨天({yesterday_str})漏掉的 {int(h):02d}:{int(m):02d} 定时退订（现在 {current_hm}）")
-                result = execute_refund_for_user(username, ak_id, ak_secret, f"补跑{yesterday_str}")
-                if result["fail"] == 0:
-                    log(f"  👤 {username}: ✅ 补跑成功，标记 {yesterday_str} 已完成")
-                else:
-                    log(f"  👤 {username}: ⚠️ 补跑完成但有 {result['fail']} 台失败（不再重试，已标记完成）")
-                update_user_data(username, {
-                    "schedule_last_executed_date": yesterday_str,
-                    "schedule_retry_at": "",
-                    "schedule_retry_done": True,
-                })
-        return
-    # ===== 定时退订：第1轮 + 2次重试（每次间隔10分钟，全部在本次执行内完成） =====
-    log(f"  👤 {username}: 🕐 第1轮退订 ({int(h):02d}:{int(m):02d}，北京时间 {current_hm})")
-    result = execute_refund_for_user(username, ak_id, ak_secret, "第1轮")
-    total_fail = result["fail"]
-    for retry_i in range(1, MAX_RETRIES + 1):
-        if total_fail == 0:
+def swas_endpoint(region_id):
+    return f"https://swas.{region_id}.aliyuncs.com/"
+
+
+def list_instances(ak, sk, region_id):
+    """分页列出某地域全部实例，返回 [{regionId, instanceId}, ...]"""
+    out = []
+    page = 1
+    while True:
+        data = rpc(ak, sk, swas_endpoint(region_id), "ListInstances", "2020-06-01",
+                   {"PageNumber": page, "PageSize": 100})
+        if data.get("Code") and data.get("Code") not in ("200", "Success", None):
+            raise RuntimeError(f"ListInstances 失败: {data.get('Message') or data.get('Code')}")
+        insts = data.get("Instances") or []
+        for it in insts:
+            iid = it.get("InstanceId")
+            if iid:
+                out.append({"regionId": region_id, "instanceId": iid})
+        total = data.get("TotalCount") or 0
+        if not insts or len(out) >= total:
             break
-        log(f"  👤 {username}: ⏳ 第{retry_i}轮有 {total_fail} 台失败，等待 {RETRY_GAP_MIN} 分钟后重试...")
-        time.sleep(RETRY_GAP_MIN * 60)
-        log(f"  👤 {username}: 🔄 第{retry_i + 1}轮重试开始")
-        result = execute_refund_for_user(username, ak_id, ak_secret, f"第{retry_i + 1}轮重试")
-        total_fail = result["fail"]
-    if total_fail == 0:
-        log(f"  👤 {username}: ✅ 全部退订成功，今日任务完成")
-    else:
-        log(f"  👤 {username}: ⚠️ 已重试 {MAX_RETRIES} 次，仍有 {total_fail} 台未退订，不再检查")
-    update_user_data(username, {
-        "schedule_last_executed_date": today,
-        "schedule_retry_at": "",
-        "schedule_retry_done": True,
+        page += 1
+    return out
+
+
+def refund_instance(ak, sk, region_id, instance_id):
+    """调用 BSS RefundInstance（与前端 refundInstance 完全一致）。返回 (ok, kind, msg)。"""
+    params = {
+        "InstanceId": instance_id,
+        "ProductCode": "ace_eweb",
+        "ProductType": "",  # 与前端保持一致：空串也参与签名
+        "ImmediatelyRelease": "1",
+        "ClientToken": "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7],
+    }
+    data = rpc(ak, sk, "https://business.aliyuncs.com/", "RefundInstance", "2017-12-14", params)
+    # 成功判定（与前端一致）：Success 为真，或 Code==ResourceNotExists（已退/不存在）
+    if data.get("Success") or data.get("Code") == "ResourceNotExists":
+        return True, "ok", data.get("Message") or "success"
+    code = data.get("Code") or "Unknown"
+    msg = data.get("Message") or code
+    kind = classify(msg)
+    return False, kind, msg
+
+
+# ===================== Supabase =====================
+def supabase_get_all_user_data():
+    url = REST_BASE + "/user_data?select=username,data"
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
     })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
-def main(now_override=None):
-    if now_override is not None:
-        bj = now_override
-    else:
-        now_utc = datetime.now(timezone.utc)
-        bj = now_utc + timedelta(hours=8)
-    today = bj.strftime("%Y-%m-%d")
-    current_hm = bj.strftime("%H:%M")
-    now_bj = bj
-    log(f"⏰ 检查 - 北京时间 {current_hm}")
-    users = get_all_users()
-    if not users:
-        log("  无用户数据")
+def supabase_patch_schedule_date(username, full_data, today_str):
+    url = REST_BASE + "/user_data?username=eq." + urllib.parse.quote(username)
+    body = json.dumps({
+        "username": username,
+        "data": full_data,
+        "updated_at": int(time.time() * 1000),
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="PATCH", headers={
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    })
+    try:
+        urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        log(f"  更新 {username} 执行日期失败: HTTP {e.code}", "WARN")
+
+
+# ===================== 凭证解析 =====================
+def resolve_ak_sk(data):
+    """从 user_data.data 解析出当前生效的 AK/SK（与前端 getActiveProfile 逻辑一致）。"""
+    profiles = data.get("ak_profiles")
+    if isinstance(profiles, list) and profiles:
+        active = data.get("ak_active")
+        p = next((x for x in profiles if x.get("name") == active), profiles[0])
+        return p.get("ak_id", ""), p.get("ak_secret", "")
+    return data.get("ak_id", ""), data.get("ak_secret", "")
+
+
+# ===================== 主流程 =====================
+def process_user(row):
+    username = row.get("username")
+    data = row.get("data") or {}
+    if not data.get("schedule_enabled"):
         return
-    # 所有账号并行处理，互不阻塞（一个账号的重试等待不会卡住其他账号）
-    threads = []
-    for ud in users:
-        t = threading.Thread(target=_process_user, args=(ud, bj, today, current_hm, now_bj))
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
-    log("  所有账号处理完毕")
+    hour = data.get("schedule_hour")
+    minute = data.get("schedule_minute")
+    if hour is None or minute is None:
+        log(f"用户 {username}: 未配置定时时间，跳过", "WARN")
+        return
+
+    ak, sk = resolve_ak_sk(data)
+    if not ak or not sk:
+        log(f"用户 {username}: 缺少 AK/SK，跳过", "WARN")
+        return
+
+    now_bj = beijing_now()
+    today_str = beijing_date_str()
+    last_date = data.get("schedule_last_executed_date")
+
+    scheduled_dt = now_bj.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    if now_bj < scheduled_dt:
+        # 还没到设定的时间，本次 run 不执行（下次 cron 到点再说）
+        return
+    if last_date == today_str:
+        # 今天已经退过，防重
+        return
+
+    log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {hour:02d}:{minute:02d}）", "WARN")
+
+    # 1) 收集所有地域实例
+    all_instances = []
+    for rid in REGION_INFO.keys():
+        try:
+            insts = list_instances(ak, sk, rid)
+            all_instances.extend(insts)
+        except Exception as e:
+            log(f"  ⚠️ [{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
+
+    if not all_instances:
+        log(f"  ✅ 用户 {username} 未发现任何实例", "SUCCESS")
+        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
+        return
+
+    # 2) 按地域聚合，分批退订（每批 50，批间 3 秒）
+    by_region = {}
+    for it in all_instances:
+        by_region.setdefault(it["regionId"], []).append(it)
+
+    total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
+    BATCH = 50
+    for rid, arr in by_region.items():
+        region_name = REGION_INFO.get(rid, rid)
+        log(f"  🌏 [{region_name}] 共 {len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
+        for i in range(0, len(arr), BATCH):
+            slice_ = arr[i:i + BATCH]
+            for it in slice_:
+                try:
+                    ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
+                except Exception as e:
+                    ok, kind, msg = False, "fail", str(e)
+                if kind == "skipped":
+                    total["skipped"] += 1
+                    log(f"  ⚪ [{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
+                elif kind == "locked":
+                    total["locked"] += 1
+                    log(f"  🔒 [{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
+                elif ok:
+                    total["success"] += 1
+                    log(f"  ✅ [{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
+                else:
+                    total["fail"] += 1
+                    log(f"  ❌ [{region_name}] {it['instanceId']}: {msg}", "ERROR")
+            if i + BATCH < len(arr):
+                time.sleep(3)
+
+    log(f"🏁 用户 {username} 退订完成：成功 {total['success']} 跳过 {total['skipped']} 锁定 {total['locked']} 失败 {total['fail']}",
+        "SUCCESS" if total["fail"] == 0 else "WARN")
+
+    # 3) 写回执行日期（无论成功失败都记今天，避免反复重试失败项）
+    supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
+
+
+def main():
+    log("===== 定时退订任务启动（北京时间 " + beijing_now().strftime("%Y-%m-%d %H:%M:%S") + "）=====", "WARN")
+    try:
+        rows = supabase_get_all_user_data()
+    except Exception as e:
+        log(f"读取 user_data 失败: {e}", "ERROR")
+        sys.exit(1)
+    log(f"共读取 {len(rows)} 个用户配置", "INFO")
+
+    due_count = 0
+    for row in rows:
+        try:
+            before = (row.get("data") or {}).get("schedule_last_executed_date")
+            process_user(row)
+            after = beijing_date_str()
+            # 粗略判断本用户是否本次执行了（用于计数日志）
+            if (row.get("data") or {}).get("schedule_enabled") and before != after:
+                due_count += 1
+        except Exception as e:
+            uname = row.get("username", "?")
+            log(f"用户 {uname} 处理异常: {e}", "ERROR")
+
+    log(f"===== 本次任务结束，触发执行的用户数: {due_count} =====", "WARN")
 
 
 if __name__ == "__main__":

@@ -237,6 +237,74 @@ def resolve_ak_sk(data):
 
 
 # ===================== 主流程 =====================
+def build_credentials(data):
+    """返回 [(label, ak, sk), ...]：优先遍历 ak_profiles 全部凭证，否则退回 legacy 单凭证。"""
+    creds = []
+    profiles = data.get("ak_profiles")
+    if isinstance(profiles, list):
+        for p in profiles:
+            ak = (p.get("ak_id") or "").strip()
+            sk = (p.get("ak_secret") or "").strip()
+            if ak and sk:
+                creds.append((p.get("name") or "?", ak, sk))
+    if not creds:
+        ak = (data.get("ak_id") or "").strip()
+        sk = (data.get("ak_secret") or "").strip()
+        if ak and sk:
+            creds.append(("legacy", ak, sk))
+    return creds
+
+
+def refund_credential(username, label, ak, sk):
+    """退订单个凭证下的全部地域实例，返回 total 字典（异常由调用方捕获）。"""
+    all_instances = []
+    for rid in REGION_INFO.keys():
+        try:
+            insts = list_instances(ak, sk, rid)
+            all_instances.extend(insts)
+        except Exception as e:
+            log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
+
+    if not all_instances:
+        log(f"  ✅ 凭证「{label}」未发现任何实例", "SUCCESS")
+        return {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
+
+    by_region = {}
+    for it in all_instances:
+        by_region.setdefault(it["regionId"], []).append(it)
+
+    total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
+    BATCH = 50
+    for rid, arr in by_region.items():
+        region_name = REGION_INFO.get(rid, rid)
+        log(f"  🌏 [{label}][{region_name}] 共 {len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
+        for i in range(0, len(arr), BATCH):
+            slice_ = arr[i:i + BATCH]
+            for it in slice_:
+                try:
+                    ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
+                except Exception as e:
+                    ok, kind, msg = False, "fail", str(e)
+                if kind == "skipped":
+                    total["skipped"] += 1
+                    log(f"  ⚪ [{label}][{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
+                elif kind == "locked":
+                    total["locked"] += 1
+                    log(f"  🔒 [{label}][{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
+                elif ok:
+                    total["success"] += 1
+                    log(f"  ✅ [{label}][{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
+                else:
+                    total["fail"] += 1
+                    log(f"  ❌ [{label}][{region_name}] {it['instanceId']}: {msg}", "ERROR")
+            if i + BATCH < len(arr):
+                time.sleep(3)
+
+    log(f"🏁 凭证「{label}」退订完成：成功 {total['success']} 跳过 {total['skipped']} 锁定 {total['locked']} 失败 {total['fail']}",
+        "SUCCESS" if total["fail"] == 0 else "WARN")
+    return total
+
+
 def process_user(row):
     username = row.get("username")
     data = row.get("data") or {}
@@ -246,11 +314,6 @@ def process_user(row):
     minute = data.get("schedule_minute")
     if hour is None or minute is None:
         log(f"用户 {username}: 未配置定时时间，跳过", "WARN")
-        return
-
-    ak, sk = resolve_ak_sk(data)
-    if not ak or not sk:
-        log(f"用户 {username}: 缺少 AK/SK，跳过", "WARN")
         return
 
     now_bj = beijing_now()
@@ -265,59 +328,30 @@ def process_user(row):
         # 今天已经退过，防重
         return
 
-    log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {hour:02d}:{minute:02d}）", "WARN")
-
-    # 1) 收集所有地域实例
-    all_instances = []
-    for rid in REGION_INFO.keys():
-        try:
-            insts = list_instances(ak, sk, rid)
-            all_instances.extend(insts)
-        except Exception as e:
-            log(f"  ⚠️ [{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
-
-    if not all_instances:
-        log(f"  ✅ 用户 {username} 未发现任何实例", "SUCCESS")
-        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
+    creds = build_credentials(data)
+    if not creds:
+        log(f"用户 {username}: 缺少 AK/SK，跳过", "WARN")
         return
 
-    # 2) 按地域聚合，分批退订（每批 50，批间 3 秒）
-    by_region = {}
-    for it in all_instances:
-        by_region.setdefault(it["regionId"], []).append(it)
+    log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {int(hour):02d}:{int(minute):02d}），共 {len(creds)} 个凭证", "WARN")
 
-    total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-    BATCH = 50
-    for rid, arr in by_region.items():
-        region_name = REGION_INFO.get(rid, rid)
-        log(f"  🌏 [{region_name}] 共 {len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
-        for i in range(0, len(arr), BATCH):
-            slice_ = arr[i:i + BATCH]
-            for it in slice_:
-                try:
-                    ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
-                except Exception as e:
-                    ok, kind, msg = False, "fail", str(e)
-                if kind == "skipped":
-                    total["skipped"] += 1
-                    log(f"  ⚪ [{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
-                elif kind == "locked":
-                    total["locked"] += 1
-                    log(f"  🔒 [{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
-                elif ok:
-                    total["success"] += 1
-                    log(f"  ✅ [{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
-                else:
-                    total["fail"] += 1
-                    log(f"  ❌ [{region_name}] {it['instanceId']}: {msg}", "ERROR")
-            if i + BATCH < len(arr):
-                time.sleep(3)
+    grand = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
+    executed_any = False
+    for (label, ak, sk) in creds:
+        try:
+            t = refund_credential(username, label, ak, sk)
+            executed_any = True
+            for k in grand:
+                grand[k] += t.get(k, 0)
+        except Exception as e:
+            log(f"  ❌ 凭证「{label}」处理异常: {e}", "ERROR")
 
-    log(f"🏁 用户 {username} 退订完成：成功 {total['success']} 跳过 {total['skipped']} 锁定 {total['locked']} 失败 {total['fail']}",
-        "SUCCESS" if total["fail"] == 0 else "WARN")
+    log(f"🏁 用户 {username} 全部凭证退订完成：成功 {grand['success']} 跳过 {grand['skipped']} 锁定 {grand['locked']} 失败 {grand['fail']}",
+        "SUCCESS" if (grand["fail"] == 0 and executed_any) else ("WARN" if executed_any else "ERROR"))
 
-    # 3) 写回执行日期（无论成功失败都记今天，避免反复重试失败项）
-    supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
+    # 写回执行日期（无论成功失败都记今天，避免反复重试失败项）
+    if executed_any:
+        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": today_str}, today_str)
 
 
 def main():

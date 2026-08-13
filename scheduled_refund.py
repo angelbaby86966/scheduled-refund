@@ -238,20 +238,28 @@ def resolve_ak_sk(data):
 
 # ===================== 主流程 =====================
 def build_credentials(data):
-    """返回 [(label, ak, sk), ...]：优先遍历 ak_profiles 全部凭证，否则退回 legacy 单凭证。"""
+    """返回 [(label, ak, sk), ...]：遍历 ak_profiles 全部凭证并按 AK 去重（重复凭证只退一次），否则退回 legacy 单凭证。"""
     creds = []
+    seen_ak = set()
+    dup = 0
     profiles = data.get("ak_profiles")
     if isinstance(profiles, list):
         for p in profiles:
             ak = (p.get("ak_id") or "").strip()
             sk = (p.get("ak_secret") or "").strip()
             if ak and sk:
+                if ak in seen_ak:
+                    dup += 1
+                    continue
+                seen_ak.add(ak)
                 creds.append((p.get("name") or "?", ak, sk))
     if not creds:
         ak = (data.get("ak_id") or "").strip()
         sk = (data.get("ak_secret") or "").strip()
         if ak and sk:
             creds.append(("legacy", ak, sk))
+    if dup:
+        log(f"  ⚠️ 该账号存在 {dup} 个重复凭证（相同 AK），已去重，仅退一次", "WARN")
     return creds
 
 

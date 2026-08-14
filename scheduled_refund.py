@@ -32,6 +32,7 @@ import datetime
 import hmac
 import hashlib
 import base64
+import fcntl
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -366,6 +367,15 @@ def process_user(row):
 
 
 def main():
+    # 防重叠锁：同一时刻只允许一个实例在跑（定时任务可能被上一次还没结束的 tick 再次触发）
+    lock_path = "/tmp/scheduled-refund.lock"
+    try:
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        print("[LOCK] 已有实例在运行，本次跳过", flush=True)
+        sys.exit(0)
+
     log("===== 定时退订任务启动（北京时间 " + beijing_now().strftime("%Y-%m-%d %H:%M:%S") + "）=====", "WARN")
     try:
         rows = supabase_get_all_user_data()

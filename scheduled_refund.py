@@ -224,12 +224,19 @@ def list_instances(ak, sk, region_id):
     return out
 
 
+def stable_client_token(region_id, instance_id):
+    """按 region+instance 派生的稳定幂等 Token：同一实例在任意进程/轮次/定时执行中永远用同一
+    ClientToken，使阿里云服务端将其视为同一请求（保留期内幂等），杜绝网络抖动/进程重启/定时
+    重复执行导致的重复退款。这是「幂等去重兜底」的核心。"""
+    return "wb-" + hashlib.sha1((region_id + ":" + instance_id).encode("utf-8")).hexdigest()[:16]
+
+
 def refund_instance(ak, sk, region_id, instance_id, client_token=None):
     """调用 BSS RefundInstance（与前端 refundInstance 完全一致）。返回 (ok, kind, msg)。
-    client_token 可传入以复用（限流重试时保持幂等，避免重复退款）。
+    client_token 可传入以复用；默认按 region+instance 派生稳定 Token，跨执行幂等。
     """
     if client_token is None:
-        client_token = "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7]
+        client_token = stable_client_token(region_id, instance_id)
     params = {
         "InstanceId": instance_id,
         "ProductCode": "ace_eweb",
@@ -257,7 +264,8 @@ def refund_instance_retry(ak, sk, region_id, instance_id, max_retry=None):
     返回 (ok, kind, msg)。"""
     if max_retry is None:
         max_retry = REFUND_MAX_RETRY
-    client_token = "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7]
+    # 稳定幂等 Token：按 region+instance 派生，跨轮次/跨进程/跨定时执行同一实例永远同一 token
+    client_token = stable_client_token(region_id, instance_id)
     backoff = 1.0
     last_kind, last_msg = "fail", "unknown"
     for attempt in range(1, max_retry + 1):

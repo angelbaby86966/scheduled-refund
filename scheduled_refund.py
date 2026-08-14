@@ -264,50 +264,64 @@ def build_credentials(data):
     return creds
 
 
-def refund_credential(username, label, ak, sk):
-    """退订单个凭证下的全部地域实例，返回 total 字典（异常由调用方捕获）。"""
-    all_instances = []
-    for rid in REGION_INFO.keys():
-        try:
-            insts = list_instances(ak, sk, rid)
-            all_instances.extend(insts)
-        except Exception as e:
-            log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
-
-    if not all_instances:
-        log(f"  ✅ 凭证「{label}」未发现任何实例", "SUCCESS")
-        return {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-
-    by_region = {}
-    for it in all_instances:
-        by_region.setdefault(it["regionId"], []).append(it)
-
+def drain_credential(username, label, ak, sk, max_rounds=12):
+    """退单凭证：每轮「列出全部地域实例 → 批量退订 → 复查」。
+    直到该凭证名下再无实例，才返回 —— 即「先把这一个凭证退干净，再退下一个凭证」，
+    避免退到一半被窗口关闭打断导致同账号内有的凭证退完、有的没退。
+    """
     total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-    BATCH = 50
-    for rid, arr in by_region.items():
-        region_name = REGION_INFO.get(rid, rid)
-        log(f"  🌏 [{label}][{region_name}] 共 {len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
-        for i in range(0, len(arr), BATCH):
-            slice_ = arr[i:i + BATCH]
-            for it in slice_:
-                try:
-                    ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
-                except Exception as e:
-                    ok, kind, msg = False, "fail", str(e)
-                if kind == "skipped":
-                    total["skipped"] += 1
-                    log(f"  ⚪ [{label}][{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
-                elif kind == "locked":
-                    total["locked"] += 1
-                    log(f"  🔒 [{label}][{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
-                elif ok:
-                    total["success"] += 1
-                    log(f"  ✅ [{label}][{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
-                else:
-                    total["fail"] += 1
-                    log(f"  ❌ [{label}][{region_name}] {it['instanceId']}: {msg}", "ERROR")
-            if i + BATCH < len(arr):
-                time.sleep(3)
+    for rnd in range(1, max_rounds + 1):
+        # 1) 列出本轮该凭证的全部实例
+        all_instances = []
+        for rid in REGION_INFO.keys():
+            try:
+                insts = list_instances(ak, sk, rid)
+                all_instances.extend(insts)
+            except Exception as e:
+                log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
+
+        if not all_instances:
+            log(f"  ✅ 凭证「{label}」第 {rnd} 轮复查：已无实例（退订完成）", "SUCCESS")
+            break
+
+        # 2) 批量退订本轮查到的实例
+        by_region = {}
+        for it in all_instances:
+            by_region.setdefault(it["regionId"], []).append(it)
+
+        round_success = 0
+        BATCH = 50
+        for rid, arr in by_region.items():
+            region_name = REGION_INFO.get(rid, rid)
+            log(f"  🌏 [{label}][{region_name}] 第 {rnd} 轮：{len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
+            for i in range(0, len(arr), BATCH):
+                slice_ = arr[i:i + BATCH]
+                for it in slice_:
+                    try:
+                        ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
+                    except Exception as e:
+                        ok, kind, msg = False, "fail", str(e)
+                    if kind == "skipped":
+                        total["skipped"] += 1
+                        log(f"  ⚪ [{label}][{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
+                    elif kind == "locked":
+                        total["locked"] += 1
+                        log(f"  🔒 [{label}][{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
+                    elif ok:
+                        total["success"] += 1
+                        round_success += 1
+                        log(f"  ✅ [{label}][{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
+                    else:
+                        total["fail"] += 1
+                        log(f"  ❌ [{label}][{region_name}] {it['instanceId']}: {msg}", "ERROR")
+                if i + BATCH < len(arr):
+                    time.sleep(3)
+
+        # 3) 复查：本轮退完，先让阿里云侧状态刷新，下一轮再列出看是否还有剩余
+        log(f"  🔁 凭证「{label}」第 {rnd} 轮：退订 {round_success} 台，累计成功 {total['success']}（继续复查…）", "INFO")
+        time.sleep(2)
+    else:
+        log(f"  ⚠️ 凭证「{label}」达到最大轮数 {max_rounds} 仍有实例，停止本轮以免死循环", "WARN")
 
     log(f"🏁 凭证「{label}」退订完成：成功 {total['success']} 跳过 {total['skipped']} 锁定 {total['locked']} 失败 {total['fail']}",
         "SUCCESS" if total["fail"] == 0 else "WARN")
@@ -351,7 +365,8 @@ def process_user(row):
     executed_any = False
     for (label, ak, sk) in creds:
         try:
-            t = refund_credential(username, label, ak, sk)
+            # 逐个凭证「退干净再退下一个」：drain_credential 内部会复查直到该凭证无实例
+            t = drain_credential(username, label, ak, sk)
             executed_any = True
             for k in grand:
                 grand[k] += t.get(k, 0)

@@ -11,7 +11,9 @@
 
 设计要点（与前端 app.js / aliyun-client-v2.js 完全一致）：
   - 阿里云签名：HMAC-SHA1，待签串 'POST&' + encode('/') + '&' + encode(canonical)
-  - 所有地域并行、每批 50 台、批间间隔 3 秒
+  - 同一账号逐凭证「列→退→复查」直到退干净再退下一个；凭证内退款用【有界并发】提速
+  - 并发控制：线程池 max_workers 封顶 + 令牌桶平滑到 ~BSS_QPS 次/秒，避免触发阿里云 Throttling 限流
+  - 限流/服务不可用自动指数退避重试，且复用同一 ClientToken 保证幂等（不会重复退款）
   - BSS 「锁定/不可退」错误不再重试，已退订/不存在视为跳过
   - 时间口径统一用【北京时间 Asia/Shanghai】
 
@@ -28,6 +30,7 @@ import sys
 import json
 import time
 import uuid
+import threading
 import datetime
 import hmac
 import hashlib
@@ -36,6 +39,7 @@ import fcntl
 import urllib.parse
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ===================== 配置 =====================
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vgddxxgjcogxcpiycsej.supabase.co")
@@ -66,11 +70,54 @@ BSS_LOCKED_PATTERNS = [
 # 已退订 / 不存在 视为跳过
 BSS_SKIP_PATTERNS = ["ResourceNotExists", "已退订", "不存在", "InvalidInstanceId", "InstanceNotExists"]
 
+# ===================== 并发 / 限流配置 =====================
+# 退订请求同时最多在飞的数量（线程池上限）。阿里云 BSS RefundInstance 同一 AK 有 QPS 上限，
+# 无脑全并行会触发 Throttling；封顶 + 令牌桶即可既提速又不踩限流。
+CONCURRENCY = int(os.environ.get("REFUND_CONCURRENCY", "8"))
+
+# 阿里云 BSS 每秒最多约多少次 RefundInstance（令牌桶平滑目标）。保守取 8，配合退避重试足够稳。
+BSS_QPS = int(os.environ.get("BSS_QPS", "8"))
+
+# 单实例退订遇到限流时的最大重试次数（每次重试复用同一 ClientToken，幂等）
+REFUND_MAX_RETRY = int(os.environ.get("REFUND_MAX_RETRY", "6"))
+
+
+class TokenBucket:
+    """简单令牌桶：平滑请求速率，避免瞬时并发触发服务端限流。线程安全。"""
+
+    def __init__(self, rate, capacity):
+        self.rate = float(rate)          # 每秒补充令牌数
+        self.capacity = float(capacity)  # 桶容量
+        self.tokens = float(capacity)
+        self.last = time.time()
+        self.lock = threading.Lock()
+
+    def acquire(self, n=1):
+        while True:
+            with self.lock:
+                now = time.time()
+                self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+                self.last = now
+                if self.tokens >= n:
+                    self.tokens -= n
+                    return
+                deficit = n - self.tokens
+                sleep_for = deficit / self.rate
+            time.sleep(sleep_for)
+
+
+# BSS RefundInstance 专用令牌桶（全局单例，因同一时刻仅有单一 AK 在处理）
+BSS_BUCKET = TokenBucket(BSS_QPS, BSS_QPS)
+
+# 日志在多线程下也尽量不串行错乱
+_log_lock = threading.Lock()
+
 
 # ===================== 工具 =====================
 def log(msg, level="INFO"):
     ts = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%H:%M:%S")
-    print(f"[{ts}] [{level}] {msg}", flush=True)
+    with _log_lock:
+        print(f"[{ts}] [{level}] {msg}", flush=True)
 
 
 def beijing_now():
@@ -177,14 +224,18 @@ def list_instances(ak, sk, region_id):
     return out
 
 
-def refund_instance(ak, sk, region_id, instance_id):
-    """调用 BSS RefundInstance（与前端 refundInstance 完全一致）。返回 (ok, kind, msg)。"""
+def refund_instance(ak, sk, region_id, instance_id, client_token=None):
+    """调用 BSS RefundInstance（与前端 refundInstance 完全一致）。返回 (ok, kind, msg)。
+    client_token 可传入以复用（限流重试时保持幂等，避免重复退款）。
+    """
+    if client_token is None:
+        client_token = "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7]
     params = {
         "InstanceId": instance_id,
         "ProductCode": "ace_eweb",
         "ProductType": "",  # 与前端保持一致：空串也参与签名
         "ImmediatelyRelease": "1",
-        "ClientToken": "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7],
+        "ClientToken": client_token,
     }
     data = rpc(ak, sk, "https://business.aliyuncs.com/", "RefundInstance", "2017-12-14", params)
     # 成功判定（与前端一致）：Success 为真，或 Code==ResourceNotExists（已退/不存在）
@@ -194,6 +245,39 @@ def refund_instance(ak, sk, region_id, instance_id):
     msg = data.get("Message") or code
     kind = classify(msg)
     return False, kind, msg
+
+
+# 触发退避重试的限流/瞬时错误特征（这类不是业务失败，重试即可，且复用同一 ClientToken 幂等）
+_THROTTLE_HINTS = ("Throttling", "throttled", "ServiceUnavailable",
+                   "Forbidden.RiskControl", "InternalError", "SystemBusy", "RequestTimeout")
+
+
+def refund_instance_retry(ak, sk, region_id, instance_id, max_retry=None):
+    """带限流退避重试的退订。ClientToken 固定，重试幂等，不会重复退款。
+    返回 (ok, kind, msg)。"""
+    if max_retry is None:
+        max_retry = REFUND_MAX_RETRY
+    client_token = "wb-" + str(int(time.time() * 1000)) + "-" + uuid.uuid4().hex[:7]
+    backoff = 1.0
+    last_kind, last_msg = "fail", "unknown"
+    for attempt in range(1, max_retry + 1):
+        # 令牌桶平滑：把 BSS 请求速率限制在 ~BSS_QPS/秒，避免瞬时并发触发 Throttling
+        BSS_BUCKET.acquire()
+        try:
+            ok, kind, msg = refund_instance(ak, sk, region_id, instance_id, client_token)
+        except Exception as e:
+            ok, kind, msg = False, "fail", str(e)
+        last_kind, last_msg = kind, msg
+        if kind in ("ok", "skipped", "locked"):
+            return ok, kind, msg
+        # 限流/服务瞬时不可用：退避重试（仍走令牌桶，复用同一 client_token）
+        if attempt < max_retry and any(h in msg for h in _THROTTLE_HINTS):
+            log(f"    ⏳ 限流重试 {attempt}/{max_retry}: {instance_id} → {msg[:70]}", "WARN")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 20)
+            continue
+        return ok, kind, msg
+    return False, last_kind, last_msg
 
 
 # ===================== Supabase =====================
@@ -265,60 +349,64 @@ def build_credentials(data):
 
 
 def drain_credential(username, label, ak, sk, max_rounds=12):
-    """退单凭证：每轮「列出全部地域实例 → 批量退订 → 复查」。
+    """退单凭证：每轮「并行列出全部地域实例 → 有界并发退订（限流退避重试）→ 复查」。
     直到该凭证名下再无实例，才返回 —— 即「先把这一个凭证退干净，再退下一个凭证」，
     避免退到一半被窗口关闭打断导致同账号内有的凭证退完、有的没退。
+
+    效率与限流的平衡：
+      - 列出实例：6 个地域是独立 endpoint，用线程池并行（低量、安全）。
+      - 退订：线程池 max_workers=CONCURRENCY 封顶，且经 BSS_BUCKET 令牌桶平滑到 ~BSS_QPS/秒，
+        既大幅快于纯串行，又不触发阿里云 Throttling。
+      - 万一被限流：自动指数退避重试，且复用同一 ClientToken 保证幂等（不会重复退款）。
     """
     total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
     for rnd in range(1, max_rounds + 1):
-        # 1) 列出本轮该凭证的全部实例
+        # 1) 并行列出本轮该凭证全部地域实例
         all_instances = []
-        for rid in REGION_INFO.keys():
-            try:
-                insts = list_instances(ak, sk, rid)
-                all_instances.extend(insts)
-            except Exception as e:
-                log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
+        with ThreadPoolExecutor(max_workers=len(REGION_INFO)) as ex:
+            futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in REGION_INFO}
+            for fut in as_completed(futs):
+                rid = futs[fut]
+                try:
+                    all_instances.extend(fut.result())
+                except Exception as e:
+                    log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
 
         if not all_instances:
             log(f"  ✅ 凭证「{label}」第 {rnd} 轮复查：已无实例（退订完成）", "SUCCESS")
             break
 
-        # 2) 批量退订本轮查到的实例
-        by_region = {}
-        for it in all_instances:
-            by_region.setdefault(it["regionId"], []).append(it)
-
+        # 2) 有界并发退订：线程池封顶 + 令牌桶限 QPS + 限流自动退避重试
+        targets = [(it["regionId"], it["instanceId"]) for it in all_instances]
         round_success = 0
-        BATCH = 50
-        for rid, arr in by_region.items():
-            region_name = REGION_INFO.get(rid, rid)
-            log(f"  🌏 [{label}][{region_name}] 第 {rnd} 轮：{len(arr)} 台，分 { (len(arr)+BATCH-1)//BATCH } 批退订", "INFO")
-            for i in range(0, len(arr), BATCH):
-                slice_ = arr[i:i + BATCH]
-                for it in slice_:
-                    try:
-                        ok, kind, msg = refund_instance(ak, sk, rid, it["instanceId"])
-                    except Exception as e:
-                        ok, kind, msg = False, "fail", str(e)
-                    if kind == "skipped":
-                        total["skipped"] += 1
-                        log(f"  ⚪ [{label}][{region_name}] {it['instanceId']}: 已退订/不存在，跳过", "INFO")
-                    elif kind == "locked":
-                        total["locked"] += 1
-                        log(f"  🔒 [{label}][{region_name}] {it['instanceId']}: {msg}（跳过，不再重试）", "WARN")
-                    elif ok:
-                        total["success"] += 1
-                        round_success += 1
-                        log(f"  ✅ [{label}][{region_name}] {it['instanceId']} 退订成功", "SUCCESS")
-                    else:
-                        total["fail"] += 1
-                        log(f"  ❌ [{label}][{region_name}] {it['instanceId']}: {msg}", "ERROR")
-                if i + BATCH < len(arr):
-                    time.sleep(3)
+        regions_seen = {}
+        with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
+            futs = {ex.submit(refund_instance_retry, ak, sk, rid, iid): (rid, iid) for (rid, iid) in targets}
+            for fut in as_completed(futs):
+                rid, iid = futs[fut]
+                try:
+                    ok, kind, msg = fut.result()
+                except Exception as e:
+                    ok, kind, msg = False, "fail", str(e)
+                region_name = REGION_INFO.get(rid, rid)
+                regions_seen[region_name] = regions_seen.get(region_name, 0) + 1
+                if kind == "skipped":
+                    total["skipped"] += 1
+                    log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过", "INFO")
+                elif kind == "locked":
+                    total["locked"] += 1
+                    log(f"  🔒 [{label}][{region_name}] {iid}: {msg}（跳过，不再重试）", "WARN")
+                elif ok:
+                    total["success"] += 1
+                    round_success += 1
+                    log(f"  ✅ [{label}][{region_name}] {iid} 退订成功", "SUCCESS")
+                else:
+                    total["fail"] += 1
+                    log(f"  ❌ [{label}][{region_name}] {iid}: {msg}", "ERROR")
 
         # 3) 复查：本轮退完，先让阿里云侧状态刷新，下一轮再列出看是否还有剩余
-        log(f"  🔁 凭证「{label}」第 {rnd} 轮：退订 {round_success} 台，累计成功 {total['success']}（继续复查…）", "INFO")
+        eff = min(CONCURRENCY, len(targets))
+        log(f"  🔁 凭证「{label}」第 {rnd} 轮：退订 {round_success} 台（并行 {eff} 路），累计成功 {total['success']}（继续复查…）", "INFO")
         time.sleep(2)
     else:
         log(f"  ⚠️ 凭证「{label}」达到最大轮数 {max_rounds} 仍有实例，停止本轮以免死循环", "WARN")

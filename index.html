@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>阿里云云主机批量管理工作台</title>
+  <link rel="stylesheet" href="style.css?v=2">
+<script src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
+<script>
+(function(){
+  try{
+    var beacon=new BeaconAction({
+      appkey:'0WEB06U85YBSLJNL',
+      versionCode:'1.0.0',
+      channelID:'share',
+      delay:1000,
+      sessionDuration:30*60*1000,
+      isOversea:false,
+      needReportRqdEvent:false
+    });
+    beacon.onDirectUserAction('preview_page_view',{
+      'url':location.href,
+      'referrer':document.referrer,
+      'title':document.title,
+      'sandbox_id':'8f89eb5801b140d0a389cec0ac8bdd12'
+    });
+  }catch(e){}
+})();
+</script></head>
+<body>
+  <div class="app">
+    <!-- 顶部栏 -->
+    <header class="header">
+      <div class="header-left">
+        <h1>☁️ 阿里云工作台</h1>
+        <span class="version">v3.5</span>
+      </div>
+      <div class="header-right">
+        <span class="user-badge" id="userBadge"></span>
+        <button class="btn btn-sm btn-admin" id="userMgrBtn" onclick="showUserManager()" style="display:none">👥 用户管理</button>
+        <div class="credential-bar" id="credentialBar">
+          <span class="cred-status" id="credStatus">🔴 未配置凭证</span>
+          <button class="btn btn-sm" onclick="showCredentialDialog()">设置凭证</button>
+          <button class="btn btn-sm btn-outline" onclick="logout()">退出登录</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- 主体 -->
+    <div class="main">
+      <!-- 地域卡片区 -->
+      <section class="region-section">
+        <div class="section-header">
+          <h2>🌍 地域概览</h2>
+          <div class="section-actions">
+            <button class="btn btn-sm" id="regionSelectAllBtn" onclick="selectAllRegions()">全选地域</button>
+            <button class="btn btn-sm" onclick="deselectAllRegions()">取消全选</button>
+            <button class="btn btn-sm" style="background:#ff9800;color:#fff;border:none;" onclick="batchRebootSelectedRegions()" title="重启所选地域的所有云主机">🔁 批量重启</button>
+            <button class="btn btn-sm" style="background:#e91e63;color:#fff;border:none;" onclick="openResetSystemModal()" title="将所选地域的所有云主机重装为 CentOS-7.9">♻️ 批量重置系统</button>
+            <button class="btn btn-sm btn-unsub" id="batchUnsubBtn" onclick="batchUnsubscribeSelectedRegions()" title="退订所选地域的所有云主机（调用阿里云 BSS RefundInstance 真正退款，不可逆）" disabled>🗑️ 批量退订 (0)</button>
+            <button class="btn btn-sm btn-primary" onclick="refreshAllRegions()">🔄 刷新</button>
+          </div>
+        </div>
+        <div class="region-cards" id="regionCards">
+          <div class="empty-state">请先设置阿里云凭证</div>
+        </div>
+        <div class="region-summary" id="regionSummary" style="display:none">
+          已选 <strong id="selectedRegionCount">0</strong> 个地域
+        </div>
+      </section>
+
+      <!-- 主操作区（左实例 + 右操作） -->
+      <div class="content-row">
+        <!-- 左侧：实例列表 -->
+        <aside class="sidebar">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>🖥️ 所选地域实例</h3>
+              <div class="panel-actions">
+                <button class="btn btn-xs" onclick="selectAllInstances()">全选</button>
+                <button class="btn btn-xs" onclick="deselectAllInstances()">取消</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="instance-count" id="instanceCount">先选择地域</div>
+              <div class="instance-list" id="instanceList">
+                <div class="empty-state">请在「地域概览」中选择地域以加载实例</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h3>📋 已选实例</h3>
+            </div>
+            <div class="panel-body">
+              <div id="selectedCount" class="selected-count">0 台</div>
+              <div class="selected-list" id="selectedList">
+                <div class="empty-state">未选择实例</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 右侧：操作面板 -->
+        <main class="content">
+          <div class="tabs">
+            <button class="tab admin-only-tab active" data-tab="node" onclick="switchTab('node')">📋 节点ID提取</button>
+            <button class="tab admin-only-tab" data-tab="deploy" onclick="switchTab('deploy')">🚀 一键部署</button>
+            <button class="tab" data-tab="firewall" onclick="switchTab('firewall')">🛡️ 防火墙</button>
+            <button class="tab" data-tab="command" onclick="switchTab('command')">💻 命令助手</button>
+            <button class="tab" data-tab="cancel" onclick="switchTab('cancel')">⏰ 定时退订</button>
+            <button class="tab" data-tab="order" onclick="switchTab('order')">🛒 批量下单</button>
+            <button class="tab" data-tab="quota" onclick="switchTab('quota')">📈 批量提额</button>
+          </div>
+
+          <!-- 节点ID提取面板 -->
+          <div class="tab-content admin-only-panel active" id="tab-node">
+            <div class="card">
+              <div class="card-header">
+                <h3>📋 节点ID提取（admin.zhouyi.top 资源池）</h3>
+                <p class="card-desc">在资源池按「节点属主ID」搜索「在线」节点，提取所有节点ID，支持全选复制。</p>
+              </div>
+              <div class="card-body">
+                <details open>
+                  <summary>🔑 admin.zhouyi.top 登录凭证（自动抓取需要，仅首次，按账号存本机）</summary>
+                  <div style="margin-top:10px;">
+                    <p style="font-size:12px;color:#666;margin:0 0 8px 0;">登录 admin.zhouyi.top 后，按 F12 → Application（或网络） → 复制 Cookie 或请求头里的 <b>Authorization</b> 值，粘贴到下方：</p>
+                    <textarea id="zyToken" rows="3" placeholder="粘贴 admin.zhouyi.top 的登录凭证（Cookie 或 Token）" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
+                    <div style="margin-top:8px;">
+                      <button class="btn btn-sm btn-primary" onclick="saveZyToken()">💾 保存凭证</button>
+                      <span id="zyTokenStatus" style="margin-left:10px;font-size:13px;"></span>
+                    </div>
+                  </div>
+                </details>
+
+                <div class="form-group" style="margin-top:16px;">
+                  <label style="font-weight:600;">节点属主ID（自定义）</label>
+                  <input type="text" id="zyOwnerId" placeholder="属主ID，多个用逗号分隔（并行抓取）" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                  <p style="font-size:12px;color:#666;margin:6px 0 0 0;">网络状态固定为「在线」</p>
+                </div>
+
+                <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                  <button class="btn btn-primary" id="zySearchBtn" onclick="zySearchNodes()">🔍 自动抓取节点ID</button>
+                  <button class="btn btn-sm" onclick="zyTestConnection()" title="不抓取，只测 token/接口是否通">🔌 测试连接</button>
+                  <button class="btn btn-sm" onclick="zyDiagProxy()" title="直接打转发器看原始响应，定位是 token 还是后台接口问题">🔬 诊断转发</button>
+                  <button class="btn btn-sm" onclick="zyClearTokenCache()" title="清掉本机缓存的旧 token，强制用输入框新 token">🧹 清token缓存</button>
+                  <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#666;cursor:pointer;margin:0;"><input type="checkbox" id="zyNoTimeout" checked> 取消超时</label>
+                </div>
+
+                <!-- 高级模式：自定义后台接口（默认即 admin 资源池真实接口名） -->
+                <details style="margin-top:12px;">
+                  <summary style="cursor:pointer;font-size:13px;color:#666;">⚙ 高级：自定义抓取接口（默认已填，与 admin.zhouyi.top 资源池一致）</summary>
+                  <div style="margin-top:8px;font-size:12px;color:#666;background:#fafafa;padding:10px;border-radius:6px;">
+                    <p style="margin:0 0 8px 0;">
+                      默认已按后台资源池筛选项校准：<b>网络状态=在线(status=online)</b>、<b>设备状态=待配置(stage=configured)</b>，只抓取这两种状态同时满足的节点。
+                      如果你看到抓取失败 / 列表为空，请在 admin.zhouyi.top 后台按 <b>F12 → 网络(Network)</b> → 看列表请求的
+                      <b>请求 URL / 方法 / Query 参数</b>，把 method/path/query 贴到下面覆盖默认即可。
+                      <code>{ownerId}</code> 会自动替换为输入框里的属主ID。
+                    </p>
+                    <p style="margin:0 0 8px 0;color:#fa8c16;">
+                      <b>提示：</b>抓取出现「signal is aborted without reason」时，勾选上方「取消超时」再试；Edge Function 偶尔会慢到 20 秒以上。
+                    </p>
+                    <div style="display:grid;grid-template-columns:90px 1fr;gap:6px 10px;align-items:center;">
+                      <label style="font-size:13px;">Method</label>
+                      <input type="text" id="zyApiMethod" value="GET" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;">
+                      <label style="font-size:13px;">Path</label>
+                      <input type="text" id="zyApiPath" value="/api/edgeNode/getEdgeNodeList" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;">
+                      <label style="font-size:13px;">Query</label>
+                      <input type="text" id="zyApiQuery" value="ownerId={ownerId}&isOnline=1&status=online&stage=configured" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;">
+                    </div>
+                    <div style="margin-top:8px;">
+                      <button class="btn btn-sm" onclick="zyResetAdvanced()" style="background:#999;color:white;">还原默认</button>
+                      <span id="zyAdvancedHint" style="margin-left:8px;font-size:12px;color:#999;"></span>
+                    </div>
+                  </div>
+                </details>
+
+                <div style="margin:16px 0; text-align:center; color:#999; font-size:13px;">或</div>
+
+                <div class="form-group">
+                  <label style="font-weight:600;">粘贴实例ID（阿里云实例ID，查询对应云主机公网IP）</label>
+                  <textarea id="zyPaste" rows="4" placeholder="可粘贴多行 / 逗号 / 空格分隔的阿里云实例ID，自动去重，查询后导出公网IP" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
+                  <div style="margin-top:8px;">
+                    <button class="btn btn-sm btn-primary" onclick="zyImportPaste()">🔍 查询公网IP</button>
+                    <button class="btn btn-sm" onclick="zyClearResults()" style="background:#999; color:white; margin-left:8px;">清空</button>
+                  </div>
+                </div>
+
+                <div id="zySearchStatus" style="margin-top:12px;font-size:13px;"></div>
+
+                <div id="zyResultWrap" style="display:none; margin-top:16px; border:1px solid #eee; border-radius:6px; padding:12px;">
+                  <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap;">
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; margin:0;">
+                      <input type="checkbox" id="zySelectAll" onchange="zyToggleAll()" checked> 全选
+                    </label>
+                    <span id="zySelectedCount" style="font-size:13px; color:#666;">已选 0 个</span>
+                    <button class="btn btn-sm btn-primary" onclick="zyCopySelected()">📋 复制选中</button>
+                    <button class="btn btn-sm btn-success" onclick="zyExportIpCsv()">⬇️ 导出CSV</button>
+                  </div>
+                  <div class="refund-list" id="zyNodeList" style="max-height:320px; overflow-y:auto;"></div>
+                  <div style="margin-top:10px; padding-top:10px; border-top:1px solid #eee; font-size:13px; color:#666;">
+                    <span id="zyOwnerLabel">-</span> · 共 <strong id="zyCount">0</strong> 条 · 找到公网IP <strong id="zyIpCount">0</strong> 条
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 一键部署面板 -->
+          <div class="tab-content admin-only-panel" id="tab-deploy">
+            <div class="card">
+              <div class="card-header">
+                <h3>🚀 一键部署（输入属主ID → 自动抓节点 → 分批提交部署）</h3>
+                <p class="card-desc">v5 融合版：输入节点属主ID，自动从 admin.zhouyi.top 抓取在线节点，并按每批 100 台、间隔 1 秒自动提交/部署。也可在「高级」区粘贴节点ID或真实请求体。仅管理员可用。</p>
+              </div>
+              <div class="card-body">
+                <div style="background:#e6f7ff; border:1px solid #91d5ff; padding:10px 12px; border-radius:4px; margin-bottom:14px; font-size:13px; color:#0050b3;">
+                  💡 首次使用需在下方粘贴 admin.zhouyi.top 的 token 并保存；已保存过凭证可留空。
+                </div>
+
+                <div class="form-group">
+                  <label style="font-weight:600;">🔑 admin.zhouyi.top Token <span style="color:#999;font-weight:400;font-size:12px;">（已保存可留空）</span></label>
+                  <input type="text" id="ocdToken" placeholder="从浏览器 F12 请求头复制 x-token" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                  <div style="margin-top:6px;">
+                    <button type="button" class="btn btn-sm" onclick="ocdSaveToken()" style="padding:4px 10px;font-size:12px;">💾 保存凭证</button>
+                    <span id="ocdTokenStatus" style="font-size:12px;color:#999;margin-left:8px;"></span>
+                  </div>
+                </div>
+
+                <div class="form-group" style="margin-top:12px;">
+                  <label style="font-weight:600;">节点属主ID <span style="color:#999;font-weight:400;font-size:12px;">（输入后自动抓取并部署）</span></label>
+                  <input type="text" id="ocdOwnerId" placeholder="例如 7546、7411 等" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                </div>
+
+                <details style="margin-top:12px;">
+                  <summary>📋 手动粘贴节点ID（可选，留空则自动抓取）</summary>
+                  <div class="form-group" style="margin-top:10px;">
+                    <textarea id="ocdNodeIds" rows="4" placeholder="粘贴节点ID，例如：&#10;7546_abc123&#10;7546_def456" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
+                  </div>
+                </details>
+
+                <details open>
+                  <summary>⚙️ 提交配置（默认已按截图设置）</summary>
+                  <div style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:12px;">
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">供应商建议客户 (vendorSuggestCustomers)</label>
+                      <input type="text" id="ocdVendorSuggestCustomers" placeholder="必填，参考 admin 批量提交表单" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">传输模式 (transMode)</label>
+                      <input type="text" id="ocdTransMode" placeholder="必填，如 auto / 数字" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0; display:flex; align-items:center; gap:12px; padding-top:20px;">
+                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdIsCrossNetwork"> 是否跨网</label>
+                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdTransProv" checked> 跨省调度</label>
+                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdIsp"> 是否异网</label>
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">跨网ISP (crossNetworkIsp)</label>
+                      <input type="text" id="ocdCrossNetworkIsp" placeholder="跨网时填写，如 CT/CM/CU" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">单条上行(Mbps)</label>
+                      <input type="number" id="ocdUsbw" value="200" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">线路数量</label>
+                      <input type="number" id="ocdBwNum" value="1" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">期望业务ID</label>
+                      <input type="number" id="ocdBusinessId" value="41" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">每批台数（自动分批）</label>
+                      <input type="number" id="ocdBatchSize" value="100" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">批间间隔(毫秒)</label>
+                      <input type="number" id="ocdBatchDelay" value="1000" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                    </div>
+                  </div>
+                </details>
+
+                <details style="margin-top:12px;">
+                  <summary>🛠️ 高级：粘贴 F12 真实请求体（100% 对齐手动，可选）</summary>
+                  <div style="margin-top:10px; font-size:12px; color:#666;">
+                    若默认提交/部署参数不对，在 admin.zhouyi.top 点一次手动部署 → F12 → Network 找到对应请求 → 复制 Request Body 粘贴下方（前端会原样发送，完全模拟手动）：
+                    <div class="form-group" style="margin-top:8px;">
+                      <label style="font-size:12px;">批量提交请求体 (POST /edgeNode/updateEdgeRemark)</label>
+                      <textarea id="ocdSubmitBody" rows="3" placeholder='{"nodeId":"7546_abc","vendorSuggestCustomers":"...","transMode":"...",...}' style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:11px; resize:vertical;"></textarea>
+                    </div>
+                    <div class="form-group" style="margin-top:8px;">
+                      <label style="font-size:12px;">批量部署请求体 (POST /bigDeployLog/directDeployment)</label>
+                      <textarea id="ocdDeployBody" rows="3" placeholder='{"nodeId":"7546_abc"}' style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:11px; resize:vertical;"></textarea>
+                    </div>
+                  </div>
+                </details>
+
+                <div style="margin-top:16px;">
+                  <button class="btn btn-primary" id="ocdBtn" onclick="ocdStartDeploy()">🚀 自动提取并部署</button>
+                </div>
+
+                <div id="ocdStatus" style="margin-top:14px;"></div>
+
+                <div style="margin-top:20px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <strong style="font-size:14px;">📋 操作日志</strong>
+                    <button class="btn btn-xs" onclick="ocdClearLog()" style="font-size:12px; padding:4px 10px;">清空</button>
+                  </div>
+                  <div id="ocdLogArea" style="background:#1e1e1e; color:#d4d4d4; border-radius:6px; padding:10px; max-height:300px; overflow-y:auto; font-family:monospace; font-size:12px;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 防火墙面板 -->
+          <div class="tab-content" id="tab-firewall">
+            <div class="card">
+              <div class="card-header">
+                <h3>🛡️ 批量应用防火墙模板</h3>
+                <p class="card-desc">直接读取阿里云中已有的防火墙模板，6个地域各自选择模板后一键应用到该地域所有云主机。</p>
+              </div>
+              <div class="card-body">
+                <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap;">
+                  <button class="btn btn-primary" onclick="loadAllRegionTemplates()">🔄 同步阿里云模板</button>
+                  <button class="btn btn-success" style="font-size:13px; padding:8px 14px;" onclick="openCreateFirewallModal()" title="在阿里云批量创建防火墙模板">➕ 创建防火墙</button>
+                  <button class="btn btn-danger" style="font-size:13px; padding:8px 14px;" onclick="openDeleteFirewallModal()" title="批量删除阿里云防火墙模板">🗑️ 删除防火墙</button>
+                </div>
+                <div class="fw-region-grid" id="fwRegionGrid">
+                  <p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;">点击「同步阿里云模板」加载已有模板</p>
+                </div>
+                <div class="action-bar" style="justify-content:center; padding:16px 0;">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 32px;" onclick="batchApplyAllTemplates()">
+                    🚀 应用到所有云主机
+                  </button>
+                </div>
+                <p style="text-align:center; color:#888; font-size:12px; margin:0;">
+                  自动加载6个地域的全部实例 → 按各地域所选模板分别执行
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 命令助手面板 -->
+          <div class="tab-content" id="tab-command">
+            <div class="card">
+              <div class="card-header" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                <div>
+                  <h3>💻 批量执行命令</h3>
+                  <p class="card-desc">直接读取阿里云中已有的命令，6个地域各自选择命令后一键执行到该地域所有云主机。</p>
+                </div>
+                <button class="btn btn-warning" style="font-size:14px; padding:8px 16px;" onclick="openCustomCommandModal()" title="输入一段自定义命令，立即对所有地域的全部云主机执行（不保存命令，每次都是新命令）">
+                  ✏️ 自定义命令
+                </button>
+              </div>
+              <div class="card-body">
+                <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap;">
+                  <button class="btn btn-primary" onclick="loadAllRegionCommands()">🔄 同步阿里云命令</button>
+                  <button class="btn btn-success" style="font-size:13px; padding:8px 14px;" onclick="openCreateCommandModal()" title="在阿里云批量创建命令模板">➕ 创建命令</button>
+                  <button class="btn btn-danger" style="font-size:13px; padding:8px 14px;" onclick="openDeleteCommandModal()" title="批量删除阿里云命令模板">🗑️ 删除命令</button>
+                  <button class="btn btn-danger" style="font-size:13px; padding:8px 14px; background:#c0392b;" onclick="deleteAllCommands()" title="一键删除所有地域的全部命令模板（危险操作）">⚠️ 一键删除所有命令</button>
+                </div>
+                <div class="fw-region-grid" id="cmdRegionGrid">
+                  <p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;">点击「同步阿里云命令」加载已有命令</p>
+                </div>
+                <div class="action-bar" style="justify-content:center; padding:16px 0;">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 32px;" onclick="batchExecuteAllCommands()">
+                    🚀 批量执行命令
+                  </button>
+                </div>
+                <p style="text-align:center; color:#888; font-size:12px; margin:0;">
+                  自动加载6个地域的全部实例（无数量限制）→ 按各地域所选命令分别执行，阿里云 InvokeCommand 上限 100 台/次，超出自动分批（如 500 台会跑 5 次），每批间隔 400ms
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 定时退订面板 -->
+          <div class="tab-content" id="tab-cancel">
+            <div class="card">
+              <div class="card-header">
+                <h3>定时退订轻量云主机</h3>
+                <p class="card-desc">⚠️ 危险操作！退订所有地区的所有云主机实例。</p>
+              </div>
+              <div class="card-body">
+                <div class="warning-box">
+                  <strong>⚠️ 重要提示：</strong>退订操作不可逆！退订 = 调用阿里云 BSS RefundInstance 真正退款到原账户（非停机+删除）。仅支持<strong>直销客户</strong>且 AK/SK 已勾选 <strong>AliyunBSSFullAccess</strong> 权限。
+                </div>
+                <div class="form-group">
+                  <label>执行方式</label>
+                  <div class="radio-group">
+                    <label class="radio-label">
+                      <input type="radio" name="cancelMode" value="immediate" checked onchange="toggleCancelMode()"> 立即退订
+                    </label>
+                    <label class="radio-label">
+                      <input type="radio" name="cancelMode" value="scheduled" onchange="toggleCancelMode()"> 定时退订
+                    </label>
+                  </div>
+                </div>
+                <div class="form-group" id="scheduledTimeGroup" style="display:none">
+                  <label>每天执行时间（24小时制）</label>
+                  <div class="time-picker" style="display:flex; gap:8px; align-items:center">
+                    <select id="scheduleHour" class="input" style="width:auto; min-width:70px">
+                      <option value="">时</option>
+                    </select>
+                    <span>:</span>
+                    <select id="scheduleMinute" class="input" style="width:auto; min-width:70px">
+                      <option value="">分</option>
+                    </select>
+                  </div>
+                  <small style="color:#888">定时退订时间限定在每晚 23:35–23:59，到点自动退订所有地区云主机（关浏览器由服务端执行）</small>
+                </div>
+                <div class="form-group" id="confirmGroup">
+                  <label>确认操作（输入 "确认退订"）</label>
+                  <input type="text" id="confirmInput" class="input" placeholder="输入 确认退订" oninput="checkConfirm()" />
+                </div>
+                <div class="action-bar">
+                  <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" disabled>⚠️ 退订所有实例</button>
+                  <button class="btn btn-outline" onclick="renderScheduledTasks()">📋 定时任务</button>
+                </div>
+
+                <!-- 🔬 诊断工具：探测 ProductCode -->
+                <div style="margin-top:16px; padding:10px; background:#fafafa; border:1px dashed #ccc; border-radius:6px;">
+                  <details>
+                    <summary style="cursor:pointer; color:#666; font-size:12px;">🔬 诊断工具：探测哪 ProductCode 对该实例可用</summary>
+                    <div style="margin-top:8px; font-size:12px; color:#666;">
+                      如果"立即退订"失败但云主机还在，可能是阿里云 BSS API 的 ProductCode 在你这账号下不同。
+                      输入实例 ID 探测一下，看哪 ProductCode 能用：
+                      <div style="margin-top:6px; display:flex; gap:6px; align-items:center;">
+                        <input type="text" id="probeInstanceId" class="input" placeholder="实例 ID（例 adec535fc...）" style="flex:1; font-size:12px;" />
+                        <button class="btn btn-sm" onclick="probeProductCode()" style="background:#06b6d4;color:white;">🔬 探测</button>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <!-- 💰 非全额退订 -->
+                <div class="card" style="margin-top:20px;">
+                  <div class="card-header">
+                    <h3>💰 非全额退订（真正退款）</h3>
+                    <p class="card-desc">按阿里云控制台流程：搜索可非全额退订设备 → 勾选批量退订 → 右下角立即退订。</p>
+                  </div>
+                  <div class="card-body">
+                    <div class="warning-box" style="background:#fff7e6;">
+                      <strong>⚠️ 调用 BSS RefundInstance：</strong>把实例剩余价值退回到账户/原支付渠道，不是 DeleteInstance 释放。仅支持<strong>直销客户</strong>且 AK/SK 已勾选 <strong>AliyunBSSFullAccess</strong> 权限。
+                    </div>
+                    <div class="action-bar" style="padding:12px 0;">
+                      <button class="btn btn-primary" id="searchRefundBtn" onclick="searchRefundableInstances()">🔍 搜索非全额退订设备</button>
+                      <button class="btn btn-outline" onclick="clearRefundSearch()">清空</button>
+                    </div>
+                    <div id="refundSearchStatus" style="color:#666; font-size:13px; margin-bottom:8px;"></div>
+                    <div id="refundSearchResult" style="display:none;">
+                      <div class="refund-toolbar">
+                        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                          <input type="checkbox" id="refundSelectAll" onchange="toggleRefundSelectAll()"> 全选
+                        </label>
+                        <span id="refundSelectedCount">已选 0 台</span>
+                      </div>
+                      <div class="refund-list" id="refundList"></div>
+                      <div class="refund-footer">
+                        <button class="btn btn-danger" id="refundNowBtn" onclick="refundSelectedInstances()" disabled>🗑️ 立即退订</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="scheduledTasksContainer" style="margin-top:16px; display:none">
+                  <h4>已创建的定时任务</h4>
+                  <div id="scheduledTaskList" class="task-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 批量下单面板 -->
+          <div class="tab-content" id="tab-order">
+            <div class="card">
+              <div class="card-header">
+                <h3>🛒 批量下单（生成待支付订单）</h3>
+                <p class="card-desc">按地域输入数量，生成待支付订单。不会自动扣费，需前往阿里云手动支付。默认 ¥40/月 配置。</p>
+              </div>
+              <div class="card-body">
+                <!-- 套餐信息展示 -->
+                <div class="plan-info-bar" id="planInfoBar">
+                  <div class="plan-spec">
+                    <span class="spec-item">⚡ 2 vCPU</span>
+                    <span class="spec-item">💾 1 GiB</span>
+                    <span class="spec-item">💿 系统盘</span>
+                    <span class="spec-item">🌐 200 Mbps</span>
+                    <span class="spec-item">📡 1 IPv4</span>
+                    <span class="spec-item price">¥40/月</span>
+                  </div>
+                  <button class="btn btn-sm" onclick="loadOrderPlans()">🔄 刷新套餐</button>
+                </div>
+
+                <!-- 各区域数量输入 -->
+                <div class="order-region-grid" id="orderRegionGrid">
+                  <div class="empty-state">请先设置凭证并刷新套餐</div>
+                </div>
+
+                <!-- 汇总 -->
+                <div class="order-summary" id="orderSummary" style="display:none">
+                  预计生成 <strong id="orderTotalCount">0</strong> 台待支付订单，费用约 <strong id="orderTotalPrice">¥0</strong>/月
+                </div>
+
+                <div class="action-bar" style="justify-content:center; padding:20px 0;">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchCreateInstances()">
+                    🚀 生成待支付订单
+                  </button>
+                </div>
+
+                <!-- 下单结果 -->
+                <div id="orderResult" style="display:none; margin-top:12px;">
+                  <h4>订单结果</h4>
+                  <div id="orderResultList" class="order-result-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 批量提额面板 -->
+          <div class="tab-content" id="tab-quota">
+            <div class="card">
+              <div class="card-header">
+                <h3>📈 批量提升实例数量配额</h3>
+                <p class="card-desc">将 6 个地区的轻量应用服务器「实例数量上限」配额（<code>q_z3sbl5</code>）批量提升到 500。</p>
+              </div>
+              <div class="card-body">
+                <div class="quota-region-list" id="quotaRegionList" style="margin-bottom:16px;">
+                  <div class="empty-state">点击按钮后，会依次为 6 个地区提交配额提升申请。</div>
+                </div>
+                <div class="action-bar" style="justify-content:center; padding:10px 0;">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchApplyQuota(500)">
+                    🚀 批量提额到 500
+                  </button>
+                </div>
+                <small style="color:#888; display:block; text-align:center; margin-top:8px;">配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- 日志区 -->
+          <div class="card" style="margin-top:16px">
+            <div class="card-header">
+              <h3>📜 操作日志</h3>
+              <button class="btn btn-xs" onclick="clearLogs()">清空</button>
+            </div>
+            <div class="card-body">
+              <div class="log-area" id="logArea">
+                <div class="log-entry log-info">工作台就绪，请先设置凭证。</div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户管理弹窗（仅管理员可见） -->
+  <div class="modal-overlay" id="userMgrModal" style="display:none">
+    <div class="modal" style="max-width:min(420px,92vw);width:100%;">
+      <div class="modal-header">
+        <h3>👥 用户管理</h3>
+        <button class="btn-close" onclick="hideUserManager()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- 新增用户 -->
+        <div style="background:#f5f7fa;border-radius:8px;padding:16px;margin-bottom:16px;">
+          <h4 style="margin:0 0 12px 0;font-size:14px;">➕ 新增普通用户</h4>
+          <div class="form-group" style="margin-bottom:10px;">
+            <label style="font-size:12px;">用户名</label>
+            <input type="text" id="newUserName" class="input" placeholder="英文/数字，如 zhangruiyao" style="width:100%" />
+          </div>
+          <div class="form-group" style="margin-bottom:10px;">
+            <label style="font-size:12px;">密码</label>
+            <input type="password" id="newUserPass" class="input" placeholder="设置密码" style="width:100%" />
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="addUser()" style="width:100%">确认新增</button>
+          <div id="addUserMsg" style="margin-top:8px;font-size:12px;min-height:18px;"></div>
+        </div>
+        <!-- 用户列表 -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <h4 style="margin:0;font-size:14px;">📋 现有用户</h4>
+          <button class="btn btn-sm btn-outline" onclick="exportUserDB()" style="font-size:11px;padding:3px 8px;">📤 导出用户数据库</button>
+        </div>
+        <div id="userListContainer" style="max-height:250px;overflow-y:auto;overflow-x:auto;">
+          <div style="color:#999;text-align:center;padding:12px;">加载中...</div>
+        </div>
+        <div id="exportResult" style="margin-top:8px;font-size:11px;min-height:18px;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="hideUserManager()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 凭证弹窗 -->
+  <div class="modal-overlay" id="credentialModal" style="display:none">
+    <div class="modal" style="max-width:min(520px,94vw);">
+      <div class="modal-header">
+        <h3>🔑 阿里云凭证管理</h3>
+        <button class="btn-close" onclick="hideCredentialDialog()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- 当前使用 -->
+        <div class="cred-current-bar" id="credCurrentBar">
+          <span class="cred-current-label">当前凭证</span>
+          <span class="cred-current-value" id="credCurrentValue">未选择</span>
+          <span class="cred-current-hint" id="credCurrentHint"></span>
+        </div>
+
+        <!-- 已保存凭证 -->
+        <div class="cred-section">
+          <div class="cred-section-title">📚 已保存凭证</div>
+          <div class="cred-profile-list" id="credProfileList">
+            <div class="cred-profile-empty">尚未保存任何凭证</div>
+          </div>
+        </div>
+
+        <!-- 添加新凭证表单 -->
+        <div class="cred-section">
+          <div class="cred-section-title">➕ 添加 / 覆盖凭证</div>
+          <div class="form-group">
+            <label>凭证名称 <span style="color:#999;font-size:11px;">（用于在列表中识别，比如「公司」「备用」「RZ 个人」等）</span></label>
+            <input type="text" id="credProfileName" class="input" placeholder="例如：默认、公司、备用1" />
+          </div>
+          <div class="form-group">
+            <label>AccessKey ID</label>
+            <input type="text" id="accessKeyId" class="input" placeholder="输入 AccessKey ID" />
+          </div>
+          <div class="form-group">
+            <label>AccessKey Secret</label>
+            <input type="password" id="accessKeySecret" class="input" placeholder="输入 AccessKey Secret" />
+          </div>
+          <p class="hint">凭证存储在浏览器本地 + 云端，各账号独立隔离；同名凭证会覆盖（覆盖前会提示）。</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="hideCredentialDialog()">取消</button>
+        <button class="btn btn-primary" onclick="saveCredentials()">💾 保存并设为当前</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 助手聊天面板 -->
+  <div class="ai-fab" id="aiFab" onclick="toggleAIChat()" title="AI 助手">
+    <span class="ai-fab-icon">🤖</span>
+  </div>
+  <div class="ai-chat-panel" id="aiChatPanel" style="display:none">
+    <div class="ai-chat-header">
+      <div class="ai-chat-header-left">
+        <span class="ai-chat-logo">🤖</span>
+        <div>
+          <div class="ai-chat-title">AI 云管理助手</div>
+          <div class="ai-chat-subtitle">
+            <span class="ai-relay-badge" id="aiRelayBadge">🟢 中转站</span>
+            <span class="ai-model-name" id="aiModelName">Sonnet</span>
+            <span class="ai-token-count" id="aiTokenCount" style="display:none"></span>
+          </div>
+        </div>
+      </div>
+      <div class="ai-chat-header-right">
+        <button class="ai-btn-icon" onclick="toggleAIModelMenu()" title="切换模型" id="aiModelBtn">⚡</button>
+        <button class="ai-btn-icon" onclick="showAIKeyDialog()" title="中转站设置">⚙️</button>
+        <button class="ai-btn-icon" onclick="clearAIChat()" title="清空对话">🗑️</button>
+        <button class="ai-btn-icon" onclick="toggleAIChat()" title="关闭">✕</button>
+      </div>
+    </div>
+    <!-- 模型选择下拉 -->
+    <div class="ai-model-menu" id="aiModelMenu" style="display:none">
+      <div class="ai-model-option active" data-model="sonnet" onclick="selectAIModel('sonnet')">
+        <div class="ai-model-option-name">🧠 Claude Sonnet 4.5</div>
+        <div class="ai-model-option-desc">高智能，适合复杂分析和建议</div>
+      </div>
+      <div class="ai-model-option" data-model="haiku" onclick="selectAIModel('haiku')">
+        <div class="ai-model-option-name">⚡ Claude Haiku 4.5</div>
+        <div class="ai-model-option-desc">快速响应，适合简单问答</div>
+      </div>
+    </div>
+    <div class="ai-chat-messages" id="aiChatMessages">
+      <div class="ai-msg ai-msg-bot">
+        <div class="ai-msg-avatar">🤖</div>
+        <div class="ai-msg-bubble">
+          🟢 <b>中转站模式</b> · 使用中<br><br>
+          你好！我是 AI 云管理助手，可以帮你：<br>
+          🔍 分析云主机状态和使用情况<br>
+          🛡️ 推荐防火墙规则配置<br>
+          💻 生成常用运维命令<br>
+          📊 分析退订风险和成本优化<br>
+          ❓ 解答阿里云相关问题<br><br>
+          试试问我问题吧！
+        </div>
+      </div>
+    </div>
+    <div class="ai-chat-input-area">
+      <textarea id="aiChatInput" class="ai-chat-input" placeholder="输入问题，如：帮我分析当前所有实例的配置..." rows="1" onkeydown="handleAIInputKey(event)"></textarea>
+      <button class="ai-btn-send" id="aiSendBtn" onclick="sendAIMessage()" title="发送">➤</button>
+    </div>
+  </div>
+
+  <!-- AI 中转站 API Key 设置弹窗 -->
+  <div class="modal-overlay" id="aiKeyModal" style="display:none">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-header">
+        <h3>⚙️ 中转站设置</h3>
+        <button class="btn-close" onclick="hideAIKeyDialog()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;">
+          🟢 <b>中转站已连接</b> · api.zhouyitoken.com
+        </div>
+        <div class="form-group">
+          <label>API 端点</label>
+          <input type="text" id="aiApiBase" class="input" value="https://api.zhouyitoken.com/v1" />
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="aiApiKey" class="input" placeholder="sk-..." />
+        </div>
+        <div class="form-group">
+          <label>默认模型</label>
+          <select id="aiDefaultModel" class="input">
+            <option value="claude-sonnet-4-5-20250929">Sonnet 4.5（推荐，智能）</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5（快速）</option>
+          </select>
+        </div>
+        <div style="font-size:12px;color:#999;margin-top:8px">
+          💡 设置按账号独立存储，互不干扰。Key 仅在浏览器 localStorage。
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="hideAIKeyDialog()">取消</button>
+        <button class="btn btn-primary" onclick="saveAIKey()">💾 保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="cloud-store.js?v=2"></script>
+  <script>
+    // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
+    window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
+  </script>
+  <script src="aliyun-client-v2.js?v=11"></script>
+  <script src="ai-client.js?v=3"></script>
+  <script src="app.js?v=73"></script>
+  <script src="node-extract.js?v=7"></script>
+  <script src="one-click-deploy.js?v=4"></script>
+  <script>
+    // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
+    (function() {
+      var ADMIN_USER = 'zhangruiyao';
+      var currentUser = '';
+      try {
+        var raw = sessionStorage.getItem('wb_logged_in_v2') || localStorage.getItem('wb_logged_in_v2') || '{}';
+        currentUser = JSON.parse(raw).user || '';
+      } catch(e) {}
+      var isAdmin = (currentUser === ADMIN_USER);
+      if (!isAdmin) {
+        document.querySelectorAll('.admin-only-tab').forEach(function(el) { el.style.display = 'none'; });
+        document.querySelectorAll('.admin-only-panel').forEach(function(el) { el.style.display = 'none'; });
+        // 如果当前激活的是 admin-only，回退到 firewall
+        var activeTab = document.querySelector('.tab.active');
+        if (activeTab && activeTab.classList.contains('admin-only-tab')) {
+          document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+          document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+          var fwTab = document.querySelector('.tab[data-tab="firewall"]');
+          var fwPanel = document.getElementById('tab-firewall');
+          if (fwTab) fwTab.classList.add('active');
+          if (fwPanel) fwPanel.classList.add('active');
+        }
+      } else {
+        // 管理员：显示用户管理按钮
+        var userMgrBtn = document.getElementById('userMgrBtn');
+        if (userMgrBtn) userMgrBtn.style.display = 'inline-block';
+      }
+      window.__isAdmin = isAdmin;
+    })();
+  </script>
+  <script>
+    // 登录保护 v2：检查 sessionStorage + localStorage 双重保险
+    (function() {
+      var KEY = 'wb_logged_in_v2';
+      var loggedIn = false;
+      try {
+        if (sessionStorage.getItem(KEY)) { loggedIn = true; }
+        else if (localStorage.getItem(KEY)) {
+          // 从 localStorage 恢复到 sessionStorage
+          try { sessionStorage.setItem(KEY, localStorage.getItem(KEY)); } catch(e) {}
+          loggedIn = true;
+        }
+      } catch(e) {}
+      if (!loggedIn) {
+        window.location.replace('login.html');
+      }
+    })();
+  </script>
+
+  <!-- 自定义命令模态框（点"批量执行命令"页面的"自定义命令"按钮打开） -->
+  <div class="modal-overlay" id="customCommandModal" style="display:none">
+    <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <h3>✏️ 自定义命令</h3>
+        <button class="modal-close" onclick="closeCustomCommandModal()">×</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;">
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令类型</label>
+          <div style="display:flex; gap:18px; padding:6px 0;">
+            <label style="cursor:pointer;"><input type="radio" name="ccType" value="RunShellScript" checked> Shell</label>
+            <label style="cursor:pointer;"><input type="radio" name="ccType" value="RunPowerShellScript"> Powershell</label>
+            <label style="cursor:pointer;"><input type="radio" name="ccType" value="RunBatScript"> Bat</label>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令名称 <span style="color:#999; font-weight:normal;">（仅用于本次记录，便于看日志）</span></label>
+          <input type="text" id="ccName" placeholder="请输入命令名称" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令内容</label>
+          <textarea id="ccContent" rows="4" placeholder="例如：&#10;#!/bin/bash&#10;echo hello&#10;df -h" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:13px; resize:vertical;"></textarea>
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">执行路径</label>
+          <input type="text" id="ccWorkingDir" value="/root" placeholder="例如：/root" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">超时时间（秒，10~86400）</label>
+          <input type="number" id="ccTimeout" value="60" min="10" max="86400" style="width:200px; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+
+        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;">
+          ⚠️ 点击「执行」后，<b>会对全部 6 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b>全自动分批执行</b>。命令<b>不会保存</b>，下次输入就是新命令。
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">
+        <button class="btn" onclick="closeCustomCommandModal()" style="background:#999; color:white; margin-right:8px;">取消</button>
+        <button class="btn btn-primary" id="ccExecuteBtn" onclick="executeCustomCommandToAllRegions()" style="font-size:14px; padding:8px 22px;">🚀 执行到全部地域</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量创建命令模态框 -->
+  <div class="modal-overlay" id="createCommandModal" style="display:none">
+    <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <h3>📝 批量创建命令模板</h3>
+        <button class="modal-close" onclick="closeCreateCommandModal()">×</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;">
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令名称</label>
+          <input type="text" id="crCmdName" placeholder="例如：install-docker" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令类型</label>
+          <div style="display:flex; gap:18px; padding:6px 0;">
+            <label style="cursor:pointer;"><input type="radio" name="crCmdType" value="RunShellScript" checked> Shell</label>
+            <label style="cursor:pointer;"><input type="radio" name="crCmdType" value="RunPowerShellScript"> Powershell</label>
+            <label style="cursor:pointer;"><input type="radio" name="crCmdType" value="RunBatScript"> Bat</label>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 命令内容</label>
+          <textarea id="crCmdContent" rows="6" placeholder="例如：&#10;#!/bin/bash&#10;yum install -y docker&#10;systemctl start docker" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:13px; resize:vertical;"></textarea>
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">描述（可选）</label>
+          <input type="text" id="crCmdDesc" placeholder="命令用途说明" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">执行路径</label>
+          <input type="text" id="crCmdWorkingDir" value="/root" placeholder="/root" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">超时时间（秒，10~86400）</label>
+          <input type="number" id="crCmdTimeout" value="60" min="10" max="86400" style="width:200px; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">目标地域</label>
+          <div id="crCmdRegionCheckboxes" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; padding:6px 0;"></div>
+          <div style="margin-top:4px;">
+            <button class="btn btn-xs" onclick="selectAllCrCmdRegions()" style="font-size:12px; padding:4px 10px;">全选</button>
+            <button class="btn btn-xs" onclick="deselectAllCrCmdRegions()" style="font-size:12px; padding:4px 10px;">取消</button>
+          </div>
+        </div>
+        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;">
+          ⚠️ 命令将在所选地域的阿里云中创建为命令模板，创建后可在此页面「命令助手」标签中同步并批量执行。
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">
+        <button class="btn" onclick="closeCreateCommandModal()" style="background:#999; color:white; margin-right:8px;">取消</button>
+        <button class="btn btn-success" id="crCmdExecuteBtn" onclick="batchCreateCommands()" style="font-size:14px; padding:8px 22px;">🚀 批量创建命令</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量删除命令模态框 -->
+  <div class="modal-overlay" id="deleteCommandModal" style="display:none">
+    <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <h3>🗑️ 批量删除命令模板</h3>
+        <button class="modal-close" onclick="closeDeleteCommandModal()">×</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;">
+        <div style="margin-bottom:12px;">
+          <button class="btn btn-primary" onclick="loadDeleteCommandList()">🔄 加载所有地域命令</button>
+        </div>
+        <div id="delCmdListContainer" style="max-height:400px; overflow-y:auto;">
+          <p style="color:#999; text-align:center; padding:20px;">点击「加载所有地域命令」查看可删除的命令</p>
+        </div>
+        <div style="background:#fff1f0; border:1px solid #ffa39e; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#cf1322;">
+          ⚠️ 危险操作！删除命令模板后不可恢复。
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">
+        <button class="btn" onclick="closeDeleteCommandModal()" style="background:#999; color:white; margin-right:8px;">取消</button>
+        <button class="btn btn-danger" id="delCmdBtn" onclick="batchDeleteCommands()" disabled style="font-size:14px; padding:8px 22px;">🗑️ 删除选中命令</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量创建防火墙模板模态框 -->
+  <div class="modal-overlay" id="createFirewallModal" style="display:none">
+    <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <h3>🛡️ 批量创建防火墙模板</h3>
+        <button class="modal-close" onclick="closeCreateFirewallModal()">×</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;">
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">* 模板名称</label>
+          <input type="text" id="createFwName" placeholder="例如：web-server-fw" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">描述（可选）</label>
+          <input type="text" id="createFwDesc" placeholder="防火墙模板用途说明" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label style="font-weight:600;">防火墙规则</label>
+          <div id="createFwRulesContainer" style="display:flex; flex-direction:column; gap:6px;"></div>
+          <div style="margin-top:6px;">
+            <button class="btn btn-xs" onclick="addFwRuleRow()" style="font-size:12px; padding:4px 10px;">➕ 添加规则</button>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">目标地域</label>
+          <div id="createFwRegionCheckboxes" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; padding:6px 0;"></div>
+          <div style="margin-top:4px;">
+            <button class="btn btn-xs" onclick="selectAllCreateFwRegions()" style="font-size:12px; padding:4px 10px;">全选</button>
+            <button class="btn btn-xs" onclick="deselectAllCreateFwRegions()" style="font-size:12px; padding:4px 10px;">取消</button>
+          </div>
+        </div>
+        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;">
+          ⚠️ 模板将在所选地域的阿里云中创建，创建后可在此页面「防火墙」标签中同步并批量应用。
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">
+        <button class="btn" onclick="closeCreateFirewallModal()" style="background:#999; color:white; margin-right:8px;">取消</button>
+        <button class="btn btn-success" id="createFwExecuteBtn" onclick="batchCreateFirewallTemplates()" style="font-size:14px; padding:8px 22px;">🚀 批量创建模板</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量删除防火墙模板模态框 -->
+  <div class="modal-overlay" id="deleteFirewallModal" style="display:none">
+    <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;">
+      <div class="modal-header">
+        <h3>🗑️ 批量删除防火墙模板</h3>
+        <button class="modal-close" onclick="closeDeleteFirewallModal()">×</button>
+      </div>
+      <div class="modal-body" style="overflow-y:auto;">
+        <div style="margin-bottom:12px;">
+          <button class="btn btn-primary" onclick="loadDeleteFirewallList()">🔄 加载所有地域防火墙模板</button>
+        </div>
+        <div id="delFwListContainer" style="max-height:400px; overflow-y:auto;">
+          <p style="color:#999; text-align:center; padding:20px;">点击「加载所有地域防火墙模板」查看可删除的模板</p>
+        </div>
+        <div style="background:#fff1f0; border:1px solid #ffa39e; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#cf1322;">
+          ⚠️ 危险操作！删除防火墙模板后不可恢复。
+        </div>
+      </div>
+      <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">
+        <button class="btn" onclick="closeDeleteFirewallModal()" style="background:#999; color:white; margin-right:8px;">取消</button>
+        <button class="btn btn-danger" id="delFwBtn" onclick="batchDeleteFirewallTemplates()" disabled style="font-size:14px; padding:8px 22px;">🗑️ 删除选中模板</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

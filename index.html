@@ -112,6 +112,7 @@
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')">⏰ 定时退订</button>
             <button class="tab" data-tab="order" onclick="switchTab('order')">🛒 批量下单</button>
             <button class="tab" data-tab="quota" onclick="switchTab('quota')">📈 批量提额</button>
+            <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')">🖼️ 镜像克隆</button>
           </div>
 
           <!-- 节点ID提取面板 -->
@@ -541,6 +542,80 @@
             </div>
           </div>
 
+          <!-- 黄金镜像克隆部署面板（管理员专属） -->
+          <div class="tab-content admin-only-panel" id="tab-imageclone">
+            <div class="card">
+              <div class="card-header">
+                <h3>🖼️ 黄金镜像克隆部署（PCDN 缓存节点）</h3>
+                <p class="card-desc">把一台已配好 PCDN 缓存的机器打成<b>自定义镜像</b>，再基于镜像批量开通新云主机，开机即缓存节点。仅管理员 zhangruiyao 可用。</p>
+              </div>
+              <div class="card-body">
+                <div class="form-group" style="margin-bottom:14px;">
+                  <label style="font-weight:600;">目标地域</label>
+                  <select id="icRegion" class="input" style="max-width:320px;"></select>
+                </div>
+
+                <!-- ① 打镜像 -->
+                <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
+                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;">① 从实例创建黄金镜像（CreateCustomImage）</legend>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                    <div class="form-group" style="margin:0;flex:1;min-width:200px;">
+                      <label style="font-size:12px;">源实例ID（已装好 PCDN 缓存的机器）</label>
+                      <input type="text" id="icSrcInstance" class="input" placeholder="例如 swas-abc123" />
+                    </div>
+                    <div class="form-group" style="margin:0;flex:1;min-width:200px;">
+                      <label style="font-size:12px;">镜像名称</label>
+                      <input type="text" id="icImageName" class="input" placeholder="例如 pcdn-golden-20260818" />
+                    </div>
+                    <button class="btn btn-primary" onclick="icCreateImage()">📸 创建镜像</button>
+                  </div>
+                  <div id="icCreateImgStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
+                </fieldset>
+
+                <!-- ② 列镜像 -->
+                <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
+                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;">② 选择自定义镜像（ListImages）</legend>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                    <button class="btn btn-sm" onclick="icLoadImages()">🔄 加载我的自定义镜像</button>
+                    <select id="icImageSelect" class="input" style="flex:1;min-width:240px;"></select>
+                  </div>
+                  <div id="icImagesList" style="margin-top:10px;font-size:13px;color:#666;"></div>
+                </fieldset>
+
+                <!-- ③ 开通 -->
+                <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
+                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;">③ 基于镜像开通新云主机（CreateInstances）</legend>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;">
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">套餐 PlanId</label>
+                      <input type="text" id="icPlanId" class="input" placeholder="默认锁定套餐" />
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">开通数量（1~100）</label>
+                      <input type="number" id="icAmount" class="input" value="1" min="1" max="100" />
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">购买时长（月）</label>
+                      <input type="number" id="icPeriod" class="input" value="1" min="1" max="60" />
+                    </div>
+                    <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
+                      <input type="checkbox" id="icAutoPay" checked />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（取消则生成待支付订单）</label>
+                    </div>
+                    <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icLaunchFromImage()">🚀 开通</button>
+                  </div>
+                  <div id="icLaunchStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
+                  <div id="icLaunchResult" style="margin-top:8px;font-size:13px;"></div>
+                </fieldset>
+
+                <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">
+                  ⚠️ 每台新机都会按所选套餐计费（除非取消「自动支付」生成待支付订单）。<br>
+                  请确保黄金镜像已做<b>去个性化</b>处理：清 PCDN 节点身份/数据目录、重生成 SSH host key、配置绑定动态 IP（0.0.0.0），否则克隆出的节点会复用同一身份，导致平台判重复、结算/调度错乱。
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- 日志区 -->
           <div class="card" style="margin-top:16px">
             <div class="card-header">
@@ -742,11 +817,12 @@
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
   </script>
-  <script src="aliyun-client-v2.js?v=11"></script>
+  <script src="aliyun-client-v2.js?v=12"></script>
   <script src="ai-client.js?v=3"></script>
   <script src="app.js?v=73"></script>
   <script src="node-extract.js?v=7"></script>
   <script src="one-click-deploy.js?v=4"></script>
+  <script src="image-clone.js?v=1"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {

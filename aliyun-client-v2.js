@@ -925,5 +925,8 @@
   // 暴露权限检测到 AliyunClient
   window.AliyunClient.checkBssPermission = checkBssPermission;
 
+  // 暴露通用 SWAS 直连入口（镜像克隆等功能复用，与 ListInstances 同源）
+  window.AliyunClient.callSwasApi = callAliyunApi;
+
   console.log('[aliyun-client] 浏览器端阿里云客户端已就绪');
 })();

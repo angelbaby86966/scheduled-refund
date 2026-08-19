@@ -2,7 +2,7 @@
  * 黄金镜像克隆部署（PCDN 缓存节点）
  * 仅管理员 zhangruiyao 可用：UI 通过 admin-only-tab / admin-only-panel 隐藏，
  * 这里再做一次函数级权限兜底。
- * 依赖：AliyunClient.callSwasApi(regionId, action, params)（已在 aliyun-client-v2.js 暴露）
+ * 依赖：AliyunClient.callCentralApi(action, params) / listImages(region)（均走 aliyun-proxy 代理，避免浏览器 CORS）
  *       REGION_INFO / LOCKED_PLAN_ID（app.js 全局）
  * ========================================================================= */
 (function () {
@@ -59,10 +59,10 @@
     var st = document.getElementById('icCreateImgStatus');
     st.innerHTML = '⏳ 正在从 ' + instId + ' 创建镜像「' + name + '」...';
     try {
-      var r = await AliyunClient.callSwasApi(region, 'CreateCustomImage', {
-        InstanceId: instId, ImageName: name
+      var r = await AliyunClient.callCentralApi('CreateCustomImage', {
+        RegionId: region, InstanceId: instId, ImageName: name
       });
-      st.innerHTML = '✅ 已提交，ImageId=' + (r.ImageId || '(处理中，稍后刷新镜像列表)');
+      st.innerHTML = '✅ 已提交，ImageId=' + (r.ImageId || r.imageId || '(处理中，稍后刷新镜像列表)');
       icLog('[镜像克隆] 创建镜像成功: ' + (r.ImageId || ''), 'success');
       setTimeout(icLoadImages, 3000);
     } catch (e) {
@@ -79,9 +79,7 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      var r = await AliyunClient.callSwasApi(region, 'ListImages', {
-        ImageType: 'Custom', PageSize: 100
-      });
+      var r = await AliyunClient.listImages(region);
       var imgs = [];
       if (r.Images && r.Images.Image) imgs = r.Images.Image;
       else if (Array.isArray(r.Images)) imgs = r.Images;
@@ -119,7 +117,7 @@
     st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...';
     res.innerHTML = '';
     try {
-      var r = await AliyunClient.callSwasApi(region, 'CreateInstances', {
+      var r = await AliyunClient.callCentralApi('CreateInstances', {
         RegionId: region,
         ImageId: imageId,
         PlanId: planId,

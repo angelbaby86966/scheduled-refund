@@ -413,10 +413,6 @@
                   </div>
                   <small style="color:#888">定时退订时间限定在每晚 23:35–23:59，到点自动退订所有地区云主机（关浏览器由服务端执行）</small>
                 </div>
-                <div class="form-group" id="confirmGroup">
-                  <label>确认操作（输入 "确认退订"）</label>
-                  <input type="text" id="confirmInput" class="input" placeholder="输入 确认退订" oninput="checkConfirm()" />
-                </div>
                 <div class="action-bar">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" disabled>⚠️ 定时退订</button>
                   <button class="btn btn-outline" onclick="renderScheduledTasks()">📋 定时任务</button>

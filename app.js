@@ -1304,7 +1304,6 @@ function initScheduleTimePicker() {
 function toggleCancelMode() {
   var mode = document.querySelector('input[name="cancelMode"]:checked').value;
   document.getElementById('scheduledTimeGroup').style.display = mode === 'scheduled' ? 'block' : 'none';
-  document.getElementById('confirmGroup').style.display = mode === 'scheduled' ? 'none' : 'block';
   checkConfirm();
 }
 
@@ -1318,8 +1317,7 @@ function checkConfirm() {
     var mEl = document.getElementById('scheduleMinute');
     btn.disabled = !(hEl && mEl && hEl.value !== '' && mEl.value !== '');
   } else {
-    var inputEl = document.getElementById('confirmInput');
-    btn.disabled = !(inputEl && inputEl.value.trim() === '确认退订');
+    btn.disabled = false;
   }
 }
 
@@ -1390,8 +1388,7 @@ async function executeCancel() {
   }
 
   // 立即退订
-  var confirmInput = document.getElementById('confirmInput').value.trim();
-  if (confirmInput !== '确认退订') { alert('请输入"确认退订"以确认操作'); return; }
+  if (!confirm('确认')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🗑️ 开始【退订退款】所有地区的所有云主机（BSS RefundInstance，真正退款）...', 'warn');
@@ -1430,8 +1427,6 @@ async function executeCancel() {
 
     if (allInstances.length === 0) {
       log('✅ 未发现任何实例，无需退订', 'success');
-      document.getElementById('confirmInput').value = '';
-      document.getElementById('cancelBtn').disabled = true;
       return;
     }
 
@@ -1459,8 +1454,6 @@ async function executeCancel() {
 
     await refreshAllRegions();
     deselectAllRegions();
-    document.getElementById('confirmInput').value = '';
-    document.getElementById('cancelBtn').disabled = true;
   } catch (err) {
     log('❌ 退订失败: ' + err.message, 'error');
     console.error(err);

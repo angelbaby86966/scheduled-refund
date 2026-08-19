@@ -608,9 +608,21 @@
                   <div id="icLaunchResult" style="margin-top:8px;font-size:13px;"></div>
                 </fieldset>
 
+                <!-- ④ 标准化脚本 -->
+                <fieldset style="border:1px solid #b7eb8f;border-radius:8px;padding:14px;margin-bottom:16px;background:#f6ffed;">
+                  <legend style="font-weight:600;color:#389e0d;padding:0 6px;">④ 黄金主机标准化脚本（打镜像前必做）</legend>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">先在黄金主机上按此顺序操作，再执行上方「① 创建镜像」：<br>
+                  1) 把首启自举脚本部署到黄金主机并 <code>enable</code> → 2) 跑去个性化脚本 → 3) 打自定义镜像。新机基于镜像开机即自动首启。</p>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('prep')">📥 下载 去个性化脚本</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-sh')">📥 下载 首启脚本 .sh</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-svc')">📥 下载 首启服务 .service</button>
+                  </div>
+                </fieldset>
+
                 <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">
                   ⚠️ 每台新机都会按所选套餐计费（除非取消「自动支付」生成待支付订单）。<br>
-                  请确保黄金镜像已做<b>去个性化</b>处理：清 PCDN 节点身份/数据目录、重生成 SSH host key、配置绑定动态 IP（0.0.0.0），否则克隆出的节点会复用同一身份，导致平台判重复、结算/调度错乱。
+                  请先用上方「④ 黄金主机标准化脚本」对黄金镜像做<b>去个性化</b>处理：清 PCDN 节点身份/数据目录、重生成 SSH host key、配置绑定动态 IP（0.0.0.0），否则克隆出的节点会复用同一身份，导致平台判重复、结算/调度错乱。
                 </div>
               </div>
             </div>
@@ -822,7 +834,7 @@
   <script src="app.js?v=73"></script>
   <script src="node-extract.js?v=7"></script>
   <script src="one-click-deploy.js?v=4"></script>
-  <script src="image-clone.js?v=1"></script>
+  <script src="image-clone.js?v=2"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {

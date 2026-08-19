@@ -143,8 +143,136 @@
     }
   }
 
+  // ====== ④ 黄金主机标准化脚本（打镜像前必做）— 内嵌模板，供管理员下载 ======
+  var IC_TEMPLATES = {
+    prep: {
+      name: 'ipes-golden-prep.sh',
+      body: [
+'#!/bin/bash',
+'# =====================================================================',
+'# IPES / PCDN 黄金主机 去个性化清理脚本',
+'# 用途：在【已装好 PCDN 缓存】的黄金主机上执行，清掉"机器独有"状态，',
+'#       让基于它打的自定义镜像变成"首次运行"的干净态，避免克隆出重复节点身份。',
+'# 时机：打自定义镜像（CreateCustomImage）之前执行。',
+'# 注意：脚本会停止 IPES 服务，请在维护窗口执行。',
+'# ⚠️ 请先按你的实际环境修改下方【需修改】变量！',
+'# =====================================================================',
+'set -e',
+'',
+'# ======= 【需修改】按你实际的 IPES / PCDN 部署调整 =======',
+'IPES_SERVICE="ipes-agent"          # systemd 服务名（用 systemctl list-units | grep -i ipes 确认）',
+'IPES_DATA_DIR="/var/lib/ipescache" # PCDN 节点身份/缓存数据目录（用 find / -iname "*ipes*" -type d 确认）',
+'IPES_CONFIG_DIR="/etc/ipescache"   # 配置目录（若节点ID写死在配置里需一并清理）',
+'# ===============================================================',
+'',
+'echo ">> [1/5] 停止 IPES 服务"',
+'systemctl stop "$IPES_SERVICE" || systemctl stop "$IPES_SERVICE.service" || true',
+'',
+'echo ">> [2/5] 清理 PCDN 节点身份与缓存数据（让新机首启重新注册拿新节点ID）"',
+'rm -rf "$IPES_DATA_DIR"/*',
+'rm -rf "$IPES_DATA_DIR"/.[!.]* 2>/dev/null || true',
+'# 若节点ID也写在配置里，取消下面两行注释：',
+'# rm -f "$IPES_CONFIG_DIR"/node_id 2>/dev/null || true',
+'# rm -f "$IPES_CONFIG_DIR"/*.token 2>/dev/null || true',
+'',
+'echo ">> [3/5] 重生成 SSH host key（否则所有克隆机共用一把主机密钥）"',
+'rm -f /etc/ssh/ssh_host_*',
+'ssh-keygen -A',
+'',
+'echo ">> [4/5] 重置 machine-id 与日志"',
+'rm -f /etc/machine-id && systemd-machine-id-setup',
+'rm -f /var/log/ipescache/*.log 2>/dev/null || true',
+': > /etc/hostname',
+'',
+'echo ">> [5/5] 提示：请将 IPES 配置 listen/bind 改为 0.0.0.0，上报IP改为自动获取(eth0)，不要写死黄金主机公网IP"',
+'echo "   修改位置通常在 $IPES_CONFIG_DIR 下的 yaml/json 配置。"',
+'',
+'echo "✅ 去个性化完成。请确认配置绑定的是 0.0.0.0 / 动态IP，然后即可打自定义镜像（CreateCustomImage）。"'
+      ].join('\n') + '\n'
+    },
+    'firstboot-sh': {
+      name: 'ipes-firstboot.sh',
+      body: [
+'#!/bin/bash',
+'# =====================================================================',
+'# IPES / PCDN 首启自举脚本（每台新克隆机第一次开机执行一次）',
+'# 作用：设置唯一主机名 + 确保节点身份干净 + 启动缓存服务。',
+'# 部署：放到 /usr/local/bin/ipes-firstboot.sh 并 chmod +x；',
+'#       配合 ipes-firstboot.service 一起 enable，脚本末尾会 disable 自身确保只跑一次。',
+'# ⚠️ 下方【需修改】变量需与去个性化脚本保持一致。',
+'# =====================================================================',
+'set -e',
+'',
+'# ======= 【需修改】 =======',
+'IPES_SERVICE="ipes-agent"',
+'IPES_DATA_DIR="/var/lib/ipescache"',
+'# =========================',
+'',
+'# 唯一主机名（随机后缀，避免克隆机重名）',
+'NEW_HOST="ipes-$(head -c4 /dev/urandom | xxd -p)"',
+'echo "$NEW_HOST" > /etc/hostname',
+'hostname "$NEW_HOST"',
+'',
+'# 双保险：再清一次节点身份',
+'rm -rf "$IPES_DATA_DIR"/* 2>/dev/null || true',
+'',
+'# 启动缓存服务',
+'systemctl enable "$IPES_SERVICE"',
+'systemctl start "$IPES_SERVICE"',
+'',
+'# 首启只跑一次',
+'systemctl disable ipes-firstboot',
+'',
+'echo "✅ 首启自举完成，节点 $NEW_HOST 已启动 IPES 缓存服务。"'
+      ].join('\n') + '\n'
+    },
+    'firstboot-svc': {
+      name: 'ipes-firstboot.service',
+      body: [
+'[Unit]',
+'Description=IPES / PCDN first-boot setup',
+'After=network-online.target',
+'Wants=network-online.target',
+'',
+'[Service]',
+'Type=oneshot',
+'ExecStart=/usr/local/bin/ipes-firstboot.sh',
+'RemainAfterExit=yes',
+'',
+'[Install]',
+'WantedBy=multi-user.target'
+      ].join('\n') + '\n'
+    }
+  };
+
+  function icDownload(filename, content) {
+    if (typeof isAdmin === 'function' && !isAdmin()) {
+      alert('⛔ 该功能仅管理员(zhangruiyao)可用');
+      return;
+    }
+    try {
+      var blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      icLog('[镜像克隆] 已下载模板: ' + filename, 'info');
+    } catch (e) {
+      icLog('[镜像克隆] 下载失败: ' + e.message, 'error');
+      alert('下载失败: ' + e.message);
+    }
+  }
+
+  function icDownloadTpl(key) {
+    var t = IC_TEMPLATES[key];
+    if (t) icDownload(t.name, t.body);
+  }
+
   // 暴露到全局（供 onclick 调用）
   window.icInit = icInit;
+  window.icDownloadTpl = icDownloadTpl;
   window.icCreateImage = icCreateImage;
   window.icLoadImages = icLoadImages;
   window.icLaunchFromImage = icLaunchFromImage;

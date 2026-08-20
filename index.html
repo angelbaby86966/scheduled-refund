@@ -400,6 +400,11 @@
                     </label>
                   </div>
                 </div>
+                <div class="form-group" id="credSelectGroup">
+                  <label>要退订的凭证（可多选）</label>
+                  <div id="credSelectList" style="display:flex; flex-wrap:wrap; gap:8px; padding:4px 0;"></div>
+                  <small style="color:#888">勾选要退订的凭证，支持多选；默认只勾「当前凭证」。一个都不勾 = 按当前凭证退订；要退全部请勾「全选」。「立即退订」与「定时退订」共用此选择。</small>
+                </div>
                 <div class="form-group" id="scheduledTimeGroup" style="display:none">
                   <label>每天执行时间（24小时制）</label>
                   <div class="time-picker" style="display:flex; gap:8px; align-items:center">
@@ -411,7 +416,7 @@
                       <option value="">分</option>
                     </select>
                   </div>
-                  <small style="color:#888">定时退订时间限定在每晚 23:35–23:59；只退当前选中的地域标签（在顶部地域卡勾选，不选则退全部），到点自动退订（关浏览器由服务端执行），首轮退完后每 10 分钟复检直到全部退完</small>
+                  <small style="color:#888">定时退订时间限定在每晚 23:35–23:59；退订范围为上方勾选的凭证 + 当前选中的地域标签（在顶部地域卡勾选，不选则退全部），到点自动退订（关浏览器由服务端执行），首轮退完后每 10 分钟复检直到全部退完</small>
                 </div>
                 <div class="action-bar">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" disabled>⚠️ 定时退订</button>

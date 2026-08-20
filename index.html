@@ -411,7 +411,7 @@
                       <option value="">分</option>
                     </select>
                   </div>
-                  <small style="color:#888">定时退订时间限定在每晚 23:35–23:59，到点自动退订所有地区云主机（关浏览器由服务端执行）</small>
+                  <small style="color:#888">定时退订时间限定在每晚 23:35–23:59；只退当前选中的地域标签（在顶部地域卡勾选，不选则退全部），到点自动退订（关浏览器由服务端执行），首轮退完后每 10 分钟复检直到全部退完</small>
                 </div>
                 <div class="action-bar">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" disabled>⚠️ 定时退订</button>

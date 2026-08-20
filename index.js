@@ -2,6 +2,12 @@
  * 阿里云轻量云服务器定时自动退订脚本
  * 服务端运行（GitHub Actions），关闭浏览器也能到点执行
  * 依赖：@alicloud/pop-core
+ *
+ * 退订策略（对齐前端 app.js?v=73 有界并发模式）：
+ *   1) 全局令牌桶：平滑到 REFUND_QPS 次/秒，避免突发尖峰触发限流
+ *   2) 并发上限：worker 池最多 REFUND_CONCURRENCY 个在途请求
+ *   3) 幂等：每个实例固定一个 clientToken，限流重试时复用，避免重复退款
+ *   4) 单实例退避：Throttling/ServiceUnavailable 等瞬时错误指数退避重试，不阻塞其他 worker
  */
 const RPCClient = require('@alicloud/pop-core');
 
@@ -11,14 +17,11 @@ const SK = process.env.ALIYUN_SK || '';
 const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-const REFUND_BATCH_SIZE = 10;
-const REFUND_GLOBAL_QPS = 4;
-const REFUND_QPS_BURST = 4;
-const REFUND_INTER_BATCH_MS = 800;
-const REFUND_MAX_RETRY = 6;
-const REFUND_BACKOFF_MAX_MS = 20000;
-const REFUND_TOTAL_CONCURRENCY = 6;
-const REFUND_PER_INSTANCE_TIMEOUT = 180000;
+const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
+const REFUND_QPS = 8;             // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）
+const REFUND_MAX_RETRY = 5;       // 单实例限流最大重试次数
+const REFUND_BACKOFF_MAX_MS = 8000; // 单实例退避最大等待毫秒
+const REFUND_PER_INSTANCE_TIMEOUT = 60000; // 单实例请求超时
 
 const REGION_NAMES = {
   'cn-hangzhou': '杭州',
@@ -57,39 +60,6 @@ function makeTokenBucket(capacity, refillPerSec) {
       });
     }
   };
-}
-
-function makeSemaphore(max) {
-  let count = 0;
-  const waiting = [];
-  return {
-    acquire: () => new Promise(resolve => {
-      if (count < max) { count++; resolve(); }
-      else waiting.push(resolve);
-    }),
-    release: () => {
-      count = Math.max(0, count - 1);
-      if (waiting.length) { count++; const next = waiting.shift(); next(); }
-    }
-  };
-}
-
-// 全局限流冷却：任一实例被限流，所有 worker 统一暂停
-const gThrottleState = { until: 0, count: 0, baseMs: 8000, maxMs: 60000 };
-function resetGlobalThrottle() { gThrottleState.count = 0; gThrottleState.until = 0; }
-function triggerGlobalThrottle(regionName, instanceId) {
-  gThrottleState.count++;
-  const delay = Math.min(gThrottleState.maxMs, gThrottleState.baseMs * Math.pow(2, gThrottleState.count - 1))
-    + Math.floor(Math.random() * 2000);
-  gThrottleState.until = Date.now() + delay;
-  log(`🌐 命中账号级限流 [${regionName}] ${instanceId}，全局冷却 ${(delay / 1000).toFixed(1)} 秒`, 'warn');
-}
-async function waitGlobalThrottle() {
-  const wait = gThrottleState.until - Date.now();
-  if (wait > 0) {
-    log(`⏸️ 全局冷却中，等待 ${(wait / 1000).toFixed(1)} 秒...`);
-    await sleep(wait);
-  }
 }
 
 // ====== 客户端 ======
@@ -154,13 +124,13 @@ async function listInstancesInRegion(regionId) {
 }
 
 async function refundOne(regionId, instanceId, bucket) {
-  if (bucket) await bucket.take(1);
+  await bucket.take(1);
   const clientToken = `scheduled-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   const regionName = REGION_NAMES[regionId] || regionId;
   let attempt = 0;
   while (true) {
     try {
-      const res = await bssClient.request('RefundInstance', {
+      await bssClient.request('RefundInstance', {
         InstanceId: instanceId,
         ProductCode: 'ace_eweb',
         ProductType: '',
@@ -173,39 +143,54 @@ async function refundOne(regionId, instanceId, bucket) {
       const msg = (e && e.message) || String(e);
       if (isLocked(msg)) {
         log(`[${regionName}] ${instanceId} 不可退订: ${msg} (跳过)`, 'warn');
-        return { ok: false, id: instanceId, skipped: true, err: msg };
+        return { ok: false, id: instanceId, skipped: true, locked: true, err: msg };
       }
-      if (msg.includes('ResourceNotExists')) {
+      if (msg.includes('ResourceNotExists') || msg.includes('Instance.NotFound') || msg.includes('not exist')) {
         log(`[${regionName}] ${instanceId} 已不存在/已退订，跳过`);
         return { ok: false, id: instanceId, skipped: true, err: msg };
       }
-      if (attempt >= REFUND_MAX_RETRY) {
+      if (!isThrottle(msg) || attempt >= REFUND_MAX_RETRY) {
         log(`[${regionName}] ${instanceId} 退订失败: ${msg}`, 'error');
         return { ok: false, id: instanceId, err: msg };
       }
       attempt++;
-      if (attempt === 1 && isThrottle(msg)) triggerGlobalThrottle(regionName, instanceId);
-      const backoff = Math.min(REFUND_BACKOFF_MAX_MS, 1000 * Math.pow(2, attempt)) + Math.floor(Math.random() * 1000);
-      if (attempt <= 1) log(`[${regionName}] ${instanceId} 触发限流，第 ${attempt} 次退避重试 (${backoff}ms)`, 'warn');
+      const backoff = Math.min(REFUND_BACKOFF_MAX_MS, 400 * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
+      if (attempt <= 2) log(`[${regionName}] ${instanceId} 触发限流，第 ${attempt} 次退避重试 (${backoff}ms)`, 'warn');
       await sleep(backoff);
     }
   }
 }
 
-async function safeRefund(regionId, instanceId, bucket, sem) {
-  await waitGlobalThrottle();
-  await sem.acquire();
-  try {
-    return await refundOne(regionId, instanceId, bucket);
-  } finally {
-    sem.release();
+async function runBoundedRefund(tasks) {
+  const bucket = makeTokenBucket(REFUND_QPS, REFUND_QPS);
+  const total = { success: 0, skipped: 0, locked: 0, fail: 0 };
+  if (!tasks.length) return total;
+  let idx = 0, done = 0;
+  async function worker() {
+    while (idx < tasks.length) {
+      const task = tasks[idx++];
+      const r = await refundOne(task.rid, task.iid, bucket);
+      const rn2 = REGION_NAMES[task.rid] || task.rid;
+      if (r.skipped && r.locked) { total.locked++; log(`🔒 [${rn2}] ${r.id}: ${r.err} (跳过)`, 'warn'); }
+      else if (r.skipped) { total.skipped++; log(`⚪ [${rn2}] ${r.id}: 已不存在/已退订，跳过`); }
+      else if (r.ok) { total.success++; }
+      else { total.fail++; log(`❌ [${rn2}] ${r.id}: ${r.err}`, 'error'); }
+      done++;
+      if (done % 10 === 0 || done === tasks.length) {
+        log(`📊 进度 ${done}/${tasks.length} (成功${total.success} 跳过${total.skipped} 锁定${total.locked} 失败${total.fail})`);
+      }
+    }
   }
+  const pool = [];
+  const n = Math.min(REFUND_CONCURRENCY, tasks.length);
+  for (let w = 0; w < n; w++) pool.push(worker());
+  await Promise.all(pool);
+  return total;
 }
 
 // ====== 主流程 ======
 async function main() {
   log(`启动定时退订：目标地域 ${REGION_LIST.map(r => REGION_NAMES[r] || r).join(' / ')}`);
-  resetGlobalThrottle();
 
   // 1. 查询所有实例
   const byRegion = {};
@@ -214,47 +199,28 @@ async function main() {
     byRegion[rid] = list;
     log(`[${REGION_NAMES[rid] || rid}] 查到 ${list.length} 台实例`);
   }
-  const total = Object.values(byRegion).reduce((a, b) => a + b.length, 0);
-  if (total === 0) {
+
+  // 2. 构建任务队列
+  const tasks = [];
+  Object.keys(byRegion).forEach(rid => {
+    const arr = byRegion[rid] || [];
+    if (!arr.length) { log(`[${REGION_NAMES[rid] || rid}] 无实例，跳过`, 'info'); return; }
+    arr.forEach(it => tasks.push({ rid, iid: it.InstanceId }));
+    log(`[${REGION_NAMES[rid] || rid}] 共 ${arr.length} 台待退订`, 'info');
+  });
+
+  if (!tasks.length) {
     log('未发现任何实例，无需退订', 'success');
     return;
   }
-  log(`共 ${total} 台待退订`);
+  log(`🔄 有界并发退订 ${tasks.length} 台（并发≤${REFUND_CONCURRENCY}，速率≤${REFUND_QPS}/秒，限流自动退避重试）...`, 'warn');
 
-  // 2. 按地区分批并行退订
-  const bucket = makeTokenBucket(REFUND_QPS_BURST, REFUND_GLOBAL_QPS);
-  const sem = makeSemaphore(REFUND_TOTAL_CONCURRENCY);
-  const stats = { success: 0, skipped: 0, fail: 0 };
-
-  async function regionWorker(rid) {
-    const list = byRegion[rid] || [];
-    if (!list.length) return;
-    const regionName = REGION_NAMES[rid] || rid;
-    let batchNo = 0;
-    const arr = list.slice();
-    while (arr.length) {
-      batchNo++;
-      const batch = arr.splice(0, REFUND_BATCH_SIZE);
-      log(`[${regionName}] 第 ${batchNo} 批：退订 ${batch.length} 台`);
-      const results = await Promise.all(batch.map(it => safeRefund(rid, it.InstanceId, bucket, sem)));
-      results.forEach(r => {
-        if (r.ok) stats.success++;
-        else if (r.skipped) stats.skipped++;
-        else stats.fail++;
-      });
-      if (arr.length) {
-        log(`[${regionName}] 本批完成，${REFUND_INTER_BATCH_MS / 1000} 秒后继续（剩余 ${arr.length} 台）`);
-        await sleep(REFUND_INTER_BATCH_MS);
-      }
-    }
-    log(`[${regionName}] 该地区退订完成`, 'success');
-  }
-
-  await Promise.all(REGION_LIST.map(rid => regionWorker(rid)));
+  // 3. 执行退订
+  const total = await runBoundedRefund(tasks);
 
   log(`━━━━━━━━━━━━━━━━━━━━━━`);
-  log(`退订完成：成功 ${stats.success} 台，跳过 ${stats.skipped} 台，失败 ${stats.fail} 台`, stats.fail === 0 ? 'success' : 'warn');
-  if (stats.fail > 0) process.exit(1);
+  log(`退订完成：成功 ${total.success} 台，跳过 ${total.skipped} 台，锁定 ${total.locked} 台，失败 ${total.fail} 台`, total.fail === 0 ? 'success' : 'warn');
+  if (total.fail > 0) process.exit(1);
 }
 
 main().catch(e => {

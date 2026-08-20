@@ -1294,20 +1294,18 @@ function initScheduleTimePicker() {
   var hourSel = document.getElementById('scheduleHour');
   var minuteSel = document.getElementById('scheduleMinute');
   if (!hourSel || !minuteSel) return;
-  // 开放任意时间：生成 0–23 小时、0–59 分钟全部选项（测试用，不受 23:35–23:59 限制）
-  for (var h = 0; h <= 23; h++) {
-    var optH = document.createElement('option');
-    optH.value = String(h).padStart(2, '0');
-    optH.textContent = String(h).padStart(2, '0');
-    hourSel.appendChild(optH);
-  }
-  for (var m = 0; m <= 59; m++) {
+  // 定时退订仅在每晚 23:35–23:59 执行，时间选择器只生成 23 时 + 35–59 分
+  var optH = document.createElement('option');
+  optH.value = '23';
+  optH.textContent = '23';
+  hourSel.appendChild(optH);
+  for (var m = 35; m <= 59; m++) {
     var opt2 = document.createElement('option');
     opt2.value = String(m).padStart(2, '0');
     opt2.textContent = String(m).padStart(2, '0');
     minuteSel.appendChild(opt2);
   }
-  // 默认选中 23:35（保留历史习惯），用户可改任意时间
+  // 默认选中 23:35
   hourSel.value = '23';
   minuteSel.value = '35';
 }
@@ -1353,9 +1351,13 @@ async function executeCancel() {
     var hourNum = parseInt(hourStr, 10);
     var minuteNum = parseInt(minuteStr, 10);
 
-    // 【时间已放开】任意小时/分钟均可设置，不再限定 23:35–23:59（便于测试）
+    // 定时退订时间仅允许 23:35–23:59（与云端窗口判定一致，防止保存到非法时间）
+    if (!(hourNum === 23 && minuteNum >= 35 && minuteNum <= 59)) {
+      alert('定时退订时间只能设置在 23:35 到 23:59 之间');
+      return;
+    }
 
-    // 【关键】定时退订由 Supabase 云端定时(pg_cron)执行，与电脑/浏览器开关无关。
+    // 【关键】定时退订由阿里云 FC 后台定时触发，与电脑/浏览器开关无关。
     // 必须保证云端配置完整：时间 + 开关 + AK/SK 都要落地到 Supabase，否则云端到点无凭证可退。
     if (!(window.AliyunClient && AliyunClient.hasCredentials && AliyunClient.hasCredentials())) {
       log('❌ 请先在「设置凭证」里填写并保存 AccessKey，否则云端到点无凭证可退订', 'error');
@@ -1813,7 +1815,7 @@ async function renderScheduledTasks() {
         '<strong>⏰ 每天 ' + timeStr + ' 自动退订</strong><br>' +
         lastInfo +
         scopeInfo +
-        '<small style="color:#666">执行时间已放开，任意时间点都会执行（便于测试）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若到点，会立即补跑。退订=释放实例，立即生效不再计费。</small>' +
+        '<small style="color:#666">执行窗口：每晚 23:35–23:59。① 阿里云 FC 后台到点自动退订（关浏览器也执行）；② 首轮退完后每 10 分钟复检，失败实例重退，直到全部退完或窗口结束。退订=释放实例，立即生效不再计费。</small>' +
         '</div>' +
         '<div style="display:flex; flex-direction:column; gap:6px;">' +
         '<button class="btn btn-danger" style="padding:4px 12px; font-size:12px;" onclick="runScheduledCancelNow()">🚀 立即执行</button>' +
@@ -1859,15 +1861,14 @@ async function checkAndRunScheduledRefund() {
   var minute = data.schedule_minute;
   if (hour === undefined || hour === null || minute === undefined || minute === null) return;
 
-  // 时间已放开：任意设定时间都允许执行（不再限定 23:35–23:59，便于测试）
+  // 执行窗口：仅 23:35–23:59（与云端一致）。未到点由下方 setTimeout 布防，到点且处于窗口才执行。
 
   var bj = getBeijingDate();
   var target = new Date(bj);
   target.setHours(parseInt(hour, 10), parseInt(minute, 10), 0, 0);
   var nowMs = bj.getTime();
   var targetMs = target.getTime();
-  // 执行窗口已放开，任意时间均视为窗口内
-  var inWindow = true;
+  var inWindow = (bj.getHours() === 23 && bj.getMinutes() >= 35);
 
   if (nowMs < targetMs) {
     // 未到点 → 布防定时器（页面保持打开时到点自动触发）
@@ -1885,9 +1886,14 @@ async function checkAndRunScheduledRefund() {
     }, delayMs);
     log('⏳ 已布防前端定时器：今天 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 自动退订（需保持本页打开；关闭浏览器则依赖服务端调度器）', 'info');
   } else if (inWindow) {
-    // 已过点且处于执行窗口 → 立即补跑（不限制每天次数）
-    log('⏰ 检测到 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 已过且处于执行窗口，立即执行定时退订...', 'warn');
-    executeScheduledRefund();
+    // 已过点且处于执行窗口 → 立即补跑（每日只跑一次：云端已记录今天日期则不重复）
+    var _todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    if (data && data.schedule_last_executed_date === _todayStr) {
+      log('ℹ️ 今日定时退订已由服务端执行过，本页不再重复补跑', 'info');
+    } else {
+      log('⏰ 检测到 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 已过且处于执行窗口，立即执行定时退订...', 'warn');
+      executeScheduledRefund();
+    }
   } else {
     // 已过点但不在窗口（如过了 23:59）→ 不执行，等待明天窗口
     if (state.scheduleTimerId) { clearTimeout(state.scheduleTimerId); state.scheduleTimerId = null; }

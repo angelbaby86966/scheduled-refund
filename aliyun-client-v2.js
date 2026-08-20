@@ -597,7 +597,7 @@
         // 稍等再删，确保 InvokeCommand 已落盘
         await new Promise(function(r) { setTimeout(r, 1000); });
         try {
-          await this.deleteCommand(regionId, commandId);
+          await this.deleteCommandWithRetry(regionId, commandId, 3);
           doLog('🗑️ 已删除临时命令模板 ' + commandId, 'info');
         } catch (delErr) {
           doLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败: ' + (delErr.message || delErr), 'warn');
@@ -607,7 +607,7 @@
         // 即使 invoke 失败也尝试清理模板
         try {
           await new Promise(function(r) { setTimeout(r, 200); });
-          await this.deleteCommand(regionId, commandId);
+          await this.deleteCommandWithRetry(regionId, commandId, 3);
           doLog('🗑️ 已删除临时命令模板 ' + commandId, 'info');
         } catch (e) { /* 清理失败不影响抛错 */ }
         throw invokeErr;
@@ -693,6 +693,19 @@
     /** 删除命令模板 */
     async deleteCommand(regionId, commandId) {
       return callAliyunApi(regionId, 'DeleteCommand', { CommandId: commandId });
+    },
+
+    /** 删除命令模板（带重试兜底） */
+    async deleteCommandWithRetry(regionId, commandId, maxRetry) {
+      maxRetry = maxRetry || 3;
+      for (var i = 0; i < maxRetry; i++) {
+        try {
+          return await this.deleteCommand(regionId, commandId);
+        } catch (err) {
+          if (i === maxRetry - 1) throw err;
+          await new Promise(function(r) { setTimeout(r, 800 * (i + 1)); });
+        }
+      }
     },
 
     /** 停止实例 */

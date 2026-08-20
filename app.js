@@ -291,6 +291,9 @@ var REGION_INFO = {
   'cn-shenzhen':  '深圳',
   'cn-chengdu':   '成都',
   'cn-guangzhou': '广州',
+  'cn-heyuan':    '河源',
+  'cn-wuhan-lr':  '武汉',
+  'cn-qingdao':   '青岛',
 };
 
 var REGION_COLORS = {
@@ -300,6 +303,9 @@ var REGION_COLORS = {
   'cn-shenzhen':  '#10b981',
   'cn-chengdu':   '#f97316',
   'cn-guangzhou': '#8b5cf6',
+  'cn-heyuan':    '#06b6d4',
+  'cn-wuhan-lr':  '#ec4899',
+  'cn-qingdao':   '#84cc16',
 };
 
 // 超时设置的 fetch 封装（用于直接调用阿里云 API 的防超时）

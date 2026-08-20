@@ -1294,17 +1294,22 @@ function initScheduleTimePicker() {
   var hourSel = document.getElementById('scheduleHour');
   var minuteSel = document.getElementById('scheduleMinute');
   if (!hourSel || !minuteSel) return;
-  // 定时时间仅允许 23:35–23:59
-  var optH = document.createElement('option');
-  optH.value = '23';
-  optH.textContent = '23';
-  hourSel.appendChild(optH);
-  for (var m = 35; m <= 59; m++) {
+  // 开放任意时间：生成 0–23 小时、0–59 分钟全部选项（测试用，不受 23:35–23:59 限制）
+  for (var h = 0; h <= 23; h++) {
+    var optH = document.createElement('option');
+    optH.value = String(h).padStart(2, '0');
+    optH.textContent = String(h).padStart(2, '0');
+    hourSel.appendChild(optH);
+  }
+  for (var m = 0; m <= 59; m++) {
     var opt2 = document.createElement('option');
     opt2.value = String(m).padStart(2, '0');
     opt2.textContent = String(m).padStart(2, '0');
     minuteSel.appendChild(opt2);
   }
+  // 默认选中 23:35（保留历史习惯），用户可改任意时间
+  hourSel.value = '23';
+  minuteSel.value = '35';
 }
 
 function toggleCancelMode() {
@@ -1348,11 +1353,7 @@ async function executeCancel() {
     var hourNum = parseInt(hourStr, 10);
     var minuteNum = parseInt(minuteStr, 10);
 
-    // 定时退订时间仅允许 23:35–23:59
-    if (!(hourNum === 23 && minuteNum >= 35 && minuteNum <= 59)) {
-      alert('定时退订时间只能设置在 23:35 到 23:59 之间');
-      return;
-    }
+    // 【时间已放开】任意小时/分钟均可设置，不再限定 23:35–23:59（便于测试）
 
     // 【关键】定时退订由 Supabase 云端定时(pg_cron)执行，与电脑/浏览器开关无关。
     // 必须保证云端配置完整：时间 + 开关 + AK/SK 都要落地到 Supabase，否则云端到点无凭证可退。
@@ -1366,11 +1367,16 @@ async function executeCancel() {
 
     try {
       if (window.CloudStore && currentUser && currentUser.user) {
+        // 当前激活凭证名（用于云端「只退当前凭证」）
+        var _schedCred = '';
+        try { var _ap = AliyunClient.getActiveProfile(); if (_ap) _schedCred = _ap.name; } catch(e) {}
         // 原子写入：时间 + 开关 + 凭证，确保云端配置完整（GitHub Actions 每10分钟读取并执行）
         await CloudStore.updateUserData(currentUser.user, {
           schedule_hour: hourNum,
           schedule_minute: minuteNum,
           schedule_enabled: true,
+          schedule_regions: (state.selectedRegions && state.selectedRegions.size) ? Array.from(state.selectedRegions) : [],
+          schedule_credential: _schedCred,
           ak_id: ak,
           ak_secret: sk,
         });
@@ -1380,7 +1386,9 @@ async function executeCancel() {
         if (!ok) {
           log('⚠️ 云端未确认到完整配置（时间或凭证缺失），请检查网络后重新保存', 'warn');
         } else {
-          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订（GitHub Actions 云端调度，关电脑/关浏览器也会按时执行）', 'success');
+          var _regionNote = (state.selectedRegions && state.selectedRegions.size) ? ('仅退 ' + Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')) : '全部地域';
+          var _credNote = _schedCred ? ('仅退凭证「' + _schedCred + '」') : '全部凭证';
+          log('✅ 配置已保存到云端：每天 ' + hourStr + ':' + minuteStr + ' 自动退订（' + _credNote + '；' + _regionNote + '；云端调度，关电脑/关浏览器也会按时执行）', 'success');
         }
       } else {
         log('⚠️ 未登录云端账号，配置仅本地生效；请登录后再保存，云端调度才会接管', 'warn');
@@ -1790,13 +1798,22 @@ async function renderScheduledTasks() {
       } else {
         lastInfo = '<small style="color:#999">⏳ 尚未执行过（首次执行后会自动记录日期）</small><br>';
       }
+      var _scopeParts = [];
+      _scopeParts.push(data.schedule_credential ? ('仅退凭证「' + data.schedule_credential + '」') : '全部凭证');
+      if (data.schedule_regions && data.schedule_regions.length) {
+        _scopeParts.push('地域：' + data.schedule_regions.map(function(r){ return REGION_INFO[r] || r; }).join('、'));
+      } else {
+        _scopeParts.push('全部地域');
+      }
+      var scopeInfo = '<small style="color:#2563eb">🎯 ' + _scopeParts.join(' · ') + '</small><br>';
       listEl.innerHTML =
         '<div class="task-item" style="padding:12px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px;">' +
         '<div style="display:flex; justify-content:space-between; align-items:center;">' +
         '<div>' +
         '<strong>⏰ 每天 ' + timeStr + ' 自动退订</strong><br>' +
         lastInfo +
-        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。退订=释放实例，立即生效不再计费。</small>' +
+        scopeInfo +
+        '<small style="color:#666">执行时间已放开，任意时间点都会执行（便于测试）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若到点，会立即补跑。退订=释放实例，立即生效不再计费。</small>' +
         '</div>' +
         '<div style="display:flex; flex-direction:column; gap:6px;">' +
         '<button class="btn btn-danger" style="padding:4px 12px; font-size:12px;" onclick="runScheduledCancelNow()">🚀 立即执行</button>' +
@@ -1842,20 +1859,15 @@ async function checkAndRunScheduledRefund() {
   var minute = data.schedule_minute;
   if (hour === undefined || hour === null || minute === undefined || minute === null) return;
 
-  // 定时时间只允许 23:35–23:59，其余时间不执行
-  if (!(hour === 23 && minute >= 35 && minute <= 59)) {
-    if (state.scheduleTimerId) { clearTimeout(state.scheduleTimerId); state.scheduleTimerId = null; }
-    log('❌ 定时时间必须在 23:35–23:59 之间，已忽略该任务', 'error');
-    return;
-  }
+  // 时间已放开：任意设定时间都允许执行（不再限定 23:35–23:59，便于测试）
 
   var bj = getBeijingDate();
   var target = new Date(bj);
   target.setHours(parseInt(hour, 10), parseInt(minute, 10), 0, 0);
   var nowMs = bj.getTime();
   var targetMs = target.getTime();
-  // 是否处于允许的执行窗口 23:35–23:59（北京时间）
-  var inWindow = (bj.getHours() === 23 && bj.getMinutes() >= 35);
+  // 执行窗口已放开，任意时间均视为窗口内
+  var inWindow = true;
 
   if (nowMs < targetMs) {
     // 未到点 → 布防定时器（页面保持打开时到点自动触发）
@@ -1909,7 +1921,10 @@ async function executeScheduledRefund() {
   }
 
   var nowStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  log('⏰ 北京时间 ' + nowStr + '，开始执行定时退订', 'warn');
+  var _sel = (state.selectedRegions && state.selectedRegions.size)
+    ? Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')
+    : '全部地域';
+  log('⏰ 北京时间 ' + nowStr + '，开始执行定时退订（范围：' + _sel + '）', 'warn');
 
   // 记录最后执行日期（仅用于监控，不再作为「每天只跑一次」的闸门）—— 统一用【北京时间】日期，与 cron 脚本保持一致
   try {
@@ -1921,36 +1936,22 @@ async function executeScheduledRefund() {
     }
   } catch(e) {}
 
-  // 遍历全部凭证（多 profile 各退各的实例）
+  // 【只退当前凭证】仅对当前激活的凭证执行退订；若未激活任何凭证，则退回全部（兼容旧行为）
+  var _activeProfile = null;
+  try { _activeProfile = AliyunClient.getActiveProfile(); } catch(e) {}
   var profiles = [];
-  try { profiles = AliyunClient.listProfiles() || []; } catch(e) { profiles = []; }
-  if (!profiles.length) profiles = [{ name: '默认' }];
-
-  // 按 AK 去重：同一账号内相同 AK 视为重复凭证，只退一次（不影响不同账号）
-  var _seenAk = {};
-  var _dedup = 0;
-  for (var _k = 0; _k < profiles.length; _k++) {
-    var _a = (profiles[_k].ak_id || '').trim();
-    if (_a) { if (_seenAk[_a]) continue; _seenAk[_a] = true; }
-    _dedup++;
+  if (_activeProfile) {
+    profiles = [_activeProfile];
+  } else {
+    try { profiles = AliyunClient.listProfiles() || []; } catch(e) { profiles = []; }
+    if (!profiles.length) profiles = [{ name: '默认' }];
   }
-  log('🔑 共扫描 ' + profiles.length + ' 个凭证，去重后 ' + _dedup + ' 个（重复凭证只退一次）', 'info');
-
-  var originalActive = '';
-  try { var ap = AliyunClient.getActiveProfile(); if (ap) originalActive = ap.name; } catch(e) {}
+  log('🔑 仅退当前凭证：' + profiles.map(function(p){ return '「' + p.name + '」'; }).join('') + '（共 ' + profiles.length + ' 个）', 'info');
 
   var grandSuccess = 0, grandSkip = 0, grandFail = 0;
-  var _seenAkRun = {};
 
   for (var pi = 0; pi < profiles.length; pi++) {
     var prof = profiles[pi];
-    // 去重：与其他凭证 AK 相同时跳过（重复凭证只退一次）
-    var _profAk = (prof.ak_id || '').trim();
-    if (_profAk && _seenAkRun[_profAk]) {
-      log('⚠️ 凭证「' + prof.name + '」与其他凭证 AK 相同，已跳过（重复凭证只退一次）', 'warn');
-      continue;
-    }
-    if (_profAk) _seenAkRun[_profAk] = true;
     try {
       await AliyunClient.useProfile(prof.name);
     } catch(e) {
@@ -1965,8 +1966,10 @@ async function executeScheduledRefund() {
     var _profSuccess = 0, _profSkip = 0, _profFail = 0;
     while (_round < _maxRounds) {
       _round++;
-      // 获取该凭证下的所有实例
-      var regionIds = Object.keys(REGION_INFO);
+      // 获取该凭证下的实例：仅退当前选中地域（标签），未选任何地域则退全部
+      var regionIds = (state.selectedRegions && state.selectedRegions.size)
+        ? Array.from(state.selectedRegions)
+        : Object.keys(REGION_INFO);
       var allInstances = [];
       for (var i = 0; i < regionIds.length; i++) {
         var rid = regionIds[i];
@@ -2020,19 +2023,22 @@ async function executeScheduledRefund() {
     }
   }
 
-  // 还原用户原本选中的活跃凭证
-  if (originalActive) {
-    try { await AliyunClient.useProfile(originalActive); } catch(e) {}
-  }
+  // （仅退当前凭证，无需还原活跃凭证）
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-  log('🏁 全部凭证退订完成：成功 ' + grandSuccess + ' 台，跳过 ' + grandSkip + ' 台，失败 ' + grandFail + ' 台', grandFail === 0 ? 'success' : 'warn');
+  log('🏁 当前凭证退订完成：成功 ' + grandSuccess + ' 台，跳过 ' + grandSkip + ' 台，失败 ' + grandFail + ' 台', grandFail === 0 ? 'success' : 'warn');
 
   await refreshAllRegions();
 }
 
 async function runScheduledCancelNow() {
-  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订所有地域的所有云主机。\n\n确认继续？')) return;
+  var _active = null;
+  try { _active = AliyunClient.getActiveProfile(); } catch(e) {}
+  var _credName = _active ? ('「' + _active.name + '」') : '当前凭证';
+  var _sel = (state.selectedRegions && state.selectedRegions.size)
+    ? Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')
+    : '全部地域';
+  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订【' + _credName + '】的【' + _sel + '】云主机。\n\n确认继续？')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🚀 立即触发定时退订...', 'warn');

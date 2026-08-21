@@ -20,7 +20,7 @@ const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,
 const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
 const REFUND_QPS = 8;             // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）
 const REFUND_MAX_RETRY = 5;       // 单实例限流最大重试次数
-const REFUND_BACKOFF_MAX_MS = 8000; // 单实例退避最大等待毫秒
+const REFUND_BACKOFF_MAX_MS = 5000; // 单实例退避最大等待毫秒（v83 对齐前端：400ms 起、封顶 5s）
 const REFUND_PER_INSTANCE_TIMEOUT = 60000; // 单实例请求超时
 
 const REGION_NAMES = {

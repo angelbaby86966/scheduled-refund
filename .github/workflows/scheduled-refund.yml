@@ -28,5 +28,5 @@ jobs:
         env:
           ALIYUN_AK: ${{ secrets.ALIYUN_AK }}
           ALIYUN_SK: ${{ secrets.ALIYUN_SK }}
-          REGIONS: ${{ vars.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou' }}
+          REGIONS: ${{ vars.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan,cn-qingdao' }}
         run: npm run refund

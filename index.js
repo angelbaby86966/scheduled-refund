@@ -14,7 +14,7 @@ const RPCClient = require('@alicloud/pop-core');
 // ====== 配置 ======
 const AK = process.env.ALIYUN_AK || '';
 const SK = process.env.ALIYUN_SK || '';
-const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou')
+const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan,cn-qingdao')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
@@ -30,6 +30,9 @@ const REGION_NAMES = {
   'cn-shenzhen': '深圳',
   'cn-chengdu': '成都',
   'cn-guangzhou': '广州',
+  'cn-heyuan': '河源',
+  'cn-wuhan': '武汉',
+  'cn-qingdao': '青岛',
 };
 
 // ====== 工具 ======

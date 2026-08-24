@@ -555,6 +555,38 @@
                   <select id="icRegion" class="input" style="max-width:320px;"></select>
                 </div>
 
+                <!-- ⑤ 一键全自动部署 -->
+                <fieldset style="border:2px solid #1677ff;border-radius:8px;padding:14px;margin-bottom:16px;background:#f0f5ff;">
+                  <legend style="font-weight:700;color:#1677ff;padding:0 6px;">🤖 一键全自动部署（推荐）</legend>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">只需填源实例ID和数量，系统自动：创建镜像 → 轮询等镜像就绪 → 自动选中 → 批量开通。全程写进下方「操作日志」。</p>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;">
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">源实例ID（装好 PCDN 的黄金主机）</label>
+                      <input type="text" id="icAutoSrcInstance" class="input" placeholder="例如 swas-abc123" />
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">套餐 PlanId</label>
+                      <input type="text" id="icAutoPlanId" class="input" placeholder="默认锁定套餐" />
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">开通数量（1~100）</label>
+                      <input type="number" id="icAutoAmount" class="input" value="1" min="1" max="100" />
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                      <label style="font-size:12px;">购买时长（月）</label>
+                      <input type="number" id="icAutoPeriod" class="input" value="1" min="1" max="60" />
+                    </div>
+                    <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
+                      <input type="checkbox" id="icAutoPay" checked />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付</label>
+                    </div>
+                    <button class="btn btn-primary" style="font-size:15px;padding:10px 24px;" onclick="icAutoDeploy()">🚀 一键全自动部署</button>
+                  </div>
+                  <div id="icAutoProgress" style="margin-top:12px;font-size:13px;"></div>
+                  <div id="icAutoStatus" style="margin-top:8px;font-size:13px;color:#666;"></div>
+                  <div id="icAutoResult" style="margin-top:8px;font-size:13px;"></div>
+                </fieldset>
+
                 <!-- ① 打镜像 -->
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">① 从实例创建黄金镜像（CreateCustomImage）</legend>
@@ -834,7 +866,7 @@
   <script src="app.js?v=73"></script>
   <script src="node-extract.js?v=7"></script>
   <script src="one-click-deploy.js?v=4"></script>
-  <script src="image-clone.js?v=4"></script>
+  <script src="image-clone.js?v=5"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {

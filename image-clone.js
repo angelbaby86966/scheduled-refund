@@ -46,6 +46,10 @@
     if (plan && !plan.value && typeof LOCKED_PLAN_ID !== 'undefined' && LOCKED_PLAN_ID) {
       plan.value = LOCKED_PLAN_ID;
     }
+    var autoPlan = document.getElementById('icAutoPlanId');
+    if (autoPlan && !autoPlan.value && typeof LOCKED_PLAN_ID !== 'undefined' && LOCKED_PLAN_ID) {
+      autoPlan.value = LOCKED_PLAN_ID;
+    }
     var period = document.getElementById('icPeriod');
     if (period && !period.value) period.value = '1';
   }
@@ -72,6 +76,29 @@
     }
   }
 
+  // 统一解析 ListImages 返回结构
+  function icParseImages(r) {
+    var imgs = [];
+    if (r.Images && r.Images.Image) imgs = r.Images.Image;
+    else if (Array.isArray(r.Images)) imgs = r.Images;
+    else if (r.Image) imgs = r.Image;
+    else if (Array.isArray(r.image)) imgs = r.image;
+    return imgs;
+  }
+
+  // 统一解析 CreateInstances 返回的实例ID
+  function icParseInstanceIds(r) {
+    var ids = [];
+    if (r.InstanceIdSets && r.InstanceIdSets.InstanceId) ids = r.InstanceIdSets.InstanceId;
+    else if (r.InstanceIds) ids = r.InstanceIds;
+    else if (Array.isArray(r.instanceIds)) ids = r.instanceIds;
+    return ids;
+  }
+
+  function icSleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
   // ② 列出本账号自定义镜像（仅自定义，不含官方系统镜像）
   async function icLoadImages() {
     if (!icGuard()) return;
@@ -87,11 +114,7 @@
         ImageType: 'Custom',
         PageSize: 100
       });
-      var imgs = [];
-      if (r.Images && r.Images.Image) imgs = r.Images.Image;
-      else if (Array.isArray(r.Images)) imgs = r.Images;
-      else if (r.Image) imgs = r.Image;
-      else if (Array.isArray(r.image)) imgs = r.image;
+      var imgs = icParseImages(r);
       if (!imgs.length) {
         box.innerHTML = '⚠️ 该地域暂无自定义镜像。请确认「① 创建镜像」已成功生成（状态需为 Available，Creating 期间不显示）。';
         return;
@@ -106,6 +129,111 @@
     } catch (e) {
       box.innerHTML = '❌ 加载失败: ' + e.message;
       icLog('[镜像克隆] 加载镜像失败: ' + e.message, 'error');
+    }
+  }
+
+  // ⑤ 一键全自动部署：创建镜像 → 轮询 Available → 自动选中 → 开通 → 返回实例ID
+  async function icAutoDeploy() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var srcInstance = (document.getElementById('icAutoSrcInstance').value || '').trim();
+    var amount = parseInt(document.getElementById('icAutoAmount').value, 10) || 1;
+    var planId = (document.getElementById('icAutoPlanId').value || '').trim();
+    var period = parseInt(document.getElementById('icAutoPeriod').value, 10) || 1;
+    var autoPay = document.getElementById('icAutoPay').checked;
+    if (!srcInstance) { alert('请填写源实例ID'); return; }
+    if (!planId) { alert('请填写套餐 PlanId'); return; }
+    if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
+
+    // 自动生成镜像名：golden-{地域}-{日期}-{随机}
+    var today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    var imageName = 'golden-' + region + '-' + today + '-' + Math.random().toString(36).substring(2, 6);
+
+    var statusDiv = document.getElementById('icAutoStatus');
+    var progressDiv = document.getElementById('icAutoProgress');
+    var resultDiv = document.getElementById('icAutoResult');
+
+    function setStep(n, msg) {
+      progressDiv.innerHTML = '<div style="font-size:16px;font-weight:600;color:#1677ff;margin-bottom:4px;">第 ' + n + '/5 步</div>' +
+        '<div style="color:#333;">' + msg + '</div>';
+      icLog('[全自动] 第 ' + n + '/5 步：' + msg, 'info');
+    }
+
+    statusDiv.innerHTML = '⏳ 全自动部署已开始，请等待...';
+    progressDiv.innerHTML = '';
+    resultDiv.innerHTML = '';
+
+    try {
+      // Step 1: 创建镜像
+      setStep(1, '从实例 ' + srcInstance + ' 创建自定义镜像「' + imageName + '」...');
+      var createRes = await AliyunClient.callCentralApi('CreateCustomImage', {
+        RegionId: region,
+        InstanceId: srcInstance,
+        ImageName: imageName
+      });
+      var imageId = createRes.ImageId || createRes.imageId;
+      if (!imageId) throw new Error('创建镜像未返回 ImageId，响应：' + JSON.stringify(createRes));
+      icLog('[全自动] 镜像已提交，ImageId=' + imageId + '，镜像名=' + imageName, 'success');
+
+      // Step 2: 轮询镜像 Available
+      setStep(2, '等待镜像 ' + imageId + ' 状态变为 Available（每10秒检查，最多10分钟）...');
+      var foundImage = null;
+      var imageAvailable = false;
+      for (var i = 0; i < 60; i++) {
+        await icSleep(10000);
+        var listRes = await AliyunClient.callCentralApi('ListImages', {
+          RegionId: region, ImageType: 'Custom', PageSize: 100
+        });
+        var imgs = icParseImages(listRes);
+        for (var k = 0; k < imgs.length; k++) {
+          if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
+        }
+        if (foundImage) {
+          var st = foundImage.Status || '未知';
+          icLog('[全自动] 第 ' + (i + 1) + ' 次检查，镜像状态=' + st, 'info');
+          if (st === 'Available') { imageAvailable = true; break; }
+        } else {
+          icLog('[全自动] 第 ' + (i + 1) + ' 次检查，镜像尚未入库...', 'info');
+        }
+      }
+      if (!imageAvailable) {
+        throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
+      }
+      icLog('[全自动] 镜像已就绪 Available，ImageId=' + imageId, 'success');
+
+      // Step 3: 自动选中新镜像
+      setStep(3, '已自动选中镜像 ' + imageId + '，准备开通 ' + amount + ' 台...');
+      var sel = document.getElementById('icImageSelect');
+      if (sel) {
+        sel.innerHTML = '<option value="' + imageId + '">' + imageName + ' (' + imageId + ') [Available]</option>';
+        sel.value = imageId;
+      }
+      await icSleep(500);
+
+      // Step 4: 开通实例
+      setStep(4, '基于镜像 ' + imageId + ' 调用 CreateInstances 开通 ' + amount + ' 台（' + region + '）...');
+      var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
+        RegionId: region,
+        ImageId: imageId,
+        PlanId: planId,
+        Amount: amount,
+        Period: period,
+        PeriodUnit: 'Month',
+        AutoPay: autoPay,
+        ClientToken: 'wb-auto-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
+      });
+      var ids = icParseInstanceIds(launchRes);
+      icLog('[全自动] 开通请求已提交，返回实例数=' + ids.length + (autoPay ? '（自动支付）' : '（待支付订单）'), 'success');
+
+      // Step 5: 完成
+      setStep(5, '完成。新实例ID：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）'));
+      statusDiv.innerHTML = '✅ 全自动部署完成，共 ' + ids.length + ' 台。';
+      resultDiv.innerHTML = ids.length ? ('<div style="margin-top:8px;"><strong>新实例ID：</strong><br><code>' + ids.join('</code><br><code>') + '</code></div>') : '';
+      if (typeof renderAll === 'function') renderAll();
+    } catch (e) {
+      progressDiv.innerHTML = '<div style="color:#ff4d4f;font-weight:600;">❌ 全自动部署中断</div><div style="color:#666;font-size:13px;">' + e.message + '</div>';
+      statusDiv.innerHTML = '❌ 失败：' + e.message;
+      icLog('[全自动] 部署中断：' + e.message, 'error');
     }
   }
 
@@ -138,10 +266,7 @@
         AutoPay: autoPay,
         ClientToken: 'wb-ic-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
       });
-      var ids = [];
-      if (r.InstanceIdSets && r.InstanceIdSets.InstanceId) ids = r.InstanceIdSets.InstanceId;
-      else if (r.InstanceIds) ids = r.InstanceIds;
-      else if (Array.isArray(r.instanceIds)) ids = r.instanceIds;
+      var ids = icParseInstanceIds(r);
       st.innerHTML = '✅ 开通请求已提交' + (autoPay ? '（自动支付）' : '（生成待支付订单）');
       res.innerHTML = (ids.length ? ('🚀 新实例ID：<br><code>' + ids.join('</code><br><code>') + '</code>')
                                   : '下单已提交，请到阿里云控制台查看实例/订单');
@@ -285,6 +410,7 @@
   window.icCreateImage = icCreateImage;
   window.icLoadImages = icLoadImages;
   window.icLaunchFromImage = icLaunchFromImage;
+  window.icAutoDeploy = icAutoDeploy;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', icInit);

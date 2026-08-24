@@ -577,8 +577,8 @@
                       <input type="number" id="icAutoPeriod" class="input" value="1" min="1" max="60" />
                     </div>
                     <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                      <input type="checkbox" id="icAutoPay" checked />
-                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付</label>
+                      <input type="checkbox" id="icAutoPay" />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（勾选才扣费，默认待支付订单）</label>
                     </div>
                     <button class="btn btn-primary" style="font-size:15px;padding:10px 24px;" onclick="icAutoDeploy()">🚀 一键全自动部署</button>
                   </div>
@@ -631,8 +631,8 @@
                       <input type="number" id="icPeriod" class="input" value="1" min="1" max="60" />
                     </div>
                     <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                      <input type="checkbox" id="icAutoPay" checked />
-                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（取消则生成待支付订单）</label>
+                      <input type="checkbox" id="icLaunchAutoPay" />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（取消则生成待支付订单，默认待支付）</label>
                     </div>
                     <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icLaunchFromImage()">🚀 开通</button>
                   </div>
@@ -866,7 +866,7 @@
   <script src="app.js?v=73"></script>
   <script src="node-extract.js?v=7"></script>
   <script src="one-click-deploy.js?v=4"></script>
-  <script src="image-clone.js?v=5"></script>
+  <script src="image-clone.js?v=6"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {

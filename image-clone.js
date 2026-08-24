@@ -247,7 +247,7 @@
     var planId = (document.getElementById('icPlanId').value || '').trim();
     var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
     var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
-    var autoPay = document.getElementById('icAutoPay').checked;
+    var autoPay = document.getElementById('icLaunchAutoPay').checked;
     if (!planId) { alert('请填写套餐 PlanId（默认已填锁定套餐，如被清空请补回）'); return; }
     if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
 

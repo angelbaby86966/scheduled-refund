@@ -99,6 +99,22 @@
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
+  // 过滤出本账号自定义镜像（前端过滤，因为 SWAS ListImages 不支持 ImageType 请求参数）
+  function icFilterCustomImages(imgs) {
+    return imgs.filter(function (im) {
+      // 优先按 ImageType=Custom 过滤
+      var t = String(im.ImageType || '').toLowerCase();
+      if (t === 'custom') return true;
+      if (t === 'system') return false;
+      // 兜底：IsSelf / Self
+      if (im.IsSelf === true || im.IsSelf === 'true' || im.Self === true || im.Self === 'true') return true;
+      // 兜底2：本工具生成的镜像名以 golden- 开头
+      var n = String(im.ImageName || '');
+      if (n.indexOf('golden-') === 0) return true;
+      return false;
+    });
+  }
+
   // ② 列出本账号自定义镜像（仅自定义，不含官方系统镜像）
   async function icLoadImages() {
     if (!icGuard()) return;
@@ -107,14 +123,14 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      // 走通用代理直调 SWAS ListImages，并过滤 ImageType=Custom，
-      // 否则会返回官方系统镜像（CentOS/Ubuntu 等），看不到自己打的镜像。
+      // 走通用代理直调 SWAS ListImages。注意：ImageType 不是有效请求参数，
+      // 传它会报 "The specified parameter ImageType is invalid."
+      // 因此先拿全量镜像，再在前端按 ImageType/IsSelf/镜像名过滤出本账号自定义镜像。
       var r = await AliyunClient.callCentralApi('ListImages', {
         RegionId: region,
-        ImageType: 'Custom',
         PageSize: 100
       });
-      var imgs = icParseImages(r);
+      var imgs = icFilterCustomImages(icParseImages(r));
       if (!imgs.length) {
         box.innerHTML = '⚠️ 该地域暂无自定义镜像。请确认「① 创建镜像」已成功生成（状态需为 Available，Creating 期间不显示）。';
         return;
@@ -182,9 +198,9 @@
       for (var i = 0; i < 60; i++) {
         await icSleep(10000);
         var listRes = await AliyunClient.callCentralApi('ListImages', {
-          RegionId: region, ImageType: 'Custom', PageSize: 100
+          RegionId: region, PageSize: 100
         });
-        var imgs = icParseImages(listRes);
+        var imgs = icFilterCustomImages(icParseImages(listRes));
         for (var k = 0; k < imgs.length; k++) {
           if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
         }

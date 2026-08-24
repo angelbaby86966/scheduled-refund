@@ -427,8 +427,21 @@
     var cmdEl = document.getElementById('icDeployCmd');
     if (!tokEl || !cmdEl) return;
     var tok = (tokEl.value || '').trim();
-    var cmd = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/ipes_auto_deploy.sh | bash -s -- "' + tok + '"';
-    cmdEl.textContent = cmd;
+    if (!tok) { cmdEl.textContent = '（请填写 IPES Token）'; return; }
+    function getv(id) { var e = document.getElementById(id); return e ? (e.value || '').trim() : ''; }
+    var base = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/ipes_auto_deploy.sh | bash -s -- --token "' + tok + '"';
+    // 注册凭据：ak + sk + isp 齐备才追加
+    var ak = getv('icAk'), sk = getv('icSk'), isp = getv('icIsp'), numDirs = getv('icNumDirs');
+    if (ak && sk && isp) {
+      base += ' --ak "' + ak + '" --sk "' + sk + '" --isp "' + isp + '"';
+      if (numDirs) base += ' --num-dirs "' + numDirs + '"';
+    }
+    // 绑定业务凭据：appid + appak + appsk 齐备才追加
+    var appid = getv('icAppid'), appak = getv('icAppak'), appsk = getv('icAppsk');
+    if (appid && appak && appsk) {
+      base += ' --appid "' + appid + '" --appak "' + appak + '" --appsk "' + appsk + '"';
+    }
+    cmdEl.textContent = base;
   }
 
   function icFallbackCopy(text) {

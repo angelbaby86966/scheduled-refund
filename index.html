@@ -655,16 +655,37 @@
                 <!-- ⑥ 空白主机一键部署链接 -->
                 <fieldset style="border:1px solid #722ed1;border-radius:8px;padding:14px;margin-bottom:16px;background:#f9f0ff;">
                   <legend style="font-weight:600;color:#722ed1;padding:0 6px;">⑥ 空白主机一键部署链接（给团队直接跑）</legend>
-                  <p style="font-size:12px;color:#555;margin:0 0 10px;">在全新 CentOS 7.9 云主机上用 root 执行下方命令，即自动：装 Docker → 部署 IPES → 预热调优。Token 即下方输入框内容，<b>过期后在此换新重跑（链接不变）</b>。</p>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">在全新 CentOS 7.9 云主机上用 root 执行下方命令，即自动完成全流程：<b>装 Docker → 部署 IPES → 预热调优 → 装 ZyCloud Agent → 注册设备 → 绑定业务ID</b>。填写下方 Token 与凭据后命令实时生成，<b>过期/变更后在此更新重跑（链接不变）</b>。</p>
+
                   <div class="form-group" style="margin:0 0 10px;">
-                    <label style="font-size:12px;">IPES Token（JWT，自带过期时间）</label>
+                    <label style="font-size:12px;">IPES Token（JWT，自带过期时间）— 必填</label>
                     <input type="text" id="icDeployToken" class="input" style="width:100%;" value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVVUlEIjoiMzhjZTQ2YTctZDNkMi00YzVlLWJkNTYtM2I3YzFlMDNkNmYyIiwiSUQiOjQwLCJVc2VybmFtZSI6IjE3Njk1OTM3NzU2IiwiTmlja05hbWUiOiLlvKDnnb8iLCJBdXRob3JpdHlJZCI6MjEsIlVzZXJUeXBlIjoxLCJSZWxhdGVkUGFydHlJRCI6MCwiWnlVaWRzIjoiIiwiQnVmZmVyVGltZSI6ODY0MDAsImlzcyI6Inp5eSIsImF1ZCI6WyJHVkEiXSwiZXhwIjoxNzg3NzE0NTcwLCJuYmYiOjE3ODYwMTE3Mjd9.f1mhluA8snL_OQRvOsgamsqUxs5tphpVdumRnfucnC8" oninput="icRenderDeployCmd()" />
                   </div>
+
+                  <div style="border:1px dashed #b37feb;border-radius:6px;padding:10px;margin:0 0 10px;background:#fff;">
+                    <div style="font-size:12px;font-weight:600;color:#722ed1;margin-bottom:6px;">① 注册设备凭据（api.zhouyi.top）</div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                      <input type="text" id="icAk" class="input" style="flex:1;min-width:150px;" placeholder="appKey" oninput="icRenderDeployCmd()" />
+                      <input type="text" id="icSk" class="input" style="flex:1;min-width:150px;" placeholder="secretKey" oninput="icRenderDeployCmd()" />
+                      <input type="text" id="icIsp" class="input" style="width:120px;" placeholder="运营商 如 电信" oninput="icRenderDeployCmd()" />
+                      <input type="text" id="icNumDirs" class="input" style="width:90px;" placeholder="num-dirs" value="12" oninput="icRenderDeployCmd()" />
+                    </div>
+                  </div>
+
+                  <div style="border:1px dashed #b37feb;border-radius:6px;padding:10px;margin:0 0 10px;background:#fff;">
+                    <div style="font-size:12px;font-weight:600;color:#722ed1;margin-bottom:6px;">② 绑定业务ID凭据（admin.zhouyi.top）</div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                      <input type="text" id="icAppid" class="input" style="flex:1;min-width:140px;" placeholder="appid" oninput="icRenderDeployCmd()" />
+                      <input type="text" id="icAppak" class="input" style="flex:1;min-width:140px;" placeholder="ak" oninput="icRenderDeployCmd()" />
+                      <input type="text" id="icAppsk" class="input" style="flex:1;min-width:140px;" placeholder="sk" oninput="icRenderDeployCmd()" />
+                    </div>
+                  </div>
+
                   <div style="display:flex;gap:10px;align-items:flex-start;">
                     <pre id="icDeployCmd" style="flex:1;margin:0;background:#1e1e1e;color:#7fff7f;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;"></pre>
                     <button class="btn btn-sm" style="background:#722ed1;border:none;color:#fff;white-space:nowrap;" onclick="icCopyText('icDeployCmd')">📋 复制命令</button>
                   </div>
-                  <p style="font-size:11px;color:#999;margin:8px 0 0;">默认走 GitHub Pages 主链接；若拉取慢，可手动把 URL 前缀换成 <code>https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/gh-pages/</code>（脚本内已说明）。</p>
+                  <p style="font-size:11px;color:#999;margin:8px 0 0;">默认走 GitHub Pages 主链接；若拉取慢，可手动把 URL 前缀换成 <code>https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/gh-pages/</code>。仅填 Token 时只跑部署→Agent→预热（注册/绑定因缺凭据自动跳过）。</p>
                 </fieldset>
 
                 <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">

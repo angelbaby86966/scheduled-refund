@@ -652,6 +652,21 @@
                   </div>
                 </fieldset>
 
+                <!-- ⑥ 空白主机一键部署链接 -->
+                <fieldset style="border:1px solid #722ed1;border-radius:8px;padding:14px;margin-bottom:16px;background:#f9f0ff;">
+                  <legend style="font-weight:600;color:#722ed1;padding:0 6px;">⑥ 空白主机一键部署链接（给团队直接跑）</legend>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">在全新 CentOS 7.9 云主机上用 root 执行下方命令，即自动：装 Docker → 部署 IPES → 预热调优。Token 即下方输入框内容，<b>过期后在此换新重跑（链接不变）</b>。</p>
+                  <div class="form-group" style="margin:0 0 10px;">
+                    <label style="font-size:12px;">IPES Token（JWT，自带过期时间）</label>
+                    <input type="text" id="icDeployToken" class="input" style="width:100%;" value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVVUlEIjoiMzhjZTQ2YTctZDNkMi00YzVlLWJkNTYtM2I3YzFlMDNkNmYyIiwiSUQiOjQwLCJVc2VybmFtZSI6IjE3Njk1OTM3NzU2IiwiTmlja05hbWUiOiLlvKDnnb8iLCJBdXRob3JpdHlJZCI6MjEsIlVzZXJUeXBlIjoxLCJSZWxhdGVkUGFydHlJRCI6MCwiWnlVaWRzIjoiIiwiQnVmZmVyVGltZSI6ODY0MDAsImlzcyI6Inp5eSIsImF1ZCI6WyJHVkEiXSwiZXhwIjoxNzg3NzE0NTcwLCJuYmYiOjE3ODYwMTE3Mjd9.f1mhluA8snL_OQRvOsgamsqUxs5tphpVdumRnfucnC8" oninput="icRenderDeployCmd()" />
+                  </div>
+                  <div style="display:flex;gap:10px;align-items:flex-start;">
+                    <pre id="icDeployCmd" style="flex:1;margin:0;background:#1e1e1e;color:#7fff7f;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;"></pre>
+                    <button class="btn btn-sm" style="background:#722ed1;border:none;color:#fff;white-space:nowrap;" onclick="icCopyText('icDeployCmd')">📋 复制命令</button>
+                  </div>
+                  <p style="font-size:11px;color:#999;margin:8px 0 0;">默认走 GitHub Pages 主链接；若拉取慢，可手动把 URL 前缀换成 <code>https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/gh-pages/</code>（脚本内已说明）。</p>
+                </fieldset>
+
                 <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">
                   ⚠️ 每台新机都会按所选套餐计费（除非取消「自动支付」生成待支付订单）。<br>
                   请先用上方「④ 黄金主机标准化脚本」对黄金镜像做<b>去个性化</b>处理：清 PCDN 节点身份/数据目录、重生成 SSH host key、配置绑定动态 IP（0.0.0.0），否则克隆出的节点会复用同一身份，导致平台判重复、结算/调度错乱。
@@ -866,7 +881,7 @@
   <script src="app.js?v=73"></script>
   <script src="node-extract.js?v=7"></script>
   <script src="one-click-deploy.js?v=4"></script>
-  <script src="image-clone.js?v=7"></script>
+  <script src="image-clone.js?v=8"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {

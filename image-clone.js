@@ -52,6 +52,7 @@
     }
     var period = document.getElementById('icPeriod');
     if (period && !period.value) period.value = '1';
+    icRenderDeployCmd();
   }
 
   // ① 从实例创建自定义镜像
@@ -420,6 +421,43 @@
     if (t) icDownload(t.name, t.body);
   }
 
+  // ====== ⑥ 空白主机一键部署链接（给团队直接跑） ======
+  function icRenderDeployCmd() {
+    var tokEl = document.getElementById('icDeployToken');
+    var cmdEl = document.getElementById('icDeployCmd');
+    if (!tokEl || !cmdEl) return;
+    var tok = (tokEl.value || '').trim();
+    var cmd = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/ipes_auto_deploy.sh | bash -s -- "' + tok + '"';
+    cmdEl.textContent = cmd;
+  }
+
+  function icFallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); alert('✅ 已复制部署命令到剪贴板'); }
+    catch (e) { alert('复制失败，请手动选中命令文本复制'); }
+    document.body.removeChild(ta);
+  }
+
+  function icCopyText(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var text = el.textContent || el.innerText || '';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { alert('✅ 已复制部署命令到剪贴板'); },
+        function () { icFallbackCopy(text); }
+      );
+    } else {
+      icFallbackCopy(text);
+    }
+  }
+
   // 暴露到全局（供 onclick 调用）
   window.icInit = icInit;
   window.icDownloadTpl = icDownloadTpl;
@@ -427,6 +465,8 @@
   window.icLoadImages = icLoadImages;
   window.icLaunchFromImage = icLaunchFromImage;
   window.icAutoDeploy = icAutoDeploy;
+  window.icRenderDeployCmd = icRenderDeployCmd;
+  window.icCopyText = icCopyText;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', icInit);

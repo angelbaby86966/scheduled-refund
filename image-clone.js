@@ -2,7 +2,8 @@
  * 黄金镜像克隆部署（PCDN 缓存节点）
  * 仅管理员 zhangruiyao 可用：UI 通过 admin-only-tab / admin-only-panel 隐藏，
  * 这里再做一次函数级权限兜底。
- * 依赖：AliyunClient.callCentralApi(action, params) / listImages(region)（均走 aliyun-proxy 代理，避免浏览器 CORS）
+ * 依赖：AliyunClient.callCentralApi(action, params)（走 aliyun-proxy 代理，避免浏览器 CORS）
+ *       —— ② 加载镜像用 callCentralApi('ListImages', {ImageType:'Custom'}) 仅取自定义镜像，区别于批量下单的 listImages（返回官方系统镜像）
  *       REGION_INFO / LOCKED_PLAN_ID（app.js 全局）
  * ========================================================================= */
 (function () {
@@ -71,7 +72,7 @@
     }
   }
 
-  // ② 列出本账号自定义镜像
+  // ② 列出本账号自定义镜像（仅自定义，不含官方系统镜像）
   async function icLoadImages() {
     if (!icGuard()) return;
     var region = icGetRegion();
@@ -79,18 +80,28 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      var r = await AliyunClient.listImages(region);
+      // 走通用代理直调 SWAS ListImages，并过滤 ImageType=Custom，
+      // 否则会返回官方系统镜像（CentOS/Ubuntu 等），看不到自己打的镜像。
+      var r = await AliyunClient.callCentralApi('ListImages', {
+        RegionId: region,
+        ImageType: 'Custom',
+        PageSize: 100
+      });
       var imgs = [];
       if (r.Images && r.Images.Image) imgs = r.Images.Image;
       else if (Array.isArray(r.Images)) imgs = r.Images;
       else if (r.Image) imgs = r.Image;
       else if (Array.isArray(r.image)) imgs = r.image;
-      if (!imgs.length) { box.innerHTML = '该地域暂无自定义镜像，请先「① 创建镜像」'; return; }
+      if (!imgs.length) {
+        box.innerHTML = '⚠️ 该地域暂无自定义镜像。请确认「① 创建镜像」已成功生成（状态需为 Available，Creating 期间不显示）。';
+        return;
+      }
       sel.innerHTML = imgs.map(function (im) {
+        var st = im.Status ? ' [' + im.Status + ']' : '';
         return '<option value="' + (im.ImageId || '') + '">' +
-          (im.ImageName || im.ImageId) + ' (' + (im.ImageId || '') + ')</option>';
+          (im.ImageName || im.ImageId) + ' (' + (im.ImageId || '') + ')' + st + '</option>';
       }).join('');
-      box.innerHTML = '✅ 找到 ' + imgs.length + ' 个自定义镜像';
+      box.innerHTML = '✅ 找到 ' + imgs.length + ' 个自定义镜像（仅你账号创建）';
       icLog('[镜像克隆] 列出 ' + imgs.length + ' 个自定义镜像', 'info');
     } catch (e) {
       box.innerHTML = '❌ 加载失败: ' + e.message;

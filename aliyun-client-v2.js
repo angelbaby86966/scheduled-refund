@@ -596,20 +596,12 @@
         var invokeRes = await this.invokeCommand(regionId, commandId, ids);
         // 稍等再删，确保 InvokeCommand 已落盘
         await new Promise(function(r) { setTimeout(r, 1000); });
-        try {
-          await this.deleteCommandWithRetry(regionId, commandId, 3);
-          doLog('🗑️ 已删除临时命令模板 ' + commandId, 'info');
-        } catch (delErr) {
-          doLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败: ' + (delErr.message || delErr), 'warn');
-        }
+        await this.deleteCommandWithRetry(regionId, commandId);
         return invokeRes;
       } catch (invokeErr) {
-        // 即使 invoke 失败也尝试清理模板
-        try {
-          await new Promise(function(r) { setTimeout(r, 200); });
-          await this.deleteCommandWithRetry(regionId, commandId, 3);
-          doLog('🗑️ 已删除临时命令模板 ' + commandId, 'info');
-        } catch (e) { /* 清理失败不影响抛错 */ }
+        // 即使 invoke 失败也尝试清理模板（带重试兜底）
+        await new Promise(function(r) { setTimeout(r, 200); });
+        await this.deleteCommandWithRetry(regionId, commandId);
         throw invokeErr;
       }
     },
@@ -695,17 +687,26 @@
       return callAliyunApi(regionId, 'DeleteCommand', { CommandId: commandId });
     },
 
-    /** 删除命令模板（带重试兜底） */
+    /** 删除临时命令模板（带重试兜底）：自定义命令执行完必须清掉，避免残留到命令助手。
+     *  最多重试 3 次，每次退避 800ms；全部失败才放弃（仅打 warning，不影响主流程）。 */
     async deleteCommandWithRetry(regionId, commandId, maxRetry) {
-      maxRetry = maxRetry || 3;
-      for (var i = 0; i < maxRetry; i++) {
+      var retries = (typeof maxRetry === 'number' && maxRetry > 0) ? maxRetry : 3;
+      var lastErr = null;
+      for (var attempt = 1; attempt <= retries; attempt++) {
         try {
-          return await this.deleteCommand(regionId, commandId);
-        } catch (err) {
-          if (i === maxRetry - 1) throw err;
-          await new Promise(function(r) { setTimeout(r, 800 * (i + 1)); });
+          await this.deleteCommand(regionId, commandId);
+          doLog('🗑️ 已删除临时命令模板 ' + commandId + '（第 ' + attempt + ' 次成功）', 'info');
+          return true;
+        } catch (delErr) {
+          lastErr = delErr;
+          doLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + (delErr.message || delErr), 'warn');
+          if (attempt < retries) {
+            await new Promise(function(r) { setTimeout(r, 800 * attempt); });
+          }
         }
       }
+      doLog('❌ 删除临时命令模板 ' + commandId + ' 经过 ' + retries + ' 次重试仍失败，模板可能残留于命令助手，请手动清理', 'error');
+      return false;
     },
 
     /** 停止实例 */

@@ -418,14 +418,9 @@ function showCredentialDialog() {
   if (window.AliyunClient && AliyunClient.pullProfilesFromCloud) {
     Promise.resolve(AliyunClient.pullProfilesFromCloud()).then(function() {
       renderCredentialProfiles();
-      renderCredentialMultiSelect();
-    }).catch(function() {
-      renderCredentialProfiles();
-      renderCredentialMultiSelect();
-    });
+    }).catch(function() { renderCredentialProfiles(); });
   } else {
     renderCredentialProfiles();
-    renderCredentialMultiSelect();
   }
 
   var akInput = document.getElementById('accessKeyId');
@@ -476,7 +471,6 @@ async function saveCredentials() {
 
   state.hasCredentials = true;
   updateCredentialBar();
-  renderCredentialMultiSelect();
   hideCredentialDialog();
   document.getElementById('accessKeyId').value = '';
   document.getElementById('accessKeySecret').value = '';
@@ -517,7 +511,6 @@ async function useCredentialProfile(name) {
     state.hasCredentials = true;
     updateCredentialBar();
     renderCredentialProfiles();
-    renderCredentialMultiSelect();
     log('🔁 已切换凭证到「' + name + '」', 'info');
     await refreshAllRegions();
   } catch (e) {
@@ -535,7 +528,6 @@ async function deleteCredentialProfile(name) {
     }
     updateCredentialBar();
     renderCredentialProfiles();
-    renderCredentialMultiSelect();
     log('🗑️ 已删除凭证「' + name + '」', 'warn');
   } catch (e) {
     alert('删除失败：' + e.message);
@@ -897,10 +889,6 @@ function switchTab(tabName) {
   for (var j = 0; j < contents.length; j++) contents[j].classList.remove('active');
   document.querySelector('.tab[data-tab="' + tabName + '"]').classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
-  // 进入退订面板时刷新凭证多选（保持已勾选状态）
-  if (tabName === 'cancel') {
-    try { renderCredentialMultiSelect(); } catch(e) {}
-  }
 }
 
 // ====== 防火墙 ======
@@ -1306,7 +1294,7 @@ function initScheduleTimePicker() {
   var hourSel = document.getElementById('scheduleHour');
   var minuteSel = document.getElementById('scheduleMinute');
   if (!hourSel || !minuteSel) return;
-  // 定时退订仅在每晚 23:35–23:59 执行，时间选择器只生成 23 时 + 35–59 分
+  // 定时时间仅允许 23:35–23:59
   var optH = document.createElement('option');
   optH.value = '23';
   optH.textContent = '23';
@@ -1317,15 +1305,12 @@ function initScheduleTimePicker() {
     opt2.textContent = String(m).padStart(2, '0');
     minuteSel.appendChild(opt2);
   }
-  // 默认选中 23:35
-  hourSel.value = '23';
-  minuteSel.value = '35';
 }
 
 function toggleCancelMode() {
   var mode = document.querySelector('input[name="cancelMode"]:checked').value;
   document.getElementById('scheduledTimeGroup').style.display = mode === 'scheduled' ? 'block' : 'none';
-  try { renderCredentialMultiSelect(); } catch(e) {}
+  document.getElementById('confirmGroup').style.display = mode === 'scheduled' ? 'none' : 'block';
   checkConfirm();
 }
 
@@ -1339,108 +1324,9 @@ function checkConfirm() {
     var mEl = document.getElementById('scheduleMinute');
     btn.disabled = !(hEl && mEl && hEl.value !== '' && mEl.value !== '');
   } else {
-    btn.disabled = false;
+    var inputEl = document.getElementById('confirmInput');
+    btn.disabled = !(inputEl && inputEl.value.trim() === '确认退订');
   }
-}
-
-// ====== 退订凭证多选（立即退订 / 定时退订共用） ======
-function _credEsc(s) {
-  return String(s == null ? '' : s).replace(/[<>&"]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; });
-}
-
-// 渲染凭证多选复选框：保留用户上次勾选；从未勾选过则默认勾「当前凭证」
-function renderCredentialMultiSelect() {
-  var list = document.getElementById('credSelectList');
-  if (!list) return;
-  var profiles = [];
-  try { profiles = AliyunClient.listProfiles() || []; } catch(e) { profiles = []; }
-  var active = null;
-  try { active = AliyunClient.getActiveProfile(); } catch(e) {}
-  if (!profiles.length) {
-    list.innerHTML = '<small style="color:#999">尚未保存凭证，请先在「设置凭证」中添加</small>';
-    return;
-  }
-  // 记录用户已勾选（按凭证名），避免重新渲染丢失选择
-  var prev = {};
-  Array.prototype.forEach.call(list.querySelectorAll('input[data-cred]'), function(cb) {
-    prev[cb.getAttribute('data-cred')] = cb.checked;
-  });
-  var html = '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; padding:4px 10px; background:#f0f5ff; border:1px solid #c7d7fe; border-radius:6px; font-size:13px;">'
-    + '<input type="checkbox" id="credSelectAll" style="cursor:pointer;"> <b>全选（全部凭证）</b></label>';
-  for (var i = 0; i < profiles.length; i++) {
-    var p = profiles[i];
-    var checked = (prev[p.name] !== undefined) ? prev[p.name] : !!(active && active.name === p.name);
-    var badge = (active && active.name === p.name) ? '（当前）' : '';
-    html += '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; padding:4px 10px; background:#fafafa; border:1px solid #e5e7eb; border-radius:6px; font-size:13px;" title="' + _credEsc(p.ak_id_hint || '') + '">'
-      + '<input type="checkbox" data-cred="' + _credEsc(p.name) + '"' + (checked ? ' checked' : '') + ' style="cursor:pointer;"> '
-      + '<span>' + _credEsc(p.name) + badge + '</span>'
-      + '<small style="color:#999">' + _credEsc(p.ak_id_hint || '') + '</small>'
-      + '</label>';
-  }
-  list.innerHTML = html;
-  var all = document.getElementById('credSelectAll');
-  if (all) {
-    all.checked = true;
-    Array.prototype.forEach.call(list.querySelectorAll('input[data-cred]'), function(cb) {
-      if (!cb.checked) all.checked = false;
-    });
-  }
-  // 事件委托只绑定一次（innerHTML 替换不销毁 #credSelectList 节点，重复 addEventListener 会累积）
-  if (list && !list.getAttribute('data-bound')) {
-    list.setAttribute('data-bound', '1');
-    list.addEventListener('change', function(e) {
-      var t = e.target;
-      if (!t || !t.getAttribute) return;
-      if (t.id === 'credSelectAll') {
-        // 全选 / 全不选
-        Array.prototype.forEach.call(list.querySelectorAll('input[data-cred]'), function(cb) {
-          cb.checked = t.checked;
-        });
-      } else if (t.getAttribute('data-cred')) {
-        // 单个凭证勾选：同步全选框状态
-        var allEl = document.getElementById('credSelectAll');
-        if (allEl) {
-          var any = false;
-          Array.prototype.forEach.call(list.querySelectorAll('input[data-cred]'), function(cb) {
-            if (cb.checked) any = true;
-          });
-          allEl.checked = any;
-        }
-      }
-    });
-  }
-}
-
-// 读取当前勾选的凭证名（多选）
-function getSelectedRefundCredNames() {
-  var names = [];
-  var list = document.getElementById('credSelectList');
-  if (!list) return names;
-  Array.prototype.forEach.call(list.querySelectorAll('input[data-cred]'), function(cb) {
-    if (cb.checked) names.push(cb.getAttribute('data-cred'));
-  });
-  return names;
-}
-
-// 按凭证名解析出完整 profile（跳过本地不存在的名字）
-function getRefundProfilesFromNames(names) {
-  var all = [];
-  try { all = AliyunClient.listProfiles() || []; } catch(e) { all = []; }
-  var out = [];
-  for (var i = 0; i < (names || []).length; i++) {
-    for (var j = 0; j < all.length; j++) {
-      if (all[j].name === names[i]) { out.push(all[j]); break; }
-    }
-  }
-  return out;
-}
-
-// 无勾选时的兜底：当前凭证；无当前凭证则全部凭证
-function getDefaultRefundProfiles() {
-  var ap = null;
-  try { ap = AliyunClient.getActiveProfile(); } catch(e) {}
-  if (ap) return [ap];
-  try { return AliyunClient.listProfiles() || []; } catch(e) { return []; }
 }
 
 async function executeCancel() {
@@ -1464,13 +1350,13 @@ async function executeCancel() {
     var hourNum = parseInt(hourStr, 10);
     var minuteNum = parseInt(minuteStr, 10);
 
-    // 定时退订时间仅允许 23:35–23:59（与云端窗口判定一致，防止保存到非法时间）
+    // 定时退订时间仅允许 23:35–23:59
     if (!(hourNum === 23 && minuteNum >= 35 && minuteNum <= 59)) {
       alert('定时退订时间只能设置在 23:35 到 23:59 之间');
       return;
     }
 
-    // 【关键】定时退订由阿里云 FC 后台定时触发，与电脑/浏览器开关无关。
+    // 【关键】定时退订由 Supabase 云端定时(pg_cron)执行，与电脑/浏览器开关无关。
     // 必须保证云端配置完整：时间 + 开关 + AK/SK 都要落地到 Supabase，否则云端到点无凭证可退。
     if (!(window.AliyunClient && AliyunClient.hasCredentials && AliyunClient.hasCredentials())) {
       log('❌ 请先在「设置凭证」里填写并保存 AccessKey，否则云端到点无凭证可退订', 'error');
@@ -1482,19 +1368,11 @@ async function executeCancel() {
 
     try {
       if (window.CloudStore && currentUser && currentUser.user) {
-        // 当前勾选的凭证列表（支持多选）→ 云端持久化；一个都不勾则默认「当前凭证」
-        var _schedCreds = getSelectedRefundCredNames();
-        if (!_schedCreds.length) {
-          try { var _ap = AliyunClient.getActiveProfile(); if (_ap) _schedCreds = [_ap.name]; } catch(e) {}
-        }
-        // 原子写入：时间 + 开关 + 凭证（多选），确保云端配置完整（FC 触发器每晚读取并执行）
+        // 原子写入：时间 + 开关 + 凭证，确保云端配置完整（GitHub Actions 每10分钟读取并执行）
         await CloudStore.updateUserData(currentUser.user, {
           schedule_hour: hourNum,
           schedule_minute: minuteNum,
           schedule_enabled: true,
-          schedule_regions: (state.selectedRegions && state.selectedRegions.size) ? Array.from(state.selectedRegions) : [],
-          schedule_credentials: _schedCreds,
-          schedule_credential: _schedCreds[0] || '',
           ak_id: ak,
           ak_secret: sk,
         });
@@ -1504,9 +1382,7 @@ async function executeCancel() {
         if (!ok) {
           log('⚠️ 云端未确认到完整配置（时间或凭证缺失），请检查网络后重新保存', 'warn');
         } else {
-          var _regionNote = (state.selectedRegions && state.selectedRegions.size) ? ('仅退 ' + Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')) : '全部地域';
-          var _credNote = _schedCreds.length ? ('仅退凭证：' + _schedCreds.map(function(n){return '「' + n + '」';}).join('、')) : '全部凭证';
-          log('✅ 配置已保存到云端：每天 ' + hourStr + ':' + minuteStr + ' 自动退订（' + _credNote + '；' + _regionNote + '；云端调度，关电脑/关浏览器也会按时执行）', 'success');
+          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订（GitHub Actions 云端调度，关电脑/关浏览器也会按时执行）', 'success');
         }
       } else {
         log('⚠️ 未登录云端账号，配置仅本地生效；请登录后再保存，云端调度才会接管', 'warn');
@@ -1519,94 +1395,78 @@ async function executeCancel() {
     return;
   }
 
-  // 立即退订：按上方勾选的凭证逐个退订（支持多选；一个都不勾则按「当前凭证」）
-  var _credNames = getSelectedRefundCredNames();
-  var _profiles = _credNames.length ? getRefundProfilesFromNames(_credNames) : getDefaultRefundProfiles();
-  if (!_profiles.length) {
-    alert('请先在「设置凭证」中添加阿里云凭证');
-    return;
-  }
-  var _credListTxt = _profiles.map(function(p) { return '「' + p.name + '」'; }).join('、');
-  if (!confirm('⚠️ 立即退订（不可逆，真正退款）\n\n将退订凭证：' + _credListTxt + '\n所有地域下的全部云主机（BSS RefundInstance）。\n\n确认继续？')) return;
+  // 立即退订
+  var confirmInput = document.getElementById('confirmInput').value.trim();
+  if (confirmInput !== '确认退订') { alert('请输入"确认退订"以确认操作'); return; }
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-  log('🗑️ 开始【立即退订】凭证 ' + _credListTxt + ' 的所有云主机（BSS RefundInstance，真正退款）...', 'warn');
+  log('🗑️ 开始【退订退款】所有地区的所有云主机（BSS RefundInstance，真正退款）...', 'warn');
+  log('⏳ 正在查询实例列表...', 'warn');
 
-  var _grand = { success: 0, skipped: 0, locked: 0, fail: 0 };
-  // 记住退订前的当前凭证，退完后还原（避免当前凭证被最后一个退订的凭证顶掉）
-  var _origActive = null;
-  try { _origActive = AliyunClient.getActiveProfile(); } catch(e) {}
   try {
-    for (var _pi = 0; _pi < _profiles.length; _pi++) {
-      var _prof = _profiles[_pi];
+    // 第1步：遍历所有地域获取实例
+    var regionIds = Object.keys(REGION_INFO);
+    var allInstances = [];
+    var byRegion = {};
+
+    for (var i = 0; i < regionIds.length; i++) {
+      var rid = regionIds[i];
       try {
-        await AliyunClient.useProfile(_prof.name);
-      } catch(e) {
-        log('  ⚠️ 切换到凭证「' + _prof.name + '」失败: ' + ((e && e.message) ? e.message : e), 'warn');
-        continue;
-      }
-      log('──── 凭证「' + _prof.name + '」────', 'warn');
-      log('⏳ 正在查询实例列表...', 'warn');
+        var pageData = await AliyunClient.listInstances(rid, { pageSize: 100 });
+        var instances = pageData.Instances || [];
+        var totalCount = pageData.TotalCount || 0;
 
-      // 遍历所有地域获取实例
-      var regionIds = Object.keys(REGION_INFO);
-      var byRegion = {};
-      for (var i = 0; i < regionIds.length; i++) {
-        var rid = regionIds[i];
-        try {
-          var pageData = await AliyunClient.listInstances(rid, { pageSize: 100 });
-          var instances = pageData.Instances || [];
-          var totalCount = pageData.TotalCount || 0;
-
-          // 如果超过100条，翻页获取
-          if (totalCount > 100) {
-            var totalPages = Math.ceil(totalCount / 100);
-            for (var p = 2; p <= totalPages; p++) {
-              var nextPage = await AliyunClient.listInstances(rid, { pageNumber: p, pageSize: 100 });
-              instances = instances.concat(nextPage.Instances || []);
-            }
+        // 如果超过100条，翻页获取
+        if (totalCount > 100) {
+          var totalPages = Math.ceil(totalCount / 100);
+          for (var p = 2; p <= totalPages; p++) {
+            var nextPage = await AliyunClient.listInstances(rid, { pageNumber: p, pageSize: 100 });
+            instances = instances.concat(nextPage.Instances || []);
           }
-          byRegion[rid] = instances;
-        } catch (err) {
-          log('  ⚠️ [' + (REGION_INFO[rid] || rid) + '] 查询失败: ' + err.message, 'warn');
         }
-      }
 
-      var _profCount = 0;
-      for (var _rk in byRegion) _profCount += (byRegion[_rk] || []).length;
-      if (_profCount === 0) {
-        log('✅ 凭证「' + _prof.name + '」未发现实例，跳过', 'success');
-        continue;
+        byRegion[rid] = instances;
+        for (var j = 0; j < instances.length; j++) {
+          allInstances.push({ regionId: rid, instanceId: instances[j].InstanceId, name: instances[j].InstanceName, status: instances[j].Status });
+        }
+      } catch (err) {
+        log('  ⚠️ [' + REGION_INFO[rid] + '] 查询失败: ' + err.message, 'warn');
       }
-      log('📋 凭证「' + _prof.name + '」共发现 ' + _profCount + ' 台实例，分布在 ' + Object.keys(byRegion).length + ' 个地域', 'info');
-
-      // 按地域并行退订（每个地域每批 50 台，批间间隔 3 秒）
-      var refundTotals = await refundByRegionParallel(byRegion, { recordFailures: true });
-      _grand.success += refundTotals.success;
-      _grand.skipped += refundTotals.skipped;
-      _grand.locked += refundTotals.locked;
-      _grand.fail += refundTotals.fail;
-      log('🏁 凭证「' + _prof.name + '」退订完成: 成功 ' + refundTotals.success + ' 台, 跳过 ' + refundTotals.skipped + ' 台, 锁定 ' + refundTotals.locked + ' 台, 失败 ' + refundTotals.fail + ' 台', refundTotals.fail === 0 ? 'success' : 'warn');
     }
 
+    if (allInstances.length === 0) {
+      log('✅ 未发现任何实例，无需退订', 'success');
+      document.getElementById('confirmInput').value = '';
+      document.getElementById('cancelBtn').disabled = true;
+      return;
+    }
+
+    log('📋 共发现 ' + allInstances.length + ' 台实例，分布在 ' + Object.keys(byRegion).length + ' 个地域', 'info');
+    for (var _rid2 = 0, _rkeys = Object.keys(byRegion); _rid2 < _rkeys.length; _rid2++) {
+      var _rk = _rkeys[_rid2];
+      log('   • [' + (REGION_INFO[_rk] || _rk) + '] ' + byRegion[_rk].length + ' 台', 'info');
+    }
+
+    // 第2步：按地域并行退订（每个地域每批 50 台，批间间隔 3 秒）
+    var refundTotals = await refundByRegionParallel(byRegion, { recordFailures: true });
+    var totalSuccess = refundTotals.success, totalSkipped = refundTotals.skipped,
+        totalLocked = refundTotals.locked, totalFail = refundTotals.fail;
+
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-    log('🏁 立即退订完成: 成功 ' + _grand.success + ' 台, 跳过 ' + _grand.skipped + ' 台, 锁定 ' + _grand.locked + ' 台, 失败 ' + _grand.fail + ' 台',
-      _grand.fail === 0 ? 'success' : 'warn');
-    if (_grand.fail > 0 || _grand.locked > 0) {
+    log('🏁 退订（退款）完成: 成功 ' + totalSuccess + ' 台, 跳过 ' + totalSkipped + ' 台, 锁定 ' + totalLocked + ' 台, 失败 ' + totalFail + ' 台',
+      totalFail === 0 ? 'success' : 'warn');
+    if (totalFail > 0 || totalLocked > 0) {
       log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-      log('⚠️ 有 ' + (_grand.fail + _grand.locked) + ' 台没能自动退订。可能原因：', 'warn');
+      log('⚠️ 有 ' + (totalFail + totalLocked) + ' 台没能自动退订。可能原因：', 'warn');
       log('   • BSS API 仅支持【直销客户】，分销账号无法调用', 'warn');
       log('   • AK/SK 没勾选 AliyunBSSFullAccess 权限', 'warn');
       log('   • 该实例为活动订单/无剩余金额/已到退款期限', 'warn');
     }
 
-    // 还原退订前的当前凭证
-    if (_origActive && _origActive.name !== _profiles[_profiles.length - 1].name) {
-      try { await AliyunClient.useProfile(_origActive.name); } catch(e) {}
-    }
-
     await refreshAllRegions();
     deselectAllRegions();
+    document.getElementById('confirmInput').value = '';
+    document.getElementById('cancelBtn').disabled = true;
   } catch (err) {
     log('❌ 退订失败: ' + err.message, 'error');
     console.error(err);
@@ -1937,29 +1797,13 @@ async function renderScheduledTasks() {
       } else {
         lastInfo = '<small style="color:#999">⏳ 尚未执行过（首次执行后会自动记录日期）</small><br>';
       }
-      var _scopeParts = [];
-      var _sCreds = data.schedule_credentials;
-      if (Array.isArray(_sCreds) && _sCreds.length) {
-        _scopeParts.push('仅退凭证：' + _sCreds.map(function(n){ return '「' + n + '」'; }).join('、'));
-      } else if (data.schedule_credential) {
-        _scopeParts.push('仅退凭证「' + data.schedule_credential + '」');
-      } else {
-        _scopeParts.push('全部凭证');
-      }
-      if (data.schedule_regions && data.schedule_regions.length) {
-        _scopeParts.push('地域：' + data.schedule_regions.map(function(r){ return REGION_INFO[r] || r; }).join('、'));
-      } else {
-        _scopeParts.push('全部地域');
-      }
-      var scopeInfo = '<small style="color:#2563eb">🎯 ' + _scopeParts.join(' · ') + '</small><br>';
       listEl.innerHTML =
         '<div class="task-item" style="padding:12px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px;">' +
         '<div style="display:flex; justify-content:space-between; align-items:center;">' +
         '<div>' +
         '<strong>⏰ 每天 ' + timeStr + ' 自动退订</strong><br>' +
         lastInfo +
-        scopeInfo +
-        '<small style="color:#666">执行窗口：每晚 23:35–23:59。① 阿里云 FC 后台到点自动退订（关浏览器也执行）；② 首轮退完后每 10 分钟复检，失败实例重退，直到全部退完或窗口结束。退订=释放实例，立即生效不再计费。</small>' +
+        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。退订=释放实例，立即生效不再计费。</small>' +
         '</div>' +
         '<div style="display:flex; flex-direction:column; gap:6px;">' +
         '<button class="btn btn-danger" style="padding:4px 12px; font-size:12px;" onclick="runScheduledCancelNow()">🚀 立即执行</button>' +
@@ -2005,13 +1849,19 @@ async function checkAndRunScheduledRefund() {
   var minute = data.schedule_minute;
   if (hour === undefined || hour === null || minute === undefined || minute === null) return;
 
-  // 执行窗口：仅 23:35–23:59（与云端一致）。未到点由下方 setTimeout 布防，到点且处于窗口才执行。
+  // 定时时间只允许 23:35–23:59，其余时间不执行
+  if (!(hour === 23 && minute >= 35 && minute <= 59)) {
+    if (state.scheduleTimerId) { clearTimeout(state.scheduleTimerId); state.scheduleTimerId = null; }
+    log('❌ 定时时间必须在 23:35–23:59 之间，已忽略该任务', 'error');
+    return;
+  }
 
   var bj = getBeijingDate();
   var target = new Date(bj);
   target.setHours(parseInt(hour, 10), parseInt(minute, 10), 0, 0);
   var nowMs = bj.getTime();
   var targetMs = target.getTime();
+  // 是否处于允许的执行窗口 23:35–23:59（北京时间）
   var inWindow = (bj.getHours() === 23 && bj.getMinutes() >= 35);
 
   if (nowMs < targetMs) {
@@ -2030,14 +1880,9 @@ async function checkAndRunScheduledRefund() {
     }, delayMs);
     log('⏳ 已布防前端定时器：今天 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 自动退订（需保持本页打开；关闭浏览器则依赖服务端调度器）', 'info');
   } else if (inWindow) {
-    // 已过点且处于执行窗口 → 立即补跑（每日只跑一次：云端已记录今天日期则不重复）
-    var _todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-    if (data && data.schedule_last_executed_date === _todayStr) {
-      log('ℹ️ 今日定时退订已由服务端执行过，本页不再重复补跑', 'info');
-    } else {
-      log('⏰ 检测到 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 已过且处于执行窗口，立即执行定时退订...', 'warn');
-      executeScheduledRefund();
-    }
+    // 已过点且处于执行窗口 → 立即补跑（不限制每天次数）
+    log('⏰ 检测到 ' + String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ' 已过且处于执行窗口，立即执行定时退订...', 'warn');
+    executeScheduledRefund();
   } else {
     // 已过点但不在窗口（如过了 23:59）→ 不执行，等待明天窗口
     if (state.scheduleTimerId) { clearTimeout(state.scheduleTimerId); state.scheduleTimerId = null; }
@@ -2071,10 +1916,7 @@ async function executeScheduledRefund() {
   }
 
   var nowStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  var _sel = (state.selectedRegions && state.selectedRegions.size)
-    ? Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')
-    : '全部地域';
-  log('⏰ 北京时间 ' + nowStr + '，开始执行定时退订（范围：' + _sel + '）', 'warn');
+  log('⏰ 北京时间 ' + nowStr + '，开始执行定时退订', 'warn');
 
   // 记录最后执行日期（仅用于监控，不再作为「每天只跑一次」的闸门）—— 统一用【北京时间】日期，与 cron 脚本保持一致
   try {
@@ -2086,44 +1928,36 @@ async function executeScheduledRefund() {
     }
   } catch(e) {}
 
-  // 【凭证多选】读取云端保存的 schedule_credentials（数组）；兼容旧 schedule_credential 单凭证；
-  // 都没有则退回「当前凭证」（再没有则全部凭证，兼容旧行为）
-  var _schedCredNames = [];
-  try {
-    if (window.CloudStore && currentUser && currentUser.user) {
-      var _cd = await CloudStore.getUserData(currentUser.user, true);
-      if (_cd) {
-        if (Array.isArray(_cd.schedule_credentials) && _cd.schedule_credentials.length) {
-          _schedCredNames = _cd.schedule_credentials;
-        } else if (_cd.schedule_credential) {
-          _schedCredNames = [_cd.schedule_credential];
-        }
-      }
-    }
-  } catch(e) {}
+  // 遍历全部凭证（多 profile 各退各的实例）
   var profiles = [];
-  if (_schedCredNames.length) {
-    profiles = getRefundProfilesFromNames(_schedCredNames);
-    if (!profiles.length) {
-      // 云端配置的凭证在本地不存在 → 兜底当前凭证
-      var _ap0 = null;
-      try { _ap0 = AliyunClient.getActiveProfile(); } catch(e) {}
-      if (_ap0) profiles = [_ap0];
-    }
-  } else {
-    profiles = getDefaultRefundProfiles();
-  }
+  try { profiles = AliyunClient.listProfiles() || []; } catch(e) { profiles = []; }
   if (!profiles.length) profiles = [{ name: '默认' }];
-  log('🔑 本次退订凭证：' + profiles.map(function(p){ return '「' + p.name + '」'; }).join('、') + '（共 ' + profiles.length + ' 个）', 'info');
 
-  // 记住退订前的当前凭证，退完后还原
-  var _origActive2 = null;
-  try { _origActive2 = AliyunClient.getActiveProfile(); } catch(e) {}
+  // 按 AK 去重：同一账号内相同 AK 视为重复凭证，只退一次（不影响不同账号）
+  var _seenAk = {};
+  var _dedup = 0;
+  for (var _k = 0; _k < profiles.length; _k++) {
+    var _a = (profiles[_k].ak_id || '').trim();
+    if (_a) { if (_seenAk[_a]) continue; _seenAk[_a] = true; }
+    _dedup++;
+  }
+  log('🔑 共扫描 ' + profiles.length + ' 个凭证，去重后 ' + _dedup + ' 个（重复凭证只退一次）', 'info');
+
+  var originalActive = '';
+  try { var ap = AliyunClient.getActiveProfile(); if (ap) originalActive = ap.name; } catch(e) {}
 
   var grandSuccess = 0, grandSkip = 0, grandFail = 0;
+  var _seenAkRun = {};
 
   for (var pi = 0; pi < profiles.length; pi++) {
     var prof = profiles[pi];
+    // 去重：与其他凭证 AK 相同时跳过（重复凭证只退一次）
+    var _profAk = (prof.ak_id || '').trim();
+    if (_profAk && _seenAkRun[_profAk]) {
+      log('⚠️ 凭证「' + prof.name + '」与其他凭证 AK 相同，已跳过（重复凭证只退一次）', 'warn');
+      continue;
+    }
+    if (_profAk) _seenAkRun[_profAk] = true;
     try {
       await AliyunClient.useProfile(prof.name);
     } catch(e) {
@@ -2138,10 +1972,8 @@ async function executeScheduledRefund() {
     var _profSuccess = 0, _profSkip = 0, _profFail = 0;
     while (_round < _maxRounds) {
       _round++;
-      // 获取该凭证下的实例：仅退当前选中地域（标签），未选任何地域则退全部
-      var regionIds = (state.selectedRegions && state.selectedRegions.size)
-        ? Array.from(state.selectedRegions)
-        : Object.keys(REGION_INFO);
+      // 获取该凭证下的所有实例
+      var regionIds = Object.keys(REGION_INFO);
       var allInstances = [];
       for (var i = 0; i < regionIds.length; i++) {
         var rid = regionIds[i];
@@ -2195,40 +2027,19 @@ async function executeScheduledRefund() {
     }
   }
 
-  // （仅退当前凭证，无需还原活跃凭证）
+  // 还原用户原本选中的活跃凭证
+  if (originalActive) {
+    try { await AliyunClient.useProfile(originalActive); } catch(e) {}
+  }
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-  log('🏁 当前凭证退订完成：成功 ' + grandSuccess + ' 台，跳过 ' + grandSkip + ' 台，失败 ' + grandFail + ' 台', grandFail === 0 ? 'success' : 'warn');
-
-  // 还原退订前的当前凭证
-  if (_origActive2 && profiles.length && _origActive2.name !== profiles[profiles.length - 1].name) {
-    try { await AliyunClient.useProfile(_origActive2.name); } catch(e) {}
-  }
+  log('🏁 全部凭证退订完成：成功 ' + grandSuccess + ' 台，跳过 ' + grandSkip + ' 台，失败 ' + grandFail + ' 台', grandFail === 0 ? 'success' : 'warn');
 
   await refreshAllRegions();
 }
 
 async function runScheduledCancelNow() {
-  // 读取云端保存的凭证列表（多选）
-  var _credNames = [];
-  try {
-    if (window.CloudStore && currentUser && currentUser.user) {
-      var _d0 = await CloudStore.getUserData(currentUser.user, true);
-      if (_d0) {
-        if (Array.isArray(_d0.schedule_credentials) && _d0.schedule_credentials.length) _credNames = _d0.schedule_credentials;
-        else if (_d0.schedule_credential) _credNames = [_d0.schedule_credential];
-      }
-    }
-  } catch(e) {}
-  var _active = null;
-  try { _active = AliyunClient.getActiveProfile(); } catch(e) {}
-  var _credName = _credNames.length
-    ? _credNames.map(function(n){ return '「' + n + '」'; }).join('、')
-    : (_active ? ('「' + _active.name + '」') : '当前凭证');
-  var _sel = (state.selectedRegions && state.selectedRegions.size)
-    ? Array.from(state.selectedRegions).map(function(r){return REGION_INFO[r]||r;}).join('、')
-    : '全部地域';
-  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订凭证 ' + _credName + ' 的【' + _sel + '】云主机。\n\n确认继续？')) return;
+  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订所有地域的所有云主机。\n\n确认继续？')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🚀 立即触发定时退订...', 'warn');
@@ -2602,7 +2413,6 @@ async function init() {
   initOrderGrid();
   initScheduleTimePicker();
   checkConfirm();
-  renderCredentialMultiSelect();
   renderScheduledTasks();
 
   // 从云端预加载用户数据（凭证、AI 设置等）到本地缓存
@@ -2655,7 +2465,6 @@ async function init() {
   state.hasCredentials = AliyunClient.hasCredentials();
   console.log('[init] hasCredentials=' + state.hasCredentials + ' user=' + (currentUser ? currentUser.user : 'null') + ' profiles=' + (AliyunClient.listProfiles ? AliyunClient.listProfiles().length : 0));
   updateCredentialBar();
-  renderCredentialMultiSelect();
 
   // 凭证就绪后，再次尝试布防 / 补跑定时退订
   checkAndRunScheduledRefund();

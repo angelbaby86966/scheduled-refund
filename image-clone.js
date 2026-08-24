@@ -442,6 +442,28 @@
       base += ' --appid "' + appid + '" --appak "' + appak + '" --appsk "' + appsk + '"';
     }
     cmdEl.textContent = base;
+    icRenderPrepareCmd();
+  }
+
+  // ====== ⑦ 半黄金镜像：生成源机预装命令（复用上方 Token + 两组凭据） ======
+  function icRenderPrepareCmd() {
+    var tokEl = document.getElementById('icDeployToken');
+    var cmdEl = document.getElementById('icPrepareCmd');
+    if (!tokEl || !cmdEl) return;
+    var tok = (tokEl.value || '').trim();
+    if (!tok) { cmdEl.textContent = '（请先填写 ⑥ 区的 IPES Token）'; return; }
+    function getv(id) { var e = document.getElementById(id); return e ? (e.value || '').trim() : ''; }
+    var ak = getv('icAk'), sk = getv('icSk'), isp = getv('icIsp'), numDirs = getv('icNumDirs');
+    var appid = getv('icAppid'), appak = getv('icAppak'), appsk = getv('icAppsk');
+    if (!ak || !sk || !isp || !appid || !appak || !appsk) {
+      cmdEl.textContent = '（请完整填写 ⑥ 区的 ① 注册设备凭据 与 ② 绑定业务ID凭据，否则新机首次启动无法注册绑定）';
+      return;
+    }
+    var base = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/edge_prepare_golden.sh | bash -s -- --token "' + tok + '"';
+    base += ' --ak "' + ak + '" --sk "' + sk + '" --isp "' + isp + '"';
+    if (numDirs) base += ' --num-dirs "' + numDirs + '"';
+    base += ' --appid "' + appid + '" --appak "' + appak + '" --appsk "' + appsk + '"';
+    cmdEl.textContent = base;
   }
 
   function icFallbackCopy(text) {
@@ -478,7 +500,8 @@
   window.icLoadImages = icLoadImages;
   window.icLaunchFromImage = icLaunchFromImage;
   window.icAutoDeploy = icAutoDeploy;
-  window.icRenderDeployCmd = icRenderDeployCmd;
+    window.icRenderDeployCmd = icRenderDeployCmd;
+  window.icRenderPrepareCmd = icRenderPrepareCmd;
   window.icCopyText = icCopyText;
 
   if (document.readyState === 'loading') {

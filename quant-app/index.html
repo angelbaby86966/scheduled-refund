@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>量策 · 智投 | 股票基金量化分析</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<nav class="nav">
+  <div class="brand"><span class="logo">量</span>量策 · 智投</div>
+  <div class="links">
+    <a href="#/" class="active" id="nav-home">首页</a>
+    <a href="#/searched" id="nav-searched">我的搜索</a>
+    <a href="#/recommend/open_fund" id="nav-openfund">场外基金</a>
+    <a href="#/alerts" id="nav-alerts">提醒</a>
+    <a href="#/strategy" id="nav-strategy">策略</a>
+  </div>
+  <div class="search">
+    <span class="ic">🔍</span>
+    <input id="searchInput" placeholder="搜索股票/基金名称或代码，回车直达…">
+    <div class="suggest" id="suggest"></div>
+  </div>
+</nav>
+<div class="container" id="app"><div class="empty">初始化…</div></div>
+<div class="footer">
+  量策 · 智投 · 低位低买 高位高卖 &nbsp;|&nbsp; 数据来源 AkShare（实时/历史行情）
+  &nbsp;|&nbsp; ⚠️ 本工具为量化分析辅助，所有信号由算法基于量价数据生成，<b>不构成任何投资建议</b>。投资有风险，决策需谨慎。
+</div>
+<script src="js/app.js"></script>
+</body>
+</html>

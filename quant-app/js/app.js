@@ -272,7 +272,7 @@ async function renderDashboard(){
   el.innerHTML = `<div class="empty">加载中…</div>`;
   try{
     const d = await apiGet('/api/overview');
-    const snapBanner = MODE==='static' ? `<div class="banner">⚠️ 当前为<b>静态快照（演示）</b>模式，数据生成于 <b>${d.generated_at}</b>。实时行情与自动提醒需在后端运行模式下使用。</div>`:'';
+    const snapBanner = MODE==='static' ? `<div class="banner">📌 列表与推荐为<b>静态快照</b>（生成于 ${d.generated_at}）；<b>点进任意标的详情页即可看实时行情</b>（直连东方财富，每 15 秒刷新，无需服务器）。</div>`:'';
     const idxHtml = Object.values(d.overview||{}).map(o=>`
       <div class="idx-card">
         <div class="nm">${o.name}</div>
@@ -426,67 +426,120 @@ async function renderRecommend(kind){
   });
 }
 
-/* ---------- detail ---------- */
-let _detailTimer=null;
-async function renderDetail(market, symbol){
-  const el=document.getElementById('app');
-  if(_detailTimer) clearInterval(_detailTimer);
-  // 先查 cache：已生成过的直接进详情（cache key 用 decoded symbol，匹配 buildFallbackDetail 写入的 key）
-  if(_runtimeDetailCache[_cacheKey(market, symbol)]){
-    // 命中 cache，继续往下走正常渲染
-  } else {
-    // 没命中：先尝试 static，static 也没命中 → 跳到"分析生成中"页面
-    el.innerHTML=`<div class="empty">${MODE==='backend'?'正在连接后端拉取…':'正在准备分析引擎…'}</div>`;
-    let exists = false;
-    try{
-      // symbol 已是 decoded 形态，文件名需要重新编码
-      const r = await fetch(`data/details/${market}__${encodeURIComponent(symbol)}.json`);
-      exists = r.ok;
-    }catch(_){ exists = false; }
-    if(!exists){
-      // 跳到 analyzing 页面（客户端生成数据后会自动跳回 detail）
-      location.hash = '#/analyzing/'+market+'/'+encodeURIComponent(symbol);
-      return;
-    }
-  }
-  el.innerHTML=`<div class="empty">加载分析…</div>`;
-  let d;
-  try{ d=await apiGet(`/api/analysis/${market}/${symbol}`); }
-  catch(e){ el.innerHTML=`<div class="empty">该标的无数据（静态快照可能未包含，请运行后端）</div>`; return; }
-  if(!d || d.error){ el.innerHTML=`<div class="empty">${d&&d.error||'无数据'}</div>`; return; }
-  const name = d.name||symbol;
-  // 进入详情即记入「我的搜索」（自动保存浏览过的标的）
-  saveSearched({market, symbol, name, price:d.price, action:d.action, rsi:d.rsi,
-    dist_low60_pct:d.dist_low60_pct, bottom_zone:d.bottom_zone,
-    news_count:d.news_count, news_sentiment:d.news_sentiment, reasons:d.reasons, news:d.news});
-  const dims = d.dims||{};
-  const lowest = d.lowest_price, lowestDate=d.lowest_date;
-  const series = d.series||[];
-  const sigBuy = (d.signals||[]).filter(s=>s.dir==='buy');
-  const sigSell = (d.signals||[]).filter(s=>s.dir==='sell');
+/* ---------- 实时行情（前端直连东方财富，GitHub Pages 静态托管也能用） ---------- */
+function secidOf(code){
+  const c=String(code).replace(/\D/g,'');
+  if(/^(60|68|69|90|50|51|58|59|11|52|53|54|55|56|57)/.test(c)) return '1.'+c;
+  return '0.'+c;
+}
+async function fetchRealtime(market, symbol){
+  const secid=secidOf(symbol);
+  try{
+    const [q,k]=await Promise.all([
+      fetch(`https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f60,f57,f58,f169,f170`,{cache:'no-store'}).then(r=>r.json()),
+      fetch(`https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=0&lmt=250&end=20500101&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58`,{cache:'no-store'}).then(r=>r.json())
+    ]);
+    const qd=q&&q.data, kd=k&&k.data;
+    if(!qd||!kd||!kd.klines||!kd.klines.length) return null;
+    const price=+qd.f43, preClose=+qd.f60;
+    const rows=(kd.klines||[]).map(s=>{const a=s.split(',');return{date:a[0],open:+a[1],close:+a[2],high:+a[3],low:+a[4],vol:+a[5],amount:+a[6]};});
+    return {ok:true,name:qd.f58||symbol,symbol,price,preClose,pct:preClose?(price-preClose)/preClose*100:0,high:+qd.f44,low:+qd.f45,open:+qd.f46,klines:rows};
+  }catch(e){ return null; }
+}
+function emaArr(a,n){const k=2/(n+1);let p=null;return a.map(v=>{p=p==null?v:v*k+p*(1-k);return p;});}
+function smaArr(a,n){const o=[];let s=0;for(let i=0;i<a.length;i++){s+=a[i];if(i>=n)s-=a[i-n];o.push(i>=n-1?s/n:null);}return o;}
+function rsiArr(c,n=14){const o=new Array(c.length).fill(null);let g=0,l=0;for(let i=1;i<c.length;i++){const d=c[i]-c[i-1];const gain=Math.max(d,0),loss=Math.max(-d,0);if(i===1){g=gain;l=loss;}else{g=(g*(n-1)+gain)/n;l=(l*(n-1)+loss)/n;}if(i>=n){o[i]=l===0?100:100-100/(1+(g/(l+1e-12)));}}return o;}
+function macdArr(c){const e1=emaArr(c,12),e2=emaArr(c,26);const dif=c.map((_,i)=>e1[i]-e2[i]);const dea=emaArr(dif,9);const hist=dif.map((v,i)=>2*(v-dea[i]));let cross='—';for(let i=dif.length-1;i>0;i--){if(dif[i-1]<=dea[i-1]&&dif[i]>dea[i]){cross='golden';break;}if(dif[i-1]>=dea[i-1]&&dif[i]<dea[i]){cross='dead';break;}}return{dif,dea,hist,cross};}
+function kdjArr(h,l,c){const K=[],D=[],J=[];let pk=50,pd=50;for(let i=0;i<c.length;i++){if(i<8){K.push(50);D.push(50);J.push(50);continue;}const hh=Math.max(...h.slice(i-8,i+1)),ll=Math.min(...l.slice(i-8,i+1));const rsv=(c[i]-ll)/(hh-ll+1e-12)*100;const kk=pk+(1/3)*(rsv-pk),dd=pd+(1/3)*(kk-pd);K.push(kk);D.push(dd);J.push(3*kk-2*dd);pk=kk;pd=dd;}return{k:K,d:D,j:J};}
+function bollArr(c,n=20,k=2){const mid=smaArr(c,n);const up=[],lo=[];for(let i=0;i<c.length;i++){if(i<n-1){up.push(null);lo.push(null);continue;}const sl=c.slice(i-n+1,i+1);const m=mid[i];const v=sl.reduce((s,x)=>s+(x-m)**2,0)/n;const sd=Math.sqrt(v);up.push(m+k*sd);lo.push(m-k*sd);}return{upper:up,mid,lower:lo};}
+function atrArr(h,l,c,n=14){const tr=h.map((x,i)=>i===0?x-l[i]:Math.max(x-l[i],Math.abs(x-c[i-1]),Math.abs(l[i]-c[i-1])));let a=tr[0];const o=[a];for(let i=1;i<tr.length;i++){a=(a*(n-1)+tr[i])/n;o.push(a);}return o;}
+function buildRealtimeDetail(market, symbol, rt, base){
+  const rows=rt.klines;
+  const close=rows.map(r=>r.close), high=rows.map(r=>r.high), low=rows.map(r=>r.low);
+  const sma20=smaArr(close,20), sma60=smaArr(close,60);
+  const rsi=rsiArr(close,14);
+  const macd=macdArr(close);
+  const kdj=kdjArr(high,low,close);
+  const boll=bollArr(close,20,2);
+  const atr=atrArr(high,low,close,14);
+  const last=close.length-1;
+  const price=rt.price;
+  const rsiV=rsi[last]||0;
+  const macdDif=macd.dif[last], macdDea=macd.dea[last], macdCross=macd.cross;
+  let kdjCross='—';const kL=kdj.k,dL=kdj.d;
+  for(let i=close.length-1;i>0;i--){if(kL[i-1]<=dL[i-1]&&kL[i]>dL[i]){kdjCross='golden';break;}if(kL[i-1]>=dL[i-1]&&kL[i]<dL[i]){kdjCross='dead';break;}}
+  const bollU=boll.upper[last], bollM=boll.mid[last], bollL=boll.lower[last];
+  const atrV=atr[last];
+  const minIdx=close.indexOf(Math.min(...close));
+  const lowest=close[minIdx], lowestDate=rows[minIdx].date;
+  const win60=close.slice(Math.max(0,last-59));
+  const low60=Math.min(...win60);
+  const dist_low60_pct=(price-low60)/low60*100;
+  const bottom_zone = dist_low60_pct<=8 && rsiV<55;
+  const signals=[];
+  if(rsiV<30) signals.push({dir:'buy',desc:'RSI 超卖 (<30)',weight:18});
+  if(macdCross==='golden') signals.push({dir:'buy',desc:'MACD 金叉',weight:15});
+  if(price<=bollL*1.01) signals.push({dir:'buy',desc:'触及布林下轨',weight:12});
+  if(kdjCross==='golden'||kdjJ<0) signals.push({dir:'buy',desc:'KDJ 超卖金叉',weight:12});
+  if(dist_low60_pct<=5) signals.push({dir:'buy',desc:'处于60日低位区',weight:15});
+  if(rsiV>70) signals.push({dir:'sell',desc:'RSI 超买 (>70)',weight:18});
+  if(macdCross==='dead') signals.push({dir:'sell',desc:'MACD 死叉',weight:15});
+  if(price>=bollU*0.99) signals.push({dir:'sell',desc:'触及布林上轨',weight:12});
+  if(kdjCross==='dead'||kdjJ>100) signals.push({dir:'sell',desc:'KDJ 超买死叉',weight:12});
+  if(dist_low60_pct>=15) signals.push({dir:'sell',desc:'处于60日高位区',weight:15});
+  const score=Math.max(-50,Math.min(50, signals.filter(s=>s.dir==='buy').reduce((s,x)=>s+x.weight,0)-signals.filter(s=>s.dir==='sell').reduce((s,x)=>s+x.weight,0)));
+  const action= score>=15?'BUY': score<=-15?'SELL':'HOLD';
+  const series=rows.map((r,i)=>({date:r.date,close:r.close,open:r.open,high:r.high,low:r.low,vol:r.vol,sma20:sma20[i],sma60:sma60[i]}));
+  const baseDims=(base&&base.dims)||{};
+  const dims=Object.assign({}, baseDims, {tech:Math.max(0,Math.min(10,5+score/5)),momentum:Math.max(0,Math.min(10,rsiV/10)),safety:Math.max(0,Math.min(10,5-dist_low60_pct/5))});
+  const d=Object.assign({}, base||{});
+  d.name=rt.name||(base&&base.name)||symbol;
+  d.symbol=symbol; d.market=market;
+  d.price=price; d.pct=rt.pct; d.preClose=rt.preClose;
+  d.sma20=sma20[last]; d.sma60=sma60[last];
+  d.macd={dif:macdDif,dea:macdDea,hist:macd.hist[last],cross:macdCross};
+  d.rsi=rsiV;
+  d.kdj={k:kdjV,d:kdjD,j:kdjJ,cross:kdjCross};
+  d.boll={upper:bollU,mid:bollM,lower:bollL};
+  d.atr=atrV;
+  d.lowest_price=lowest; d.lowest_date=lowestDate;
+  d.low60=low60; d.dist_low60_pct=dist_low60_pct;
+  d.near_support=bollL; d.near_resist=bollU;
+  d.bottom_zone=bottom_zone;
+  d.signals=signals; d.score=score; d.action=action;
+  d.series=series; d.dims=dims; d.realtime=true;
+  return d;
+}
+function drawDetailCharts(d){ if(d&&d.series) drawPriceChart(d.series, d); if(d&&d.dims) drawRadar(d.dims); }
 
+function paintDetail(el, d, realtime){
+  const name=d.name||'';
+  const dims=d.dims||{};
+  const lowest=d.lowest_price, lowestDate=d.lowest_date;
+  const sigBuy=(d.signals||[]).filter(s=>s.dir==='buy');
+  const sigSell=(d.signals||[]).filter(s=>s.dir==='sell');
   el.innerHTML=`
     <div class="banner" style="display:flex;justify-content:space-between;align-items:center">
-      <div><b>${name}</b> <span class="muted">${symbol} · ${market==='open_fund'?'场外基金':market==='fund'?'场内基金':'A股'}</span> &nbsp; ${actBadge(d.action)}
+      <div><b>${name}</b> <span class="muted">${d.symbol||''} · ${d.market==='open_fund'?'场外基金':d.market==='fund'?'场内基金':'A股'}</span> &nbsp; ${actBadge(d.action)}
         <span class="muted" style="margin-left:10px">综合得分 <b style="color:${d.score>0?C.up:C.down}">${d.score>0?'+':''}${d.score}</b></span></div>
-      <div class="live"><span class="pulse"></span>${MODE==='backend'?'实时刷新中':'快照'}</div>
+      <div class="live" id="dt-live"><span class="pulse"></span>${realtime?'实时 · '+new Date().toLocaleTimeString('zh-CN'):(MODE==='backend'?'实时刷新中':'快照')}</div>
     </div>
     <div class="detail-head">
-      <div><div class="title">${name}</div><div class="code">${symbol} · ${market==='open_fund'?'场外基金':market==='fund'?'场内基金':'A股'}</div></div>
+      <div><div class="title">${name}</div><div class="code">${d.symbol||''} · ${d.market==='open_fund'?'场外基金':d.market==='fund'?'场内基金':'A股'}</div></div>
       <div class="price"><div class="big" id="dt-price">${fmt(d.price)}</div>
-        <div class="pct" id="dt-pct">--</div></div>
+        <div class="pct" id="dt-pct">${d.pct!=null?pctHtml(d.pct):'--'}</div></div>
     </div>
     <div class="two" style="margin-top:16px">
       <div class="panel"><h3>价格走势 · 均线 & 支撑/阻力</h3><canvas id="priceChart" height="300"></canvas></div>
       <div class="panel"><h3>多维评分</h3><canvas id="radarChart" height="300"></canvas></div>
     </div>
     <div class="two" style="margin-top:16px">
-      <div class="panel"><h3>关键指标</h3>
+      <div class="panel"><h3>关键指标（实时）</h3>
         <div class="kv"><span class="k">MA20 / MA60</span><span>${fmt(d.sma20)} / ${fmt(d.sma60)}</span></div>
-        <div class="kv"><span class="k">MACD (DIF/DEA)</span><span>${fmt(d.macd?.dif,3)} / ${fmt(d.macd?.dea,3)} <span class="muted">${d.macd?.cross==='golden'?'金叉':d.macd?.cross==='dead'?'死叉':'—'}</span></span></div>
+        <div class="kv"><span class="k">MACD (DIF/DEA)</span><span>${fmt(d.macd&&d.macd.dif,3)} / ${fmt(d.macd&&d.macd.dea,3)} <span class="muted">${d.macd&&d.macd.cross==='golden'?'金叉':d.macd&&d.macd.cross==='dead'?'死叉':'—'}</span></span></div>
         <div class="kv"><span class="k">RSI(14)</span><span class="${d.rsi<30?'up':d.rsi>70?'down':'muted'}">${fmt(d.rsi,1)}</span></div>
-        <div class="kv"><span class="k">KDJ (K/D/J)</span><span>${fmt(d.kdj?.k,1)} / ${fmt(d.kdj?.d,1)} / ${fmt(d.kdj?.j,1)}</span></div>
-        <div class="kv"><span class="k">布林带 (上/中/下)</span><span>${fmt(d.boll?.upper)} / ${fmt(d.boll?.mid)} / ${fmt(d.boll?.lower)}</span></div>
+        <div class="kv"><span class="k">KDJ (K/D/J)</span><span>${fmt(d.kdj&&d.kdj.k,1)} / ${fmt(d.kdj&&d.kdj.d,1)} / ${fmt(d.kdj&&d.kdj.j,1)}</span></div>
+        <div class="kv"><span class="k">布林带 (上/中/下)</span><span>${fmt(d.boll&&d.boll.upper)} / ${fmt(d.boll&&d.boll.mid)} / ${fmt(d.boll&&d.boll.lower)}</span></div>
         <div class="kv"><span class="k">ATR(14) 波动</span><span>${fmt(d.atr)}</span></div>
       </div>
       <div class="panel"><h3>最低点研判 · 低买策略</h3>
@@ -503,8 +556,8 @@ async function renderDetail(market, symbol){
       <div class="panel"><h3>卖出信号 (高卖)</h3><div class="signal-list">${sigSell.length?sigSell.map(s=>`<div class="s"><span class="dot sell"></span><span>${s.desc} <span class="muted">· 权重${s.weight}</span></span></div>`).join(''):'<div class="muted">无明显卖出信号</div>'}</div></div>
     </div>
     <div class="panel news-panel collapsed" style="margin-top:16px">
-      <h3>最新新闻 · 市场情绪</h3>
-      <div class="news-sent" onclick="this.parentElement.classList.toggle('collapsed')" title="点击展开/收起 6 条新闻">
+      <h3>最新新闻 · 市场情绪${realtime?'<span class="muted" style="font-size:11px;font-weight:400"> （行情已实时，新闻沿用快照）</span>':''}</h3>
+      <div class="news-sent" onclick="this.parentElement.classList.toggle('collapsed')" title="点击展开/收起">
         <span class="chev"></span>
         新闻情绪：<b class="${d.news_sentiment>0.15?'up':d.news_sentiment<-0.15?'down':'muted'}">${newsLabel(d.news_sentiment)}</b>
         <span class="muted">（共 ${d.news_count||(d.news&&d.news.length)||0} 条 · 点击展开${d.news_sample?' · 示例数据':''}）</span>
@@ -522,22 +575,57 @@ async function renderDetail(market, symbol){
         ${d.bottom_zone?'该标的处于底部区域，安全边际较高，符合低买逻辑。':''}
       </p>
     </div>`;
+}
 
-  drawPriceChart(series, d);
-  drawRadar(dims);
-
-  // 实时价格轮询（仅后端模式）
-  if(MODE==='backend'){
-    _detailTimer = setInterval(async ()=>{
-      try{
-        const q = await apiGet(`/api/quote/${market}/${symbol}`);
-        if(q && q.price){
-          document.getElementById('dt-price').textContent = fmt(q.price);
-          const pe = document.getElementById('dt-pct');
-          if(q.pct!=null){ pe.innerHTML = pctHtml(q.pct); }
-        }
-      }catch(e){}
-    }, 5000);
+/* ---------- detail ---------- */
+let _detailTimer=null;
+async function renderDetail(market, symbol){
+  const el=document.getElementById('app');
+  if(_detailTimer) clearInterval(_detailTimer);
+  if(_runtimeDetailCache[_cacheKey(market, symbol)]){
+    // 命中 cache，继续往下走正常渲染
+  } else {
+    el.innerHTML=`<div class="empty">${MODE==='backend'?'正在连接后端拉取…':'正在准备分析引擎…'}</div>`;
+    let exists=false;
+    try{ const r=await fetch(`data/details/${market}__${encodeURIComponent(symbol)}.json`); exists=r.ok; }catch(_){ exists=false; }
+    if(!exists){ location.hash='#/analyzing/'+market+'/'+encodeURIComponent(symbol); return; }
+  }
+  el.innerHTML=`<div class="empty">加载分析…</div>`;
+  let d;
+  try{ d=await apiGet(`/api/analysis/${market}/${symbol}`); }
+  catch(e){ el.innerHTML=`<div class="empty">该标的无数据（静态快照可能未包含，请运行后端）</div>`; return; }
+  if(!d||d.error){ el.innerHTML=`<div class="empty">${d&&d.error||'无数据'}</div>`; return; }
+  // 进入详情即记入「我的搜索」
+  saveSearched({market,symbol,name:d.name||symbol,price:d.price,action:d.action,rsi:d.rsi,dist_low60_pct:d.dist_low60_pct,bottom_zone:d.bottom_zone,news_count:d.news_count,news_sentiment:d.news_sentiment,reasons:d.reasons,news:d.news});
+  // 静态渲染（秒开）
+  paintDetail(el, d, false);
+  drawDetailCharts(d);
+  // 前端实时补全（GitHub Pages 静态托管也能拉云端行情，零服务器）
+  if(MODE!=='backend' && market!=='open_fund'){
+    fetchRealtime(market, symbol).then(rt=>{
+      if(rt&&rt.ok){
+        const rd=buildRealtimeDetail(market,symbol,rt,d);
+        _runtimeDetailCache[_cacheKey(market,symbol)]=rd;
+        paintDetail(el, rd, true);
+        drawDetailCharts(rd);
+        patchSearched(market,symbol,rd);
+        const tick=()=>{ fetchRealtime(market,symbol).then(rt2=>{
+          if(rt2&&rt2.ok){
+            const rd2=buildRealtimeDetail(market,symbol,rt2,d);
+            const pe=document.getElementById('dt-price'); if(pe)pe.textContent=fmt(rt2.price);
+            const pc=document.getElementById('dt-pct'); if(pc)pc.innerHTML=pctHtml(rt2.pct);
+            const lv=document.getElementById('dt-live'); if(lv)lv.innerHTML='<span class="pulse"></span>实时 · '+new Date().toLocaleTimeString('zh-CN');
+            _runtimeDetailCache[_cacheKey(market,symbol)]=rd2;
+            patchSearched(market,symbol,rd2);
+          }
+        }).catch(()=>{}); };
+        _detailTimer=setInterval(tick,15000);
+      }
+    }).catch(()=>{});
+  } else if(MODE==='backend'){
+    _detailTimer=setInterval(async()=>{
+      try{ const q=await apiGet(`/api/quote/${market}/${symbol}`); if(q&&q.price){ const pe=document.getElementById('dt-price'); if(pe)pe.textContent=fmt(q.price); const pc=document.getElementById('dt-pct'); if(q.pct!=null&&pc)pc.innerHTML=pctHtml(q.pct); } }catch(e){}
+    },5000);
   }
 }
 

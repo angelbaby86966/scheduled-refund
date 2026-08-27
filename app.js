@@ -2233,8 +2233,12 @@ async function batchCreateInstances() {
         DataDiskSize: 0,
       };
 
-      // 幂等令牌：同一地区同一次批量任务用同一个 ClientToken，重试时不会重复下单
-      var clientToken = 'wb-' + order.regionId + '-' + order.count + '-' + Date.now();
+      // 幂等令牌：同一 order 对象（同地区同数量同批次）永远用同一个 ClientToken，
+      // 重试/复用同一 order 时不会重复下单；不同的 order 对象仍各自唯一（不会误吞合法新开批次）。
+      if (!order._clientToken) {
+        order._clientToken = 'wb-open-' + order.regionId + '-' + order.count + '-' + Date.now();
+      }
+      var clientToken = order._clientToken;
 
       // 🔄 重试：网络抖动 / Edge Function 偶发超时 / signal aborted 时自动重试
       var maxAttempts = 3;

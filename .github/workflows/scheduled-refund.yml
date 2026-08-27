@@ -1,32 +1,34 @@
-name: 阿里云轻量云定时自动退订
-
+name: scheduled-refund
 on:
-  # 每天北京时间 23:35 执行（UTC 15:35）
   schedule:
-    - cron: '35 15 * * *'
-  # 支持手动触发
-  workflow_dispatch:
-
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: write
 jobs:
   refund:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Run scheduled refund
-        env:
-          ALIYUN_AK: ${{ secrets.ALIYUN_AK }}
-          ALIYUN_SK: ${{ secrets.ALIYUN_SK }}
-          REGIONS: ${{ vars.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan,cn-qingdao' }}
-        run: npm run refund
+        run: python3 scheduled_refund.py
+      - name: Commit refunded state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add refund_state.json
+          if git diff --cached --quiet; then
+            echo "refund_state.json 无变化，跳过提交"
+          else
+            git commit -m "chore: 更新已退订状态 [skip ci]"
+            git push
+          fi

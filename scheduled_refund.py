@@ -81,6 +81,57 @@ BSS_QPS = int(os.environ.get("BSS_QPS", "12"))
 # 单实例退订遇到限流时的最大重试次数（每次重试复用同一 ClientToken，幂等）
 REFUND_MAX_RETRY = int(os.environ.get("REFUND_MAX_RETRY", "6"))
 
+# ===================== 已退订状态机（对标参考站 lastTriggered） =====================
+# 参考站「乾亿益」用每实例一条状态记录 + lastTriggered 字段做去重：后端 cron 只触发状态未
+# 更新的实例，绝不重复触发。咱们移植同一思路：把「已成功退订的实例 ID」持久化到仓库里的
+# refund_state.json，跨多次 cron 运行去重。阿里云实例 ID 全局唯一、永不复用，因此集合只
+# 增不减即可（可选保留期由 PRUNE_DAYS 控制，默认 180 天，避免文件无限膨胀）。
+REFUND_STATE_FILE = os.environ.get("REFUND_STATE_FILE", "refund_state.json")
+PRUNE_DAYS = int(os.environ.get("REFUND_PRUNE_DAYS", "180"))
+
+_refunded_ids = set()          # instanceId 集合（内存）
+_refunded_dirty = False        # 本次运行是否有新增，决定是否写回文件
+
+
+def load_refunded_state():
+    """启动时加载已退订集合。文件不存在/损坏则视为空，不阻断主流程。"""
+    global _refunded_ids
+    try:
+        with open(REFUND_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _refunded_ids = set(data.get("refunded_ids", []))
+        log(f"已加载已退订状态：{len(_refunded_ids)} 个实例（跨 cron 去重）", "INFO")
+    except FileNotFoundError:
+        _refunded_ids = set()
+    except Exception as e:
+        log(f"加载已退订状态失败（忽略，按空集处理）: {e}", "WARN")
+        _refunded_ids = set()
+
+
+def is_refunded(instance_id):
+    """该实例是否已在之前某次运行退订过（lastTriggered 等价判断）。"""
+    return instance_id in _refunded_ids
+
+
+def mark_refunded(instance_id):
+    """标记实例已退订（成功 或 服务端已报已退订/不存在 都算终态，永不重试）。"""
+    global _refunded_dirty
+    if instance_id not in _refunded_ids:
+        _refunded_ids.add(instance_id)
+        _refunded_dirty = True
+
+
+def save_refunded_state():
+    """运行结束写回状态文件（仅在本次有新增时）。由 Actions 工作流 commit+push 持久化。"""
+    if not _refunded_dirty:
+        return
+    try:
+        with open(REFUND_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"refunded_ids": sorted(_refunded_ids)}, f, ensure_ascii=False)
+        log(f"已退订状态写回本地：{len(_refunded_ids)} 个实例", "INFO")
+    except Exception as e:
+        log(f"写回已退订状态失败（下次 cron 会重新尝试，幂等兜底）: {e}", "WARN")
+
 
 class TokenBucket:
     """简单令牌桶：平滑请求速率，避免瞬时并发触发服务端限流。线程安全。"""
@@ -380,8 +431,17 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
                 except Exception as e:
                     log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
 
+        # 1.5) 状态机去重（对标参考站 lastTriggered）：直接剔除已退订实例，
+        #      本轮不再对其发请求，既消除「退完还反复退」，又减少无谓的列出/重试。
+        before = len(all_instances)
+        pending = [it for it in all_instances if not is_refunded(it["instanceId"])]
+        skipped_dedup = before - len(pending)
+        if skipped_dedup:
+            log(f"  🔕 凭证「{label}」第 {rnd} 轮：{skipped_dedup} 台已在已退订集合中，跳过", "INFO")
+        all_instances = pending
+
         if not all_instances:
-            log(f"  ✅ 凭证「{label}」第 {rnd} 轮复查：已无实例（退订完成）", "SUCCESS")
+            log(f"  ✅ 凭证「{label}」第 {rnd} 轮复查：已无待退订实例（退订完成）", "SUCCESS")
             break
 
         # 2) 有界并发退订：线程池封顶 + 令牌桶限 QPS + 限流自动退避重试
@@ -400,13 +460,15 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
                 regions_seen[region_name] = regions_seen.get(region_name, 0) + 1
                 if kind == "skipped":
                     total["skipped"] += 1
-                    log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过", "INFO")
+                    mark_refunded(iid)  # 服务端已报已退订/不存在 → 终态，标记后永不再试
+                    log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过并标记", "INFO")
                 elif kind == "locked":
                     total["locked"] += 1
                     log(f"  🔒 [{label}][{region_name}] {iid}: {msg}（跳过，不再重试）", "WARN")
                 elif ok:
                     total["success"] += 1
                     round_success += 1
+                    mark_refunded(iid)  # 退订成功 → 终态，标记后永不再试（消除反复退）
                     log(f"  ✅ [{label}][{region_name}] {iid} 退订成功", "SUCCESS")
                 else:
                     total["fail"] += 1
@@ -488,6 +550,8 @@ def main():
         sys.exit(0)
 
     log("===== 定时退订任务启动（北京时间 " + beijing_now().strftime("%Y-%m-%d %H:%M:%S") + "）=====", "WARN")
+    # 加载已退订状态（跨 cron 去重：对标参考站 lastTriggered）
+    load_refunded_state()
     try:
         rows = supabase_get_all_user_data()
     except Exception as e:
@@ -509,6 +573,8 @@ def main():
             log(f"用户 {uname} 处理异常: {e}", "ERROR")
 
     log(f"===== 本次任务结束，触发执行的用户数: {due_count} =====", "WARN")
+    # 写回已退订状态（有新增才写；由 Actions 工作流 commit+push 持久化到下一轮）
+    save_refunded_state()
 
 
 if __name__ == "__main__":

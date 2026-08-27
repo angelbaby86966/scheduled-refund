@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch: {}
+# 串行化：cron 每 10 分钟、超时 40 分钟可能重叠，统一排队执行，
+# 避免多个 run 同时改写 refund_state.json 触发非快进 push 冲突（状态文件更一致）。
+concurrency:
+  group: scheduled-refund
+  cancel-in-progress: false
 permissions:
   contents: write
 jobs:

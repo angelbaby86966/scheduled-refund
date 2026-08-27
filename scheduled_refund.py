@@ -11,9 +11,8 @@
 
 设计要点（与前端 app.js / aliyun-client-v2.js 完全一致）：
   - 阿里云签名：HMAC-SHA1，待签串 'POST&' + encode('/') + '&' + encode(canonical)
-  - 同一账号逐凭证「退干净再退下一个」；凭证内采用【波次 + 每地区并行】模型提速：
-    每波 6 个地区并行列举、各地区各自一批(默认 50 台)并行退订、地区间互不干扰，波次间隔(默认 3s)后进入下一波直到退完
-  - 并发控制：地区内/地区间线程池并行 + 全局令牌桶平滑到 ~BSS_QPS 次/秒，避免触发阿里云 Throttling 限流
+  - 同一账号逐凭证「列→退→复查」直到退干净再退下一个；凭证内退款用【有界并发】提速
+  - 并发控制：线程池 max_workers 封顶 + 令牌桶平滑到 ~BSS_QPS 次/秒，避免触发阿里云 Throttling 限流
   - 限流/服务不可用自动指数退避重试，且复用同一 ClientToken 保证幂等（不会重复退款）
   - BSS 「锁定/不可退」错误不再重试，已退订/不存在视为跳过
   - 时间口径统一用【北京时间 Asia/Shanghai】
@@ -72,27 +71,15 @@ BSS_LOCKED_PATTERNS = [
 BSS_SKIP_PATTERNS = ["ResourceNotExists", "已退订", "不存在", "InvalidInstanceId", "InstanceNotExists"]
 
 # ===================== 并发 / 限流配置 =====================
-# 每波每个地区并行退订的实例数（用户要求：各地区各自一批 50 台并行退）。
-# 地区内部用线程池开到该数量，地区之间互不干扰、同时开退。
-BATCH_PER_REGION = int(os.environ.get("REFUND_BATCH_PER_REGION", "50"))
+# 退订请求同时最多在飞的数量（线程池上限）。阿里云 BSS RefundInstance 同一 AK 有 QPS 上限，
+# 无脑全并行会触发 Throttling；封顶 + 令牌桶即可既提速又不踩限流。
+CONCURRENCY = int(os.environ.get("REFUND_CONCURRENCY", "16"))
 
-# 波次间隔（秒）：每波退完后等待，再各地区退下一批（用户要求：过 3 秒再退）。
-# 同时给阿里云侧状态刷新留时间，下一波再列举看是否还有剩余。
-WAVE_INTERVAL = int(os.environ.get("REFUND_WAVE_INTERVAL", "3"))
-
-# 退订请求同时最多在飞的数量（每地区线程池上限）。开到 BATCH_PER_REGION 让单地区真能 50 路并行。
-CONCURRENCY = int(os.environ.get("REFUND_CONCURRENCY", "50"))
-
-# 阿里云 BSS 每秒最多约多少次 RefundInstance（令牌桶平滑目标，账号级 QPS 上限）。
-# 这是真正的提速开关：原默认 8/s 太保守导致退订像一台台退；提到 20/s 明显更快。
-# 调太高（如 >30）会触发 Throttling 反而更慢（已有退避重试兜底，不会重复退），按需微调。
-BSS_QPS = int(os.environ.get("BSS_QPS", "20"))
+# 阿里云 BSS 每秒最多约多少次 RefundInstance（令牌桶平滑目标）。已从 8 提升到 12 提速（限流退避重试保证幂等安全）。
+BSS_QPS = int(os.environ.get("BSS_QPS", "12"))
 
 # 单实例退订遇到限流时的最大重试次数（每次重试复用同一 ClientToken，幂等）
 REFUND_MAX_RETRY = int(os.environ.get("REFUND_MAX_RETRY", "6"))
-
-# 最大波次（兜底防死循环）：50 台/地区/波 × 6 地区 × 60 波 容量足够，到达上限仍有实例则告警停止。
-MAX_WAVES = int(os.environ.get("REFUND_MAX_WAVES", "60"))
 
 
 class TokenBucket:
@@ -369,93 +356,68 @@ def build_credentials(data):
     return creds
 
 
-def _refund_region_batch(username, label, ak, sk, rid, items):
-    """退单个地区的一批实例：地区内部开线程池并行退（上限 BATCH_PER_REGION 台），
-    每笔退订仍走全局 BSS_BUCKET 令牌桶（账号级 QPS 兜底）+ 限流退避重试 + 幂等 ClientToken。
-    返回本地区的统计 dict。"""
-    res = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-    batch = items[:BATCH_PER_REGION]
-    if not batch:
-        return res
-    region_name = REGION_INFO.get(rid, rid)
-    workers = max(1, min(CONCURRENCY, len(batch)))
-    with ThreadPoolExecutor(max_workers=workers) as rex:
-        rfuts = {rex.submit(refund_instance_retry, ak, sk, rid, it["instanceId"]): it["instanceId"] for it in batch}
-        for rf in as_completed(rfuts):
-            iid = rfuts[rf]
-            try:
-                ok, kind, msg = rf.result()
-            except Exception as e:
-                ok, kind, msg = False, "fail", str(e)
-            if kind == "skipped":
-                res["skipped"] += 1
-                log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过", "INFO")
-            elif kind == "locked":
-                res["locked"] += 1
-                log(f"  🔒 [{label}][{region_name}] {iid}: {msg}（跳过，不再重试）", "WARN")
-            elif ok:
-                res["success"] += 1
-                log(f"  ✅ [{label}][{region_name}] {iid} 退订成功", "SUCCESS")
-            else:
-                res["fail"] += 1
-                log(f"  ❌ [{label}][{region_name}] {iid}: {msg}", "ERROR")
-    return res
-
-
-def drain_credential(username, label, ak, sk, max_waves=MAX_WAVES):
-    """退单凭证（波次 + 每地区并行模型）：
-
-    每一波：
-      1) 6 个地区并行列举实例（独立 endpoint，互不干扰）；
-      2) 各地区各自取前 BATCH_PER_REGION(默认 50) 台，开本地区线程池并行退订；
-         6 个地区由外层线程池同时开退，地区之间互不干扰；
-      3) 波次间隔 WAVE_INTERVAL(默认 3 秒)，再列举下一波，直到所有地区都无实例。
+def drain_credential(username, label, ak, sk, max_rounds=12):
+    """退单凭证：每轮「并行列出全部地域实例 → 有界并发退订（限流退避重试）→ 复查」。
+    直到该凭证名下再无实例，才返回 —— 即「先把这一个凭证退干净，再退下一个凭证」，
+    避免退到一半被窗口关闭打断导致同账号内有的凭证退完、有的没退。
 
     效率与限流的平衡：
-      - 地区内并行 + 地区间并行：结构上就是「各地区一批 50 台并行退、互不干扰」。
-      - 全局令牌桶 BSS_BUCKET 仍按账号级 QPS（BSS_QPS）平滑总速率，避免触发阿里云 Throttling；
-        这是真正的提速开关，默认 20/s（原 8/s 太慢），可用环境变量调。
-      - 限流自动指数退避重试 + 复用同一 ClientToken 保证幂等（不会重复退款）。
+      - 列出实例：6 个地域是独立 endpoint，用线程池并行（低量、安全）。
+      - 退订：线程池 max_workers=CONCURRENCY 封顶，且经 BSS_BUCKET 令牌桶平滑到 ~BSS_QPS/秒，
+        既大幅快于纯串行，又不触发阿里云 Throttling。
+      - 万一被限流：自动指数退避重试，且复用同一 ClientToken 保证幂等（不会重复退款）。
     """
     total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-    for wave in range(1, max_waves + 1):
-        # 1) 每地区并行列举本轮实例
-        inst_by_region = {}
+    for rnd in range(1, max_rounds + 1):
+        # 1) 并行列出本轮该凭证全部地域实例
+        all_instances = []
         with ThreadPoolExecutor(max_workers=len(REGION_INFO)) as ex:
             futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in REGION_INFO}
             for fut in as_completed(futs):
                 rid = futs[fut]
                 try:
-                    inst_by_region[rid] = fut.result()
+                    all_instances.extend(fut.result())
                 except Exception as e:
-                    inst_by_region[rid] = []
                     log(f"  ⚠️ [{label}][{REGION_INFO[rid]}] 列举失败: {e}", "WARN")
 
-        remaining = sum(len(v) for v in inst_by_region.values())
-        if remaining == 0:
-            log(f"  ✅ 凭证「{label}」第 {wave} 波复查：已无实例（退订完成）", "SUCCESS")
+        if not all_instances:
+            log(f"  ✅ 凭证「{label}」第 {rnd} 轮复查：已无实例（退订完成）", "SUCCESS")
             break
 
-        # 2) 各地区并行退订（每地区一批 BATCH_PER_REGION，地区间互不干扰）
-        log(f"  🌊 凭证「{label}」第 {wave} 波：剩余 {remaining} 台，各地区各取前 {BATCH_PER_REGION} 台并行退订", "INFO")
-        with ThreadPoolExecutor(max_workers=len(REGION_INFO)) as rpool:
-            rfuts = {rpool.submit(_refund_region_batch, username, label, ak, sk, rid, items): rid
-                     for rid, items in inst_by_region.items() if items}
-            for rf in as_completed(rfuts):
-                rid = rfuts[rf]
+        # 2) 有界并发退订：线程池封顶 + 令牌桶限 QPS + 限流自动退避重试
+        targets = [(it["regionId"], it["instanceId"]) for it in all_instances]
+        round_success = 0
+        regions_seen = {}
+        with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
+            futs = {ex.submit(refund_instance_retry, ak, sk, rid, iid): (rid, iid) for (rid, iid) in targets}
+            for fut in as_completed(futs):
+                rid, iid = futs[fut]
                 try:
-                    r = rf.result()
+                    ok, kind, msg = fut.result()
                 except Exception as e:
-                    r = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
-                    log(f"  ❌ 凭证「{label}」[{REGION_INFO[rid]}] 退订异常: {e}", "ERROR")
-                for k in total:
-                    total[k] += r.get(k, 0)
+                    ok, kind, msg = False, "fail", str(e)
+                region_name = REGION_INFO.get(rid, rid)
+                regions_seen[region_name] = regions_seen.get(region_name, 0) + 1
+                if kind == "skipped":
+                    total["skipped"] += 1
+                    log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过", "INFO")
+                elif kind == "locked":
+                    total["locked"] += 1
+                    log(f"  🔒 [{label}][{region_name}] {iid}: {msg}（跳过，不再重试）", "WARN")
+                elif ok:
+                    total["success"] += 1
+                    round_success += 1
+                    log(f"  ✅ [{label}][{region_name}] {iid} 退订成功", "SUCCESS")
+                else:
+                    total["fail"] += 1
+                    log(f"  ❌ [{label}][{region_name}] {iid}: {msg}", "ERROR")
 
-        # 3) 波次间隔：让阿里云侧状态刷新，下一波再列举看是否还有剩余
-        if wave < max_waves:
-            time.sleep(WAVE_INTERVAL)
+        # 3) 复查：本轮退完，先让阿里云侧状态刷新，下一轮再列出看是否还有剩余
+        eff = min(CONCURRENCY, len(targets))
+        log(f"  🔁 凭证「{label}」第 {rnd} 轮：退订 {round_success} 台（并行 {eff} 路），累计成功 {total['success']}（继续复查…）", "INFO")
+        time.sleep(0.8)  # 缩短复查间隔以加快退订节奏（已从 2s 改为 0.8s）
     else:
-        log(f"  ⚠️ 凭证「{label}」达到最大波次 {max_waves} 仍有实例，停止以免死循环", "WARN")
+        log(f"  ⚠️ 凭证「{label}」达到最大轮数 {max_rounds} 仍有实例，停止本轮以免死循环", "WARN")
 
     log(f"🏁 凭证「{label}」退订完成：成功 {total['success']} 跳过 {total['skipped']} 锁定 {total['locked']} 失败 {total['fail']}",
         "SUCCESS" if total["fail"] == 0 else "WARN")

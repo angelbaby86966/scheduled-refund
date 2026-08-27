@@ -1447,7 +1447,7 @@ async function executeCancel() {
       log('   • [' + (REGION_INFO[_rk] || _rk) + '] ' + byRegion[_rk].length + ' 台', 'info');
     }
 
-    // 第2步：按地域并行退订（每个地域每批 50 台，批间间隔 3 秒）
+    // 第2步：按地域有界并发退订（并发≤REFUND_CONCURRENCY，速率≤REFUND_QPS/秒，限流自动退避重试，稳定 token 幂等不重复退款）
     var refundTotals = await refundByRegionParallel(byRegion, { recordFailures: true });
     var totalSuccess = refundTotals.success, totalSkipped = refundTotals.skipped,
         totalLocked = refundTotals.locked, totalFail = refundTotals.fail;
@@ -2014,7 +2014,7 @@ async function executeScheduledRefund() {
       _profSuccess += success; _profSkip += skip; _profFail += fail;
 
       log('  🔁 凭证「' + prof.name + '」第 ' + _round + ' 轮：成功 ' + success + ' 台，累计 ' + _profSuccess + '（继续复查…）', 'info');
-      await new Promise(function(r){ setTimeout(r, 2000); }); // 让阿里云侧状态刷新，避免连续查询命中缓存
+      await new Promise(function(r){ setTimeout(r, 800); }); // 让阿里云侧状态刷新（已缩短到 0.8s 以加快退订节奏）
     }
     if (_round >= _maxRounds) {
       log('  ⚠️ 凭证「' + prof.name + '」达到最大轮数仍有实例，停止以免死循环', 'warn');
@@ -3628,8 +3628,8 @@ function updateBatchUnsubBtn() {
 //   2) 并发上限：worker 池最多 REFUND_CONCURRENCY 个在途请求（有界并发）
 //   3) 幂等：每个实例固定一个 clientToken，限流重试时复用，绝不会重复退款
 //   4) 退避重试：Throttling/ServiceUnavailable 等瞬时错误指数退避重试，复用同一 token
-var REFUND_CONCURRENCY = 8;   // 同时最多在途请求数（有界并发上限）
-var REFUND_QPS = 8;           // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）
+var REFUND_CONCURRENCY = 16;  // 同时最多在途请求数（有界并发上限，已从 8 提升到 16 提速）
+var REFUND_QPS = 12;          // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒，已从 8 提升到 12 提速）
 
 // 限流 / 服务瞬时不可用 错误模式（命中则退避重试）
 var REFUND_THROTTLE_PATTERNS = [
@@ -3661,6 +3661,28 @@ function classifyRefundErr(msg) {
   return 'fail';
 }
 
+// 按 region:instance 派生的【稳定幂等 Token】：同一实例在任意进程/轮次/定时执行中永远同一 token，
+// 使 BSS 服务端视为同一请求（保留期内幂等），彻底杜绝「退完又反复退 / 重试重复退款」。
+// 与后端 scheduled_refund.py 的 stable_client_token 派生方式一致（wb- + sha1[:16]）。
+function _djb2hex(s) {
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return ('00000000' + h.toString(16)).slice(-8);
+}
+async function stableClientToken(rid, iid) {
+  var key = rid + ':' + iid;
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    try {
+      var buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(key));
+      var arr = new Uint8Array(buf), hex = '';
+      for (var i = 0; i < arr.length; i++) hex += ('0' + arr[i].toString(16)).slice(-2);
+      return 'wb-' + hex.slice(0, 16);
+    } catch (e) { /* 落到兜底哈希 */ }
+  }
+  // 兜底（非安全上下文）：稳定确定性哈希，同样保证幂等
+  return 'wb-' + _djb2hex(key) + _djb2hex(key.split('').reverse().join(''));
+}
+
 // 令牌桶：take() 在令牌不足时等待补足，保证整体速率 ≤ refillPerSec
 function makeTokenBucket(capacity, refillPerSec) {
   var tokens = capacity;
@@ -3686,10 +3708,10 @@ function makeTokenBucket(capacity, refillPerSec) {
   };
 }
 
-// 单实例退订：令牌桶限速 + 幂等 token + 限流退避重试
+// 单实例退订：令牌桶限速 + 稳定幂等 token + 限流退避重试
 async function refundOneBounded(rid, instanceId, bucket, hooks) {
   await bucket.take(1);
-  var clientToken = 'wb-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+  var clientToken = await stableClientToken(rid, instanceId); // 稳定 token：同一实例永远相同，杜绝反复退
   var maxRetry = 5, attempt = 0;
   var regionName = (REGION_INFO[rid] || rid);
   while (true) {
@@ -3706,7 +3728,7 @@ async function refundOneBounded(rid, instanceId, bucket, hooks) {
         return { ok: false, id: instanceId, kind: 'fail', err: msg };
       }
       attempt++;
-      var backoff = Math.min(8000, 400 * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
+      var backoff = Math.min(3000, 500 * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
       if (hooks && hooks.onThrottle) hooks.onThrottle(regionName, instanceId, attempt, backoff);
       await new Promise(function (r) { setTimeout(r, backoff); });
     }
@@ -3852,7 +3874,7 @@ async function unsubscribeSingleInstance(regionId, instanceId) {
 
   log('🗑️ 退订实例 ' + name + ' (' + instanceId + ')...', 'warn');
   try {
-    await AliyunClient.refundInstance(regionId, instanceId);
+    await AliyunClient.refundInstance(regionId, instanceId, { clientToken: await stableClientToken(regionId, instanceId) });
     log('   ✅ ' + name + ' (' + instanceId + ') 退订成功', 'success');
   } catch (err) {
     var msg = (err && err.message) || String(err);

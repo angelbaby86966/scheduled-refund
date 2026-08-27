@@ -56,6 +56,9 @@ REGION_INFO = {
     "cn-shenzhen": "深圳",
     "cn-chengdu": "成都",
     "cn-guangzhou": "广州",
+    "cn-heyuan": "河源",
+    "cn-wuhan-lr": "武汉",
+    "cn-qingdao": "青岛",
 }
 
 # BSS 退订（锁定）错误模式（与前端 BSS_LOCKED_PATTERNS 一致）
@@ -84,28 +87,37 @@ REFUND_MAX_RETRY = int(os.environ.get("REFUND_MAX_RETRY", "6"))
 # ===================== 已退订状态机（对标参考站 lastTriggered） =====================
 # 参考站「乾亿益」用每实例一条状态记录 + lastTriggered 字段做去重：后端 cron 只触发状态未
 # 更新的实例，绝不重复触发。咱们移植同一思路：把「已成功退订的实例 ID」持久化到仓库里的
-# refund_state.json，跨多次 cron 运行去重。阿里云实例 ID 全局唯一、永不复用，因此集合只
-# 增不减即可（可选保留期由 PRUNE_DAYS 控制，默认 180 天，避免文件无限膨胀）。
+# refund_state.json，跨多次 cron 运行去重。阿里云实例 ID 全局唯一、永不复用，因此裁剪旧记录
+# 绝对安全（不会误退同一台）。格式：{refunded_ids: {instanceId: "2026-08-27"}}，超过
+# PRUNE_DAYS 天的记录自动裁剪，避免文件无限膨胀。
 REFUND_STATE_FILE = os.environ.get("REFUND_STATE_FILE", "refund_state.json")
 PRUNE_DAYS = int(os.environ.get("REFUND_PRUNE_DAYS", "180"))
 
-_refunded_ids = set()          # instanceId 集合（内存）
-_refunded_dirty = False        # 本次运行是否有新增，决定是否写回文件
+_refunded_ids = {}            # instanceId -> 首次退订日期(str) 或 None(旧格式永久保留)
+_refunded_dirty = False       # 本次运行是否有新增，决定是否写回文件
 
 
 def load_refunded_state():
-    """启动时加载已退订集合。文件不存在/损坏则视为空，不阻断主流程。"""
+    """启动时加载已退订集合。兼容旧格式（纯列表）与新格式（dict）。文件不存在/损坏则视为空。"""
     global _refunded_ids
     try:
         with open(REFUND_STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        _refunded_ids = set(data.get("refunded_ids", []))
+        raw = data.get("refunded_ids", [])
+        d = {}
+        if isinstance(raw, list):
+            for iid in raw:
+                d[iid] = None  # 旧格式无日期，永久保留（不裁剪）
+        elif isinstance(raw, dict):
+            for iid, dt in raw.items():
+                d[iid] = dt
+        _refunded_ids = d
         log(f"已加载已退订状态：{len(_refunded_ids)} 个实例（跨 cron 去重）", "INFO")
     except FileNotFoundError:
-        _refunded_ids = set()
+        _refunded_ids = {}
     except Exception as e:
         log(f"加载已退订状态失败（忽略，按空集处理）: {e}", "WARN")
-        _refunded_ids = set()
+        _refunded_ids = {}
 
 
 def is_refunded(instance_id):
@@ -116,18 +128,38 @@ def is_refunded(instance_id):
 def mark_refunded(instance_id):
     """标记实例已退订（成功 或 服务端已报已退订/不存在 都算终态，永不重试）。"""
     global _refunded_dirty
-    if instance_id not in _refunded_ids:
-        _refunded_ids.add(instance_id)
+    today = beijing_date_str()
+    if _refunded_ids.get(instance_id) != today:
+        _refunded_ids[instance_id] = today
         _refunded_dirty = True
 
 
 def save_refunded_state():
-    """运行结束写回状态文件（仅在本次有新增时）。由 Actions 工作流 commit+push 持久化。"""
+    """运行结束写回状态文件（仅在本次有新增时），并按 PRUNE_DAYS 裁剪超期记录。"""
     if not _refunded_dirty:
         return
+    # 裁剪：超过 PRUNE_DAYS 天且无业务意义的旧记录移除（实例 ID 全局唯一不复用，安全）
+    if PRUNE_DAYS > 0:
+        today = datetime.date.today()
+        cutoff = today - datetime.timedelta(days=PRUNE_DAYS)
+        pruned, removed = {}, 0
+        for iid, dt in _refunded_ids.items():
+            if dt is None:
+                pruned[iid] = None  # 旧格式无日期，保留
+                continue
+            try:
+                if datetime.date.fromisoformat(dt) >= cutoff:
+                    pruned[iid] = dt
+                else:
+                    removed += 1
+            except Exception:
+                pruned[iid] = dt
+        _refunded_ids = pruned
+        if removed:
+            log(f"已裁剪 {removed} 条超过 {PRUNE_DAYS} 天的旧退订记录（实例 ID 不复用，安全）", "INFO")
     try:
         with open(REFUND_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"refunded_ids": sorted(_refunded_ids)}, f, ensure_ascii=False)
+            json.dump({"refunded_ids": _refunded_ids}, f, ensure_ascii=False)
         log(f"已退订状态写回本地：{len(_refunded_ids)} 个实例", "INFO")
     except Exception as e:
         log(f"写回已退订状态失败（下次 cron 会重新尝试，幂等兜底）: {e}", "WARN")

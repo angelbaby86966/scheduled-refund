@@ -1,228 +1,130 @@
 {
  "mode": "snapshot",
- "generated_at": "2026-08-25 19:44:10",
+ "generated_at": "2026-08-27 06:13:01",
  "overview": {
   "000001": {
    "name": "上证指数",
-   "price": 3824.99,
-   "action": "SELL",
-   "rsi": 60.1
+   "price": 3616.98,
+   "action": "HOLD",
+   "rsi": 44.9
   },
   "399001": {
    "name": "深证成指",
-   "price": 2949.57,
-   "action": "BUY",
-   "rsi": 40.9
+   "price": 2317.06,
+   "action": "SELL",
+   "rsi": 64.0
   },
   "399006": {
    "name": "创业板指",
-   "price": 3774.49,
+   "price": 3810.53,
    "action": "HOLD",
-   "rsi": 45.2
+   "rsi": 55.7
   }
  },
  "counts": {
   "stocks": 51,
   "funds": 39,
   "open_funds": 10,
-  "buy_signals": 32,
+  "buy_signals": 29,
   "sell_signals": 23
  },
  "buy_stocks": [
   {
-   "symbol": "601888",
-   "name": "中国中免",
+   "symbol": "600031",
+   "name": "三一重工",
    "market": "stock",
-   "price": 26.92,
+   "price": 19.09,
    "action": "BUY",
    "score": 7.6,
-   "rsi": 30.4,
-   "dist_low60_pct": 0.41,
+   "rsi": 24.5,
+   "dist_low60_pct": 2.36,
    "bottom_zone": true,
    "dims": {
     "tech": 10.0,
-    "momentum": 3.3,
-    "sentiment": 6.0,
-    "safety": 4.9,
+    "momentum": 0.0,
+    "sentiment": 5.4,
+    "safety": 4.4,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 0.4%）",
-    "RSI(30.4) 偏弱",
-    "触及/跌破布林下轨"
+    "价格处于60日低位区（距60日低点 2.4%）",
+    "RSI(24.5) 超卖",
+    "MACD 金叉（5日前）"
    ],
    "news": [
     {
-     "title": "中国中免601888.SH)2026年中报净利润为31.06亿元、较去年同期上涨19.49%",
-     "summary": "2026年8月21日，中国中免601888.SH)发布2026年中报。 公司营业总收入为276.55亿元，较去年同报告期营业总收入减少4.96亿元，同比较去年同期下降1.76%。",
-     "date": "2026-08-21 11:39:59",
-     "source": "界面新闻",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.8,
-   "news_count": 10
-  },
-  {
-   "symbol": "600028",
-   "name": "中国石化",
-   "market": "stock",
-   "price": 22.12,
-   "action": "BUY",
-   "score": 6.6,
-   "rsi": 19.9,
-   "dist_low60_pct": 0.77,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 0.6,
-    "sentiment": 4.4,
-    "safety": 4.8,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 0.8%）",
-    "RSI(19.9) 超卖",
-    "近期新闻面偏多（情绪 0.8），利好加持"
-   ],
-   "news": [
-    {
-     "title": "中国石化600028.SH)：2026年中报净利润为256.27亿元、同比较去年同期上涨19.29%",
-     "summary": "2026年8月24日，中国石化600028.SH)发布2026年中报。 公司营业总收入为1.44万亿元，较去年同报告期营业总收入增加275.09亿元，同比较去年同期上涨1.95%。",
-     "date": "2026-08-24 09:12:34",
-     "source": "界面新闻",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.8,
-   "news_count": 10
-  },
-  {
-   "symbol": "600900",
-   "name": "长江电力",
-   "market": "stock",
-   "price": 24.84,
-   "action": "BUY",
-   "score": 5,
-   "rsi": 40.6,
-   "dist_low60_pct": 5.25,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 4.0,
-    "sentiment": 6.0,
-    "safety": 3.7,
-    "risk": 0.7
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.3%）",
-    "触及/跌破布林下轨"
-   ],
-   "news": [
-    {
-     "title": "分红季丨红利质量（931468.CSI）成分股瀚蓝环境（600323.SH）、长江电力（600900.SH）7月16日进行股权登记",
-     "summary": "根据长江电力（600900.SH）在7月10日发布的《长江电力2025年年度权益分派实施公告》，其股权登记日是2026-7-16，除息除权日是2026-7-17。根据公告，长江电力（600900.SH）每股现金红利0.79元（含税）。",
-     "date": "2026-07-16 14:15:41",
-     "source": "每日经济新闻",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.1,
-   "news_count": 10
-  },
-  {
-   "symbol": "601857",
-   "name": "中国石油",
-   "market": "stock",
-   "price": 26.78,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 34.0,
-   "dist_low60_pct": 1.59,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 2.1,
-    "sentiment": 5.5,
-    "safety": 4.6,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.6%）",
-    "RSI(34.0) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "石油石化行业资金流出榜：中国石化等9股净流出资金超3000万元",
-     "summary": "3.13 -12657.20 600759 ST洲际 -2.59 4.05 -6434.16 600256 广汇能源 0.16 1.86 -5018.53 300164 通源石油 3.79 22.88 -4495.38 600938 中国海油 -0.62 1.19 -4470.9",
-     "date": "2026-08-25 17:02:00",
+     "title": "机械设备行业8月26日资金流向日报",
+     "summary": "13199.50 601100 恒立液压 -3.56 0.72 -12058.48 688836 宇树科技-W -1.87 18.56 -10879.51 300607 拓斯达 -2.26 14.82 -9904.57 002132 恒星科技 -6.44 11.00 -7339.",
+     "date": "2026-08-26 16:27:00",
      "source": "证券时报网",
      "sentiment": 0.0
     }
    ],
-   "news_sentiment": 0.2,
-   "news_count": 10
-  },
-  {
-   "symbol": "300760",
-   "name": "迈瑞医疗",
-   "market": "stock",
-   "price": 26.91,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 36.9,
-   "dist_low60_pct": 1.82,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 2.3,
-    "sentiment": 4.5,
-    "safety": 4.5,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.8%）",
-    "RSI(36.9) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "今日84只个股突破半年线",
-     "summary": "3.39 1.40 3.87 3.97 2.47 600449 宁夏建材 7.40 7.44 12.91 13.21 2.32 920118 太湖远大 3.37 2.87 20.10 20.56 2.26 301035 润丰股份 6.80 1.40 54.82 56.05 2.2",
-     "date": "2026-08-24 15:53:00",
-     "source": "证券时报网",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.2,
+   "news_sentiment": 0.3,
    "news_count": 10
   },
   {
    "symbol": "600570",
    "name": "恒生电子",
    "market": "stock",
-   "price": 20.05,
+   "price": 16.79,
    "action": "BUY",
-   "score": 4,
-   "rsi": 33.4,
-   "dist_low60_pct": 1.16,
+   "score": 7.2,
+   "rsi": 34.4,
+   "dist_low60_pct": 1.94,
    "bottom_zone": true,
    "dims": {
-    "tech": 9.8,
-    "momentum": 3.4,
-    "sentiment": 6.1,
-    "safety": 4.7,
+    "tech": 10.0,
+    "momentum": 0.8,
+    "sentiment": 5.0,
+    "safety": 4.5,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 1.2%）",
-    "RSI(33.4) 偏弱"
+    "价格处于60日低位区（距60日低点 1.9%）",
+    "RSI(34.4) 偏弱",
+    "MACD 金叉（4日前）"
    ],
    "news": [
     {
-     "title": "恒生电子拟每10股派现金红利0.5元",
-     "summary": "8月25日，恒生电子（600570）发布公告，公司拟向全体股东每10股派发现金红利0.5元（含税），预计总派发金额为9461万元。 2026年中期，恒生电子实现收入21.44亿元，归母净利润2.61亿元。",
-     "date": "2026-08-25 18:28:00",
-     "source": "财中社",
+     "title": "恒生电子600570.SH)：2026年中报净利润为2.61亿元",
+     "summary": "2026年8月26日，恒生电子600570.SH)发布2026年中报。 公司营业总收入为21.44亿元，较去年同报告期营业总收入减少2.83亿元，同比较去年同期下降11.65%。归母净利润为2.61亿元。",
+     "date": "2026-08-26 09:08:03",
+     "source": "界面新闻",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.6,
+   "news_count": 10
+  },
+  {
+   "symbol": "688981",
+   "name": "中芯国际",
+   "market": "stock",
+   "price": 27.38,
+   "action": "BUY",
+   "score": 6,
+   "rsi": 30.1,
+   "dist_low60_pct": 1.44,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 0.6,
+    "sentiment": 6.3,
+    "safety": 4.6,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(30.1) 偏弱",
+    "MACD 金叉（3日前）"
+   ],
+   "news": [
+    {
+     "title": "17只科创板个股主力资金净流入超亿元",
+     "summary": "芯原股份 58752.27 12.96 9.73 4.94 688008 澜起科技 51258.45 8.58 3.38 2.64 688012 中微公司 50654.11 8.41 3.97 1.76 688630 芯碁微装 34065.80 16.07 3.76 3.82 6",
+     "date": "2026-08-26 16:47:00",
+     "source": "证券时报网",
      "sentiment": 0.0
     }
    ],
@@ -230,95 +132,228 @@
    "news_count": 10
   },
   {
-   "symbol": "002415",
-   "name": "海康威视",
+   "symbol": "300059",
+   "name": "东方财富",
    "market": "stock",
-   "price": 22.48,
+   "price": 45.82,
    "action": "BUY",
-   "score": 3.4,
-   "rsi": 30.0,
-   "dist_low60_pct": 1.54,
+   "score": 5.2,
+   "rsi": 34.3,
+   "dist_low60_pct": 1.51,
    "bottom_zone": true,
    "dims": {
-    "tech": 7.4,
-    "momentum": 2.6,
-    "sentiment": 6.0,
+    "tech": 9.8,
+    "momentum": 3.0,
+    "sentiment": 6.3,
     "safety": 4.6,
     "risk": 0.0
    },
    "reasons": [
     "价格处于60日低位区（距60日低点 1.5%）",
-    "RSI(30.0) 偏弱",
-    "MACD 死叉（4日前）"
+    "RSI(34.3) 偏弱",
+    "近期新闻面偏多（情绪 0.6），利好加持"
    ],
    "news": [
     {
-     "title": "百家机构调研股曝光！002415，业绩超预期",
-     "summary": "海康威视（002415）有203家机构调研，包括43家基金公司、31家证券公司、75家私募等。公司上半年实现营业总收入468.23亿元，同比增长11.97%；归母净利润 78.96亿元，同比增长39.57%。",
-     "date": "2026-08-02 08:11:00",
-     "source": "数据宝",
+     "title": "8月26日3722只股发生盘后交易，飞龙股份、亨通光电、中际旭创等盘后交易额居前",
+     "summary": "中国巨石 39.50 -0.73 17.55 693.23 300394 天孚通信 253.58 -1.37 2.64 669.45 600030 中信证券 27.77 2.28 22.59 627.32 600396 华电辽能 14.97 5.87 41.73 624.70 3",
+     "date": "2026-08-26 16:28:00",
+     "source": "证券时报网",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.6,
+   "news_count": 10
+  },
+  {
+   "symbol": "601012",
+   "name": "隆基绿能",
+   "market": "stock",
+   "price": 32.31,
+   "action": "BUY",
+   "score": 5,
+   "rsi": 41.3,
+   "dist_low60_pct": 4.13,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 3.1,
+    "sentiment": 5.9,
+    "safety": 4.0,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 4.1%）",
+    "触及/跌破布林下轨"
+   ],
+   "news": [
+    {
+     "title": "大全能源回应多晶硅“集体开会”及上调报价传闻：不了解，报价情况公司还在考虑",
+     "summary": "截至今日收盘，通威股份（600438）收涨5.22%，大全能源（688303）收涨1.97%，双良节能（600481）收涨2.73%，隆基绿能（601012）收涨2.50%。",
+     "date": "2026-08-12 20:32:56",
+     "source": "蓝鲸财经",
      "sentiment": 1.0
     }
    ],
-   "news_sentiment": 0.7,
+   "news_sentiment": 0.1,
    "news_count": 10
   },
   {
    "symbol": "601668",
    "name": "中国建筑",
    "market": "stock",
-   "price": 15.71,
+   "price": 29.05,
    "action": "BUY",
    "score": 4.2,
-   "rsi": 45.7,
-   "dist_low60_pct": 5.93,
+   "rsi": 46.6,
+   "dist_low60_pct": 5.75,
    "bottom_zone": true,
    "dims": {
     "tech": 8.6,
-    "momentum": 5.5,
-    "sentiment": 4.9,
-    "safety": 3.5,
+    "momentum": 5.4,
+    "sentiment": 5.0,
+    "safety": 3.6,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.9%）",
+    "价格处于60日低位区（距60日低点 5.8%）",
     "近期新闻面偏多（情绪 0.6），利好加持"
    ],
    "news": [
     {
-     "title": "近一个月沪市主板新增回购增持计划91家，金额上限超260亿",
-     "summary": "除工业富联外，华友钴业（603799）、三一重工（600031）在7月21日同日披露回购计划，对应回购金额分别为6亿元至10亿元，4亿元至8亿元；三峡能源（600905）、中国建筑（601668）7月下旬披露股东增持计划，对应股东增持金额为15亿元至30亿元、5亿元至10亿元。",
-     "date": "2026-08-19 22:03:00",
-     "source": "澎湃新闻",
+     "title": "中国建筑公布2026年1—7月经营情况，境外业务保持较快增速",
+     "summary": "近日，中国建筑（601668.SH）公布2026年1—7月经营情况简报。2026年1—7月，中国建筑实现新签合同总额26604亿元，整体订单规模保持高位，展现出较强的经营韧性。 建筑业务方面，新签合同额24684亿元，同比下降0.7%。",
+     "date": "2026-08-26 12:20:00",
+     "source": "证券时报网",
      "sentiment": 1.0
     }
    ],
    "news_sentiment": 0.6,
    "news_count": 10
+  },
+  {
+   "symbol": "601088",
+   "name": "中国神华",
+   "market": "stock",
+   "price": 20.92,
+   "action": "BUY",
+   "score": 4,
+   "rsi": 30.5,
+   "dist_low60_pct": 3.26,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 9.8,
+    "momentum": 0.0,
+    "sentiment": 4.5,
+    "safety": 4.2,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 3.3%）",
+    "RSI(30.5) 偏弱"
+   ],
+   "news": [
+    {
+     "title": "8.57亿元资金今日流入煤炭股",
+     "summary": "煤炭行业资金流向排名 代码 简称 今日涨跌幅（%） 今日换手率（%） 主力资金流量（万元） 000723 美锦能源 9.89 4.15 31210.33 600403 大有能源 9.94 6.20 16710.44 601088 中国神华 1.03 0.15 10916.68 6",
+     "date": "2026-08-24 16:31:00",
+     "source": "证券时报网",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.1,
+   "news_count": 10
+  },
+  {
+   "symbol": "000858",
+   "name": "五粮液",
+   "market": "stock",
+   "price": 27.61,
+   "action": "BUY",
+   "score": 4.0,
+   "rsi": 49.3,
+   "dist_low60_pct": 5.66,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 8.6,
+    "momentum": 5.9,
+    "sentiment": 5.6,
+    "safety": 3.6,
+    "risk": 0.6
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 5.7%）",
+    "近期新闻面偏多（情绪 0.5），利好加持"
+   ],
+   "news": [
+    {
+     "title": "五粮液000858.SZ)：控股股东五粮液集团增持241万股，金额约1.99亿元，增持计划仍在进行",
+     "summary": "2026年8月6日，宜宾五粮液股份有限公司（000858.SZ）发布公告称，公司控股股东四川省宜宾五粮液集团有限公司于近期通过集中竞价方式增持公司股份2,411,300股，占公司总股本0.06%，增持金额199,434,240.41元。本次增持计划尚未实施完毕。",
+     "date": "2026-08-06 17:55:14",
+     "source": "界面新闻",
+     "sentiment": 1.0
+    }
+   ],
+   "news_sentiment": 0.5,
+   "news_count": 10
   }
  ],
  "buy_funds": [
   {
-   "symbol": "159901",
-   "name": "深证100ETF",
+   "symbol": "510880",
+   "name": "红利ETF",
    "market": "fund",
-   "price": 1.8,
+   "price": 1.41,
    "action": "BUY",
-   "score": 7,
-   "rsi": 25.4,
-   "dist_low60_pct": 2.27,
+   "score": 6,
+   "rsi": 36.9,
+   "dist_low60_pct": 1.44,
    "bottom_zone": true,
    "dims": {
     "tech": 10.0,
-    "momentum": 3.3,
+    "momentum": 4.8,
     "sentiment": 5.6,
-    "safety": 4.4,
-    "risk": 0.1
+    "safety": 4.6,
+    "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 2.3%）",
-    "RSI(25.4) 超卖",
-    "KDJ 超卖区金叉 (K=18.9)"
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(36.9) 偏弱",
+    "触及/跌破布林下轨"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "515210",
+   "name": "钢铁ETF",
+   "market": "fund",
+   "price": 2.12,
+   "action": "BUY",
+   "score": 6,
+   "rsi": 39.3,
+   "dist_low60_pct": 5.47,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 3.9,
+    "sentiment": 6.8,
+    "safety": 3.6,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 5.5%）",
+    "RSI(39.3) 偏弱",
+    "触及/跌破布林下轨"
    ],
    "news": [
     {
@@ -336,90 +371,122 @@
    "symbol": "512170",
    "name": "医疗ETF",
    "market": "fund",
-   "price": 1.96,
-   "action": "BUY",
-   "score": 6,
-   "rsi": 38.0,
-   "dist_low60_pct": 5.38,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 0.8,
-    "sentiment": 4.8,
-    "safety": 3.7,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.4%）",
-    "RSI(38.0) 偏弱",
-    "MACD 金叉（3日前）"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "511360",
-   "name": "短融ETF",
-   "market": "fund",
-   "price": 1.6,
-   "action": "BUY",
-   "score": 6,
-   "rsi": 37.1,
-   "dist_low60_pct": 5.96,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 2.9,
-    "sentiment": 5.0,
-    "safety": 3.5,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 6.0%）",
-    "RSI(37.1) 偏弱",
-    "触及/跌破布林下轨"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "513500",
-   "name": "标普500ETF",
-   "market": "fund",
-   "price": 1.71,
+   "price": 1.8,
    "action": "BUY",
    "score": 5,
-   "rsi": 29.7,
-   "dist_low60_pct": 0.59,
+   "rsi": 25.1,
+   "dist_low60_pct": 1.12,
    "bottom_zone": true,
    "dims": {
     "tech": 10.0,
-    "momentum": 0.4,
-    "sentiment": 5.5,
-    "safety": 4.9,
+    "momentum": 0.7,
+    "sentiment": 3.2,
+    "safety": 4.7,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 0.6%）",
-    "RSI(29.7) 超卖"
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.1) 超卖"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "510330",
+   "name": "沪深300ETF华夏",
+   "market": "fund",
+   "price": 1.81,
+   "action": "BUY",
+   "score": 5,
+   "rsi": 25.6,
+   "dist_low60_pct": 1.12,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 2.0,
+    "sentiment": 5.0,
+    "safety": 4.7,
+    "risk": 0.8
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.6) 超卖"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "159919",
+   "name": "沪深300ETF嘉实",
+   "market": "fund",
+   "price": 1.49,
+   "action": "BUY",
+   "score": 4,
+   "rsi": 38.8,
+   "dist_low60_pct": 0.68,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 9.8,
+    "momentum": 0.7,
+    "sentiment": 5.3,
+    "safety": 4.8,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 0.7%）",
+    "RSI(38.8) 偏弱"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "515880",
+   "name": "通信ETF",
+   "market": "fund",
+   "price": 1.64,
+   "action": "BUY",
+   "score": 4,
+   "rsi": 36.4,
+   "dist_low60_pct": 1.86,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 9.8,
+    "momentum": 3.3,
+    "sentiment": 5.9,
+    "safety": 4.5,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.9%）",
+    "RSI(36.4) 偏弱",
+    "触及/跌破布林下轨"
    ],
    "news": [
     {
@@ -437,22 +504,22 @@
    "symbol": "516160",
    "name": "新能源ETF",
    "market": "fund",
-   "price": 1.96,
+   "price": 1.47,
    "action": "BUY",
-   "score": 5,
-   "rsi": 18.7,
-   "dist_low60_pct": 1.03,
+   "score": 4,
+   "rsi": 30.4,
+   "dist_low60_pct": 2.08,
    "bottom_zone": true,
    "dims": {
-    "tech": 10.0,
-    "momentum": 0.0,
-    "sentiment": 5.4,
-    "safety": 4.7,
+    "tech": 9.8,
+    "momentum": 1.7,
+    "sentiment": 5.3,
+    "safety": 4.5,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 1.0%）",
-    "RSI(18.7) 超卖"
+    "价格处于60日低位区（距60日低点 2.1%）",
+    "RSI(30.4) 偏弱"
    ],
    "news": [
     {
@@ -467,91 +534,25 @@
    "news_count": 6
   },
   {
-   "symbol": "513180",
-   "name": "恒生科技ETF",
-   "market": "fund",
-   "price": 1.58,
-   "action": "BUY",
-   "score": 5,
-   "rsi": 41.5,
-   "dist_low60_pct": 2.6,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 3.9,
-    "sentiment": 4.0,
-    "safety": 4.4,
-    "risk": 0.3
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 2.6%）",
-    "MACD 金叉（2日前）"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "512690",
-   "name": "酒ETF",
-   "market": "fund",
-   "price": 1.57,
-   "action": "BUY",
-   "score": 5,
-   "rsi": 46.4,
-   "dist_low60_pct": 5.37,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 2.9,
-    "sentiment": 5.8,
-    "safety": 3.7,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.4%）",
-    "MACD 金叉（2日前）"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "159934",
+   "symbol": "518880",
    "name": "黄金ETF",
    "market": "fund",
-   "price": 1.38,
+   "price": 1.67,
    "action": "BUY",
-   "score": 5,
-   "rsi": 41.7,
-   "dist_low60_pct": 5.34,
+   "score": 4,
+   "rsi": 35.2,
+   "dist_low60_pct": 2.45,
    "bottom_zone": true,
    "dims": {
-    "tech": 10.0,
-    "momentum": 1.9,
-    "sentiment": 5.8,
-    "safety": 3.7,
+    "tech": 9.8,
+    "momentum": 1.1,
+    "sentiment": 5.3,
+    "safety": 4.4,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.3%）",
-    "MACD 金叉（3日前）"
+    "价格处于60日低位区（距60日低点 2.5%）",
+    "RSI(35.2) 偏弱"
    ],
    "news": [
     {
@@ -568,92 +569,25 @@
  ],
  "buy_open_funds": [
   {
-   "symbol": "163406",
-   "name": "兴全合润混合",
-   "market": "open_fund",
-   "price": 2.32,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 39.1,
-   "dist_low60_pct": 3.82,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 2.7,
-    "sentiment": 0.0,
-    "safety": 4.0,
-    "risk": 1.7
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 3.8%）",
-    "RSI(39.1) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "001714",
-   "name": "工银文体产业",
-   "market": "open_fund",
-   "price": 2.78,
-   "action": "BUY",
-   "score": 5,
-   "rsi": 42.9,
-   "dist_low60_pct": 3.7,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 4.9,
-    "sentiment": 0.0,
-    "safety": 4.1,
-    "risk": 7.3
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 3.7%）",
-    "触及/跌破布林下轨"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
    "symbol": "011609",
    "name": "国泰中证动漫游戏ETF联接",
    "market": "open_fund",
-   "price": 1.23,
+   "price": 1.26,
    "action": "HOLD",
-   "score": 2,
-   "rsi": 39.0,
-   "dist_low60_pct": 3.1,
+   "score": 1,
+   "rsi": 42.2,
+   "dist_low60_pct": 4.91,
    "bottom_zone": true,
    "dims": {
-    "tech": 7.4,
-    "momentum": 1.8,
+    "tech": 6.2,
+    "momentum": 4.2,
     "sentiment": 0.0,
-    "safety": 4.2,
-    "risk": 0.0
+    "safety": 3.8,
+    "risk": 0.6
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 3.1%）",
-    "RSI(39.0) 偏弱",
-    "MACD 死叉（1日前）"
+    "价格处于60日低位区（距60日低点 4.9%）",
+    "MACD 死叉（3日前）"
    ],
    "news": [
     {
@@ -668,24 +602,25 @@
    "news_count": 6
   },
   {
-   "symbol": "110011",
-   "name": "易方达中小盘混合",
+   "symbol": "163406",
+   "name": "兴全合润混合",
    "market": "open_fund",
-   "price": 4.2,
+   "price": 2.34,
    "action": "HOLD",
-   "score": 2,
-   "rsi": 51.3,
-   "dist_low60_pct": 7.35,
-   "bottom_zone": false,
+   "score": 1,
+   "rsi": 41.0,
+   "dist_low60_pct": 4.59,
+   "bottom_zone": true,
    "dims": {
-    "tech": 7.4,
-    "momentum": 5.9,
+    "tech": 6.2,
+    "momentum": 4.4,
     "sentiment": 0.0,
-    "safety": 3.2,
-    "risk": 6.9
+    "safety": 3.9,
+    "risk": 2.6
    },
    "reasons": [
-    "MACD 金叉（5日前）"
+    "价格处于60日低位区（距60日低点 4.6%）",
+    "MACD 死叉（2日前）"
    ],
    "news": [
     {
@@ -703,22 +638,22 @@
    "symbol": "005827",
    "name": "易方达蓝筹精选混合",
    "market": "open_fund",
-   "price": 1.51,
+   "price": 1.52,
    "action": "HOLD",
    "score": 1,
-   "rsi": 44.0,
-   "dist_low60_pct": 1.76,
+   "rsi": 44.4,
+   "dist_low60_pct": 1.81,
    "bottom_zone": true,
    "dims": {
     "tech": 6.2,
     "momentum": 5.2,
     "sentiment": 0.0,
-    "safety": 4.6,
-    "risk": 6.9
+    "safety": 4.5,
+    "risk": 7.3
    },
    "reasons": [
     "价格处于60日低位区（距60日低点 1.8%）",
-    "MACD 死叉（1日前）"
+    "MACD 死叉（3日前）"
    ],
    "news": [
     {
@@ -740,14 +675,14 @@
    "action": "HOLD",
    "score": 0,
    "rsi": 45.1,
-   "dist_low60_pct": 6.85,
+   "dist_low60_pct": 6.54,
    "bottom_zone": false,
    "dims": {
     "tech": 5.0,
     "momentum": 5.4,
     "sentiment": 0.0,
-    "safety": 3.3,
-    "risk": 4.4
+    "safety": 3.4,
+    "risk": 4.6
    },
    "reasons": [],
    "news": [
@@ -766,20 +701,85 @@
    "symbol": "003834",
    "name": "华夏能源革新",
    "market": "open_fund",
-   "price": 2.93,
+   "price": 2.92,
    "action": "HOLD",
    "score": 0,
-   "rsi": 44.5,
-   "dist_low60_pct": 8.08,
+   "rsi": 44.3,
+   "dist_low60_pct": 7.67,
    "bottom_zone": false,
    "dims": {
     "tech": 5.0,
-    "momentum": 5.0,
+    "momentum": 5.5,
     "sentiment": 0.0,
-    "safety": 3.0,
-    "risk": 3.7
+    "safety": 3.1,
+    "risk": 4.0
    },
    "reasons": [],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "001714",
+   "name": "工银文体产业",
+   "market": "open_fund",
+   "price": 2.81,
+   "action": "HOLD",
+   "score": 0,
+   "rsi": 49.7,
+   "dist_low60_pct": 4.89,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 5.0,
+    "momentum": 4.3,
+    "sentiment": 0.0,
+    "safety": 3.8,
+    "risk": 7.4
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 4.9%）",
+    "价格处于60日高位区（距60日高点 -4.2%）"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "110011",
+   "name": "易方达中小盘混合",
+   "market": "open_fund",
+   "price": 4.21,
+   "action": "HOLD",
+   "score": -2,
+   "rsi": 52.8,
+   "dist_low60_pct": 7.69,
+   "bottom_zone": false,
+   "dims": {
+    "tech": 2.6,
+    "momentum": 5.3,
+    "sentiment": 0.0,
+    "safety": 3.1,
+    "risk": 7.2
+   },
+   "reasons": [
+    "MACD 死叉（2日前）"
+   ],
    "news": [
     {
      "title": "",
@@ -799,15 +799,15 @@
    "price": 0.55,
    "action": "HOLD",
    "score": 0,
-   "rsi": 46.3,
-   "dist_low60_pct": 11.01,
+   "rsi": 46.0,
+   "dist_low60_pct": 10.89,
    "bottom_zone": false,
    "dims": {
     "tech": 5.0,
-    "momentum": 5.4,
+    "momentum": 4.3,
     "sentiment": 0.0,
-    "safety": 2.2,
-    "risk": 4.5
+    "safety": 2.3,
+    "risk": 5.3
    },
    "reasons": [],
    "news": [
@@ -826,21 +826,21 @@
    "symbol": "003095",
    "name": "中欧医疗健康混合",
    "market": "open_fund",
-   "price": 1.94,
+   "price": 1.99,
    "action": "HOLD",
    "score": -2,
-   "rsi": 44.3,
-   "dist_low60_pct": 30.01,
+   "rsi": 47.7,
+   "dist_low60_pct": 32.79,
    "bottom_zone": false,
    "dims": {
     "tech": 2.6,
-    "momentum": 4.6,
+    "momentum": 5.8,
     "sentiment": 0.0,
     "safety": 0.0,
-    "risk": 0.0
+    "risk": 0.6
    },
    "reasons": [
-    "MACD 死叉（2日前）"
+    "MACD 死叉（4日前）"
    ],
    "news": [
     {
@@ -858,22 +858,22 @@
    "symbol": "260108",
    "name": "景顺长城新兴成长混合",
    "market": "open_fund",
-   "price": 1.55,
+   "price": 1.56,
    "action": "HOLD",
    "score": -1,
-   "rsi": 51.5,
-   "dist_low60_pct": 9.47,
+   "rsi": 54.0,
+   "dist_low60_pct": 9.96,
    "bottom_zone": false,
    "dims": {
     "tech": 3.8,
-    "momentum": 5.5,
+    "momentum": 5.0,
     "sentiment": 0.0,
-    "safety": 2.6,
-    "risk": 7.4
+    "safety": 2.5,
+    "risk": 7.7
    },
    "reasons": [
     "触及/跌破布林下轨",
-    "价格处于60日高位区（距60日高点 -2.4%）"
+    "价格处于60日高位区（距60日高点 -2.0%）"
    ],
    "news": [
     {
@@ -890,59 +890,25 @@
  ],
  "bottom_zone": [
   {
-   "symbol": "601888",
-   "name": "中国中免",
-   "market": "stock",
-   "price": 26.92,
-   "action": "BUY",
-   "score": 7.6,
-   "rsi": 30.4,
-   "dist_low60_pct": 0.41,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 3.3,
-    "sentiment": 6.0,
-    "safety": 4.9,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 0.4%）",
-    "RSI(30.4) 偏弱",
-    "触及/跌破布林下轨"
-   ],
-   "news": [
-    {
-     "title": "中国中免601888.SH)2026年中报净利润为31.06亿元、较去年同期上涨19.49%",
-     "summary": "2026年8月21日，中国中免601888.SH)发布2026年中报。 公司营业总收入为276.55亿元，较去年同报告期营业总收入减少4.96亿元，同比较去年同期下降1.76%。",
-     "date": "2026-08-21 11:39:59",
-     "source": "界面新闻",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.8,
-   "news_count": 10
-  },
-  {
-   "symbol": "513500",
-   "name": "标普500ETF",
+   "symbol": "159919",
+   "name": "沪深300ETF嘉实",
    "market": "fund",
-   "price": 1.71,
+   "price": 1.49,
    "action": "BUY",
-   "score": 5,
-   "rsi": 29.7,
-   "dist_low60_pct": 0.59,
+   "score": 4,
+   "rsi": 38.8,
+   "dist_low60_pct": 0.68,
    "bottom_zone": true,
    "dims": {
-    "tech": 10.0,
-    "momentum": 0.4,
-    "sentiment": 5.5,
-    "safety": 4.9,
+    "tech": 9.8,
+    "momentum": 0.7,
+    "sentiment": 5.3,
+    "safety": 4.8,
     "risk": 0.0
    },
    "reasons": [
-    "价格处于60日低位区（距60日低点 0.6%）",
-    "RSI(29.7) 超卖"
+    "价格处于60日低位区（距60日低点 0.7%）",
+    "RSI(38.8) 偏弱"
    ],
    "news": [
     {
@@ -957,224 +923,25 @@
    "news_count": 6
   },
   {
-   "symbol": "600028",
-   "name": "中国石化",
-   "market": "stock",
-   "price": 22.12,
-   "action": "BUY",
-   "score": 6.6,
-   "rsi": 19.9,
-   "dist_low60_pct": 0.77,
+   "symbol": "512800",
+   "name": "银行ETF",
+   "market": "fund",
+   "price": 1.26,
+   "action": "HOLD",
+   "score": 2,
+   "rsi": 36.4,
+   "dist_low60_pct": 0.8,
    "bottom_zone": true,
    "dims": {
-    "tech": 10.0,
-    "momentum": 0.6,
-    "sentiment": 4.4,
+    "tech": 7.4,
+    "momentum": 3.4,
+    "sentiment": 3.9,
     "safety": 4.8,
     "risk": 0.0
    },
    "reasons": [
     "价格处于60日低位区（距60日低点 0.8%）",
-    "RSI(19.9) 超卖",
-    "近期新闻面偏多（情绪 0.8），利好加持"
-   ],
-   "news": [
-    {
-     "title": "中国石化600028.SH)：2026年中报净利润为256.27亿元、同比较去年同期上涨19.29%",
-     "summary": "2026年8月24日，中国石化600028.SH)发布2026年中报。 公司营业总收入为1.44万亿元，较去年同报告期营业总收入增加275.09亿元，同比较去年同期上涨1.95%。",
-     "date": "2026-08-24 09:12:34",
-     "source": "界面新闻",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.8,
-   "news_count": 10
-  },
-  {
-   "symbol": "516160",
-   "name": "新能源ETF",
-   "market": "fund",
-   "price": 1.96,
-   "action": "BUY",
-   "score": 5,
-   "rsi": 18.7,
-   "dist_low60_pct": 1.03,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 10.0,
-    "momentum": 0.0,
-    "sentiment": 5.4,
-    "safety": 4.7,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.0%）",
-    "RSI(18.7) 超卖"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "600570",
-   "name": "恒生电子",
-   "market": "stock",
-   "price": 20.05,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 33.4,
-   "dist_low60_pct": 1.16,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 3.4,
-    "sentiment": 6.1,
-    "safety": 4.7,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.2%）",
-    "RSI(33.4) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "恒生电子拟每10股派现金红利0.5元",
-     "summary": "8月25日，恒生电子（600570）发布公告，公司拟向全体股东每10股派发现金红利0.5元（含税），预计总派发金额为9461万元。 2026年中期，恒生电子实现收入21.44亿元，归母净利润2.61亿元。",
-     "date": "2026-08-25 18:28:00",
-     "source": "财中社",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 10
-  },
-  {
-   "symbol": "588080",
-   "name": "科创50ETF易方达",
-   "market": "fund",
-   "price": 1.66,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 33.4,
-   "dist_low60_pct": 1.22,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 1.2,
-    "sentiment": 6.3,
-    "safety": 4.7,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.2%）",
-    "RSI(33.4) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "",
-     "summary": "",
-     "date": "00:30",
-     "source": "",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.0,
-   "news_count": 6
-  },
-  {
-   "symbol": "002415",
-   "name": "海康威视",
-   "market": "stock",
-   "price": 22.48,
-   "action": "BUY",
-   "score": 3.4,
-   "rsi": 30.0,
-   "dist_low60_pct": 1.54,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 7.4,
-    "momentum": 2.6,
-    "sentiment": 6.0,
-    "safety": 4.6,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.5%）",
-    "RSI(30.0) 偏弱",
-    "MACD 死叉（4日前）"
-   ],
-   "news": [
-    {
-     "title": "百家机构调研股曝光！002415，业绩超预期",
-     "summary": "海康威视（002415）有203家机构调研，包括43家基金公司、31家证券公司、75家私募等。公司上半年实现营业总收入468.23亿元，同比增长11.97%；归母净利润 78.96亿元，同比增长39.57%。",
-     "date": "2026-08-02 08:11:00",
-     "source": "数据宝",
-     "sentiment": 1.0
-    }
-   ],
-   "news_sentiment": 0.7,
-   "news_count": 10
-  },
-  {
-   "symbol": "601857",
-   "name": "中国石油",
-   "market": "stock",
-   "price": 26.78,
-   "action": "BUY",
-   "score": 4,
-   "rsi": 34.0,
-   "dist_low60_pct": 1.59,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 9.8,
-    "momentum": 2.1,
-    "sentiment": 5.5,
-    "safety": 4.6,
-    "risk": 0.0
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.6%）",
-    "RSI(34.0) 偏弱"
-   ],
-   "news": [
-    {
-     "title": "石油石化行业资金流出榜：中国石化等9股净流出资金超3000万元",
-     "summary": "3.13 -12657.20 600759 ST洲际 -2.59 4.05 -6434.16 600256 广汇能源 0.16 1.86 -5018.53 300164 通源石油 3.79 22.88 -4495.38 600938 中国海油 -0.62 1.19 -4470.9",
-     "date": "2026-08-25 17:02:00",
-     "source": "证券时报网",
-     "sentiment": 0.0
-    }
-   ],
-   "news_sentiment": 0.2,
-   "news_count": 10
-  },
-  {
-   "symbol": "005827",
-   "name": "易方达蓝筹精选混合",
-   "market": "open_fund",
-   "price": 1.51,
-   "action": "HOLD",
-   "score": 1,
-   "rsi": 44.0,
-   "dist_low60_pct": 1.76,
-   "bottom_zone": true,
-   "dims": {
-    "tech": 6.2,
-    "momentum": 5.2,
-    "sentiment": 0.0,
-    "safety": 4.6,
-    "risk": 6.9
-   },
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.8%）",
+    "RSI(36.4) 偏弱",
     "MACD 死叉（1日前）"
    ],
    "news": [
@@ -1190,25 +957,259 @@
    "news_count": 6
   },
   {
-   "symbol": "588000",
-   "name": "科创50ETF",
-   "market": "fund",
-   "price": 1.7,
+   "symbol": "002714",
+   "name": "牧原股份",
+   "market": "stock",
+   "price": 25.0,
    "action": "BUY",
-   "score": 4,
-   "rsi": 36.4,
-   "dist_low60_pct": 1.8,
+   "score": 3,
+   "rsi": 26.6,
+   "dist_low60_pct": 1.09,
    "bottom_zone": true,
    "dims": {
-    "tech": 9.8,
-    "momentum": 1.4,
-    "sentiment": 5.1,
+    "tech": 8.6,
+    "momentum": 1.3,
+    "sentiment": 3.8,
+    "safety": 4.7,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(26.6) 超卖",
+    "MACD 死叉（5日前）"
+   ],
+   "news": [
+    {
+     "title": "机构风向标 | 牧原股份0027142026年二季度已披露持股减少机构超20家",
+     "summary": "2026年8月21日，牧原股份002714.SZ)发布2026年半年度报告。截至2026年8月20日，共有178个机构投资者披露持有牧原股份A股股份，合计持股量达14.07亿股，占牧原股份总股本的24.38%。",
+     "date": "2026-08-21 09:10:47",
+     "source": "界面新闻",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": -0.07,
+   "news_count": 10
+  },
+  {
+   "symbol": "510330",
+   "name": "沪深300ETF华夏",
+   "market": "fund",
+   "price": 1.81,
+   "action": "BUY",
+   "score": 5,
+   "rsi": 25.6,
+   "dist_low60_pct": 1.12,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 2.0,
+    "sentiment": 5.0,
+    "safety": 4.7,
+    "risk": 0.8
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.6) 超卖"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "512170",
+   "name": "医疗ETF",
+   "market": "fund",
+   "price": 1.8,
+   "action": "BUY",
+   "score": 5,
+   "rsi": 25.1,
+   "dist_low60_pct": 1.12,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 0.7,
+    "sentiment": 3.2,
+    "safety": 4.7,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.1) 超卖"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "688981",
+   "name": "中芯国际",
+   "market": "stock",
+   "price": 27.38,
+   "action": "BUY",
+   "score": 6,
+   "rsi": 30.1,
+   "dist_low60_pct": 1.44,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 0.6,
+    "sentiment": 6.3,
     "safety": 4.6,
     "risk": 0.0
    },
    "reasons": [
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(30.1) 偏弱",
+    "MACD 金叉（3日前）"
+   ],
+   "news": [
+    {
+     "title": "17只科创板个股主力资金净流入超亿元",
+     "summary": "芯原股份 58752.27 12.96 9.73 4.94 688008 澜起科技 51258.45 8.58 3.38 2.64 688012 中微公司 50654.11 8.41 3.97 1.76 688630 芯碁微装 34065.80 16.07 3.76 3.82 6",
+     "date": "2026-08-26 16:47:00",
+     "source": "证券时报网",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 10
+  },
+  {
+   "symbol": "510880",
+   "name": "红利ETF",
+   "market": "fund",
+   "price": 1.41,
+   "action": "BUY",
+   "score": 6,
+   "rsi": 36.9,
+   "dist_low60_pct": 1.44,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 10.0,
+    "momentum": 4.8,
+    "sentiment": 5.6,
+    "safety": 4.6,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(36.9) 偏弱",
+    "触及/跌破布林下轨"
+   ],
+   "news": [
+    {
+     "title": "",
+     "summary": "",
+     "date": "00:30",
+     "source": "",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 6
+  },
+  {
+   "symbol": "300059",
+   "name": "东方财富",
+   "market": "stock",
+   "price": 45.82,
+   "action": "BUY",
+   "score": 5.2,
+   "rsi": 34.3,
+   "dist_low60_pct": 1.51,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 9.8,
+    "momentum": 3.0,
+    "sentiment": 6.3,
+    "safety": 4.6,
+    "risk": 0.0
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.5%）",
+    "RSI(34.3) 偏弱",
+    "近期新闻面偏多（情绪 0.6），利好加持"
+   ],
+   "news": [
+    {
+     "title": "8月26日3722只股发生盘后交易，飞龙股份、亨通光电、中际旭创等盘后交易额居前",
+     "summary": "中国巨石 39.50 -0.73 17.55 693.23 300394 天孚通信 253.58 -1.37 2.64 669.45 600030 中信证券 27.77 2.28 22.59 627.32 600396 华电辽能 14.97 5.87 41.73 624.70 3",
+     "date": "2026-08-26 16:28:00",
+     "source": "证券时报网",
+     "sentiment": 0.0
+    }
+   ],
+   "news_sentiment": 0.6,
+   "news_count": 10
+  },
+  {
+   "symbol": "300750",
+   "name": "宁德时代",
+   "market": "stock",
+   "price": 19.04,
+   "action": "BUY",
+   "score": 3,
+   "rsi": 42.8,
+   "dist_low60_pct": 1.76,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 8.6,
+    "momentum": 5.0,
+    "sentiment": 5.8,
+    "safety": 4.6,
+    "risk": 0.4
+   },
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.8%）"
+   ],
+   "news": [
+    {
+     "title": "300750，拿下海外大单！脑机接口迎新进展，12只概念股市盈率不到40倍",
+     "summary": "宁德时代再获3GWh海外大单 8月14日晚间，宁德时代（300750）官方公众号发布消息，近日，由Quinbrook开发的澳大利亚Supernode储能项目二期正式投入商业运营，三期4.69亿澳元融资同步完成交割。",
+     "date": "2026-08-15 13:01:00",
+     "source": "数据宝",
+     "sentiment": 1.0
+    }
+   ],
+   "news_sentiment": 0.0,
+   "news_count": 10
+  },
+  {
+   "symbol": "005827",
+   "name": "易方达蓝筹精选混合",
+   "market": "open_fund",
+   "price": 1.52,
+   "action": "HOLD",
+   "score": 1,
+   "rsi": 44.4,
+   "dist_low60_pct": 1.81,
+   "bottom_zone": true,
+   "dims": {
+    "tech": 6.2,
+    "momentum": 5.2,
+    "sentiment": 0.0,
+    "safety": 4.5,
+    "risk": 7.3
+   },
+   "reasons": [
     "价格处于60日低位区（距60日低点 1.8%）",
-    "RSI(36.4) 偏弱"
+    "MACD 死叉（3日前）"
    ],
    "news": [
     {
@@ -1225,344 +1226,214 @@
  ],
  "alerts": [
   {
-   "symbol": "002714",
-   "name": "牧原股份",
-   "market": "stock",
-   "action": "SELL",
-   "score": -8,
-   "price": 47.0,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -0.5%）",
-    "RSI(70.6) 超买",
-    "MACD 死叉（5日前）",
-    "触及布林上轨"
-   ],
-   "target": 35.81,
-   "dist_low60_pct": 33.26
-  },
-  {
-   "symbol": "601888",
-   "name": "中国中免",
+   "symbol": "600031",
+   "name": "三一重工",
    "market": "stock",
    "action": "BUY",
    "score": 7.6,
-   "price": 26.92,
+   "price": 19.09,
    "reasons": [
-    "价格处于60日低位区（距60日低点 0.4%）",
-    "RSI(30.4) 偏弱",
-    "触及/跌破布林下轨",
-    "近期新闻面偏多（情绪 0.8），利好加持"
+    "价格处于60日低位区（距60日低点 2.4%）",
+    "RSI(24.5) 超卖",
+    "MACD 金叉（5日前）",
+    "近期新闻面偏多（情绪 0.3），利好加持"
    ],
-   "target": 33.08,
-   "dist_low60_pct": 0.41
+   "target": 32.76,
+   "dist_low60_pct": 2.36
   },
   {
-   "symbol": "600048",
-   "name": "保利发展",
+   "symbol": "600570",
+   "name": "恒生电子",
+   "market": "stock",
+   "action": "BUY",
+   "score": 7.2,
+   "price": 16.79,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.9%）",
+    "RSI(34.4) 偏弱",
+    "MACD 金叉（4日前）",
+    "近期新闻面偏多（情绪 0.6），利好加持"
+   ],
+   "target": 21.25,
+   "dist_low60_pct": 1.94
+  },
+  {
+   "symbol": "000333",
+   "name": "美的集团",
    "market": "stock",
    "action": "SELL",
-   "score": -7.2,
-   "price": 25.39,
+   "score": -6.2,
+   "price": 35.06,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -0.2%）",
-    "RSI(71.4) 超买",
-    "MACD 死叉（5日前）",
+    "价格处于60日高位区（距60日高点 -0.3%）",
+    "RSI(66.1) 偏强",
+    "MACD 死叉（4日前）",
     "触及布林上轨"
    ],
-   "target": 18.16,
-   "dist_low60_pct": 31.49
+   "target": 28.52,
+   "dist_low60_pct": 21.11
   },
   {
-   "symbol": "159901",
-   "name": "深证100ETF",
+   "symbol": "688981",
+   "name": "中芯国际",
+   "market": "stock",
+   "action": "BUY",
+   "score": 6,
+   "price": 27.38,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(30.1) 偏弱",
+    "MACD 金叉（3日前）"
+   ],
+   "target": 32.8,
+   "dist_low60_pct": 1.44
+  },
+  {
+   "symbol": "510880",
+   "name": "红利ETF",
    "market": "fund",
    "action": "BUY",
-   "score": 7,
-   "price": 1.8,
+   "score": 6,
+   "price": 1.41,
    "reasons": [
-    "价格处于60日低位区（距60日低点 2.3%）",
-    "RSI(25.4) 超卖",
-    "KDJ 超卖区金叉 (K=18.9)"
+    "价格处于60日低位区（距60日低点 1.4%）",
+    "RSI(36.9) 偏弱",
+    "触及/跌破布林下轨"
    ],
-   "target": 2.22,
-   "dist_low60_pct": 2.27
+   "target": 1.8,
+   "dist_low60_pct": 1.44
   },
   {
-   "symbol": "600028",
-   "name": "中国石化",
-   "market": "stock",
+   "symbol": "515210",
+   "name": "钢铁ETF",
+   "market": "fund",
    "action": "BUY",
-   "score": 6.6,
-   "price": 22.12,
+   "score": 6,
+   "price": 2.12,
    "reasons": [
-    "价格处于60日低位区（距60日低点 0.8%）",
-    "RSI(19.9) 超卖",
-    "近期新闻面偏多（情绪 0.8），利好加持"
+    "价格处于60日低位区（距60日低点 5.5%）",
+    "RSI(39.3) 偏弱",
+    "触及/跌破布林下轨"
    ],
-   "target": 32.95,
-   "dist_low60_pct": 0.77
+   "target": 2.45,
+   "dist_low60_pct": 5.47
   },
   {
-   "symbol": "002594",
-   "name": "比亚迪",
-   "market": "stock",
+   "symbol": "511360",
+   "name": "短融ETF",
+   "market": "fund",
    "action": "SELL",
    "score": -6,
-   "price": 39.26,
+   "price": 1.33,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -4.2%）",
-    "RSI(66.3) 偏强",
-    "KDJ 超买区死叉 (K=82.9)"
+    "价格处于60日高位区（距60日高点 -2.9%）",
+    "RSI(73.3) 超买",
+    "KDJ 超买区死叉 (K=85.5)"
    ],
-   "target": 32.27,
-   "dist_low60_pct": 21.47
+   "target": 1.01,
+   "dist_low60_pct": 33.0
+  },
+  {
+   "symbol": "300059",
+   "name": "东方财富",
+   "market": "stock",
+   "action": "BUY",
+   "score": 5.2,
+   "price": 45.82,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.5%）",
+    "RSI(34.3) 偏弱",
+    "近期新闻面偏多（情绪 0.6），利好加持"
+   ],
+   "target": 52.19,
+   "dist_low60_pct": 1.51
+  },
+  {
+   "symbol": "601012",
+   "name": "隆基绿能",
+   "market": "stock",
+   "action": "BUY",
+   "score": 5,
+   "price": 32.31,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 4.1%）",
+    "触及/跌破布林下轨"
+   ],
+   "target": 35.67,
+   "dist_low60_pct": 4.13
+  },
+  {
+   "symbol": "600104",
+   "name": "上汽集团",
+   "market": "stock",
+   "action": "SELL",
+   "score": -5.0,
+   "price": 36.39,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -1.1%）",
+    "RSI(70.9) 超买",
+    "触及布林上轨"
+   ],
+   "target": 20.01,
+   "dist_low60_pct": 48.29
+  },
+  {
+   "symbol": "510330",
+   "name": "沪深300ETF华夏",
+   "market": "fund",
+   "action": "BUY",
+   "score": 5,
+   "price": 1.81,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.6) 超卖"
+   ],
+   "target": 2.03,
+   "dist_low60_pct": 1.12
+  },
+  {
+   "symbol": "588000",
+   "name": "科创50ETF",
+   "market": "fund",
+   "action": "SELL",
+   "score": -5,
+   "price": 3.37,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -4.0%）",
+    "RSI(65.4) 偏强",
+    "MACD 死叉（4日前）"
+   ],
+   "target": 2.4,
+   "dist_low60_pct": 43.4
   },
   {
    "symbol": "512170",
    "name": "医疗ETF",
    "market": "fund",
    "action": "BUY",
-   "score": 6,
-   "price": 1.96,
+   "score": 5,
+   "price": 1.8,
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.4%）",
-    "RSI(38.0) 偏弱",
-    "MACD 金叉（3日前）"
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(25.1) 超卖"
    ],
-   "target": 2.59,
-   "dist_low60_pct": 5.38
+   "target": 2.27,
+   "dist_low60_pct": 1.12
   },
   {
-   "symbol": "511360",
-   "name": "短融ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 6,
-   "price": 1.6,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 6.0%）",
-    "RSI(37.1) 偏弱",
-    "触及/跌破布林下轨"
-   ],
-   "target": 1.86,
-   "dist_low60_pct": 5.96
-  },
-  {
-   "symbol": "513050",
-   "name": "中概互联网ETF",
+   "symbol": "512760",
+   "name": "芯片ETF",
    "market": "fund",
    "action": "SELL",
-   "score": -6,
-   "price": 1.54,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -0.6%）",
-    "RSI(78.7) 超买",
-    "触及布林上轨"
-   ],
-   "target": 1.27,
-   "dist_low60_pct": 22.22
-  },
-  {
-   "symbol": "600519",
-   "name": "贵州茅台",
-   "market": "stock",
-   "action": "SELL",
-   "score": -5.4,
-   "price": 31.16,
+   "score": -5,
+   "price": 2.57,
    "reasons": [
     "价格处于60日高位区（距60日高点 -2.7%）",
-    "RSI(63.0) 偏强",
+    "RSI(63.5) 偏强",
     "触及布林上轨"
    ],
-   "target": 27.67,
-   "dist_low60_pct": 14.18
-  },
-  {
-   "symbol": "000858",
-   "name": "五粮液",
-   "market": "stock",
-   "action": "SELL",
-   "score": -5.0,
-   "price": 34.16,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -0.6%）",
-    "RSI(74.9) 超买",
-    "触及布林上轨"
-   ],
-   "target": 25.04,
-   "dist_low60_pct": 38.47
-  },
-  {
-   "symbol": "600900",
-   "name": "长江电力",
-   "market": "stock",
-   "action": "BUY",
-   "score": 5,
-   "price": 24.84,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.3%）",
-    "触及/跌破布林下轨"
-   ],
-   "target": 26.65,
-   "dist_low60_pct": 5.25
-  },
-  {
-   "symbol": "601398",
-   "name": "工商银行",
-   "market": "stock",
-   "action": "SELL",
-   "score": -5,
-   "price": 30.76,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -0.3%）",
-    "RSI(64.1) 偏强",
-    "触及布林上轨"
-   ],
-   "target": 27.47,
-   "dist_low60_pct": 19.09
-  },
-  {
-   "symbol": "512690",
-   "name": "酒ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 1.57,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.4%）",
-    "MACD 金叉（2日前）"
-   ],
-   "target": 1.74,
-   "dist_low60_pct": 5.37
-  },
-  {
-   "symbol": "515880",
-   "name": "通信ETF",
-   "market": "fund",
-   "action": "SELL",
-   "score": -5,
-   "price": 2.34,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -2.1%）",
-    "RSI(60.2) 偏强",
-    "MACD 死叉（2日前）"
-   ],
-   "target": 2.05,
-   "dist_low60_pct": 15.84
-  },
-  {
-   "symbol": "516160",
-   "name": "新能源ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 1.96,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.0%）",
-    "RSI(18.7) 超卖"
-   ],
-   "target": 2.29,
-   "dist_low60_pct": 1.03
-  },
-  {
-   "symbol": "513500",
-   "name": "标普500ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 1.71,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 0.6%）",
-    "RSI(29.7) 超卖"
-   ],
-   "target": 2.12,
-   "dist_low60_pct": 0.59
-  },
-  {
-   "symbol": "513180",
-   "name": "恒生科技ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 1.58,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 2.6%）",
-    "MACD 金叉（2日前）"
-   ],
-   "target": 1.83,
-   "dist_low60_pct": 2.6
-  },
-  {
-   "symbol": "159934",
-   "name": "黄金ETF",
-   "market": "fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 1.38,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.3%）",
-    "MACD 金叉（3日前）"
-   ],
-   "target": 1.82,
-   "dist_low60_pct": 5.34
-  },
-  {
-   "symbol": "001714",
-   "name": "工银文体产业",
-   "market": "open_fund",
-   "action": "BUY",
-   "score": 5,
-   "price": 2.78,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 3.7%）",
-    "触及/跌破布林下轨"
-   ],
-   "target": 3.1,
-   "dist_low60_pct": 3.7
-  },
-  {
-   "symbol": "600030",
-   "name": "中信证券",
-   "market": "stock",
-   "action": "SELL",
-   "score": -4.8,
-   "price": 26.27,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -4.9%）",
-    "RSI(66.1) 偏强",
-    "触及布林上轨"
-   ],
-   "target": 25.46,
-   "dist_low60_pct": 11.41
-  },
-  {
-   "symbol": "000651",
-   "name": "格力电器",
-   "market": "stock",
-   "action": "SELL",
-   "score": -4.4,
-   "price": 24.5,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -5.9%）",
-    "MACD 死叉（2日前）"
-   ],
-   "target": 21.52,
-   "dist_low60_pct": 9.52
-  },
-  {
-   "symbol": "601138",
-   "name": "工业富联",
-   "market": "stock",
-   "action": "BUY",
-   "score": 4.4,
-   "price": 27.41,
-   "reasons": [
-    "RSI(35.8) 偏弱",
-    "触及/跌破布林下轨",
-    "近期新闻面偏多（情绪 0.7），利好加持"
-   ],
-   "target": 30.4,
-   "dist_low60_pct": 13.83
+   "target": 1.99,
+   "dist_low60_pct": 21.8
   },
   {
    "symbol": "601668",
@@ -1570,381 +1441,391 @@
    "market": "stock",
    "action": "BUY",
    "score": 4.2,
-   "price": 15.71,
+   "price": 29.05,
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.9%）",
+    "价格处于60日低位区（距60日低点 5.8%）",
     "近期新闻面偏多（情绪 0.6），利好加持"
    ],
-   "target": 17.29,
-   "dist_low60_pct": 5.93
+   "target": 29.5,
+   "dist_low60_pct": 5.75
+  },
+  {
+   "symbol": "002241",
+   "name": "歌尔股份",
+   "market": "stock",
+   "action": "SELL",
+   "score": -4.2,
+   "price": 37.03,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -0.4%）",
+    "RSI(66.3) 偏强",
+    "触及布林上轨"
+   ],
+   "target": 32.26,
+   "dist_low60_pct": 15.36
+  },
+  {
+   "symbol": "000858",
+   "name": "五粮液",
+   "market": "stock",
+   "action": "BUY",
+   "score": 4.0,
+   "price": 27.61,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 5.7%）",
+    "近期新闻面偏多（情绪 0.5），利好加持"
+   ],
+   "target": 29.21,
+   "dist_low60_pct": 5.66
   },
   {
    "symbol": "601857",
    "name": "中国石油",
    "market": "stock",
-   "action": "BUY",
-   "score": 4,
-   "price": 26.78,
+   "action": "SELL",
+   "score": -4,
+   "price": 26.0,
    "reasons": [
-    "价格处于60日低位区（距60日低点 1.6%）",
-    "RSI(34.0) 偏弱"
+    "价格处于60日高位区（距60日高点 -4.1%）",
+    "MACD 死叉（5日前）"
    ],
-   "target": 33.36,
-   "dist_low60_pct": 1.59
+   "target": 23.17,
+   "dist_low60_pct": 13.39
   },
   {
-   "symbol": "600104",
-   "name": "上汽集团",
+   "symbol": "002230",
+   "name": "科大讯飞",
    "market": "stock",
    "action": "SELL",
-   "score": -4.0,
-   "price": 38.19,
+   "score": -4,
+   "price": 36.23,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -2.7%）",
-    "RSI(62.8) 偏强",
+    "价格处于60日高位区（距60日高点 -2.8%）",
     "触及布林上轨"
    ],
-   "target": 33.67,
-   "dist_low60_pct": 14.48
+   "target": 32.33,
+   "dist_low60_pct": 7.89
   },
   {
-   "symbol": "688981",
-   "name": "中芯国际",
+   "symbol": "603259",
+   "name": "药明康德",
    "market": "stock",
-   "action": "BUY",
-   "score": 4,
-   "price": 37.13,
+   "action": "SELL",
+   "score": -4,
+   "price": 34.18,
    "reasons": [
-    "价格处于60日低位区（距60日低点 2.3%）",
-    "RSI(34.5) 偏弱"
+    "价格处于60日高位区（距60日高点 -1.2%）",
+    "MACD 死叉（2日前）"
    ],
-   "target": 55.61,
-   "dist_low60_pct": 2.31
-  },
-  {
-   "symbol": "600570",
-   "name": "恒生电子",
-   "market": "stock",
-   "action": "BUY",
-   "score": 4,
-   "price": 20.05,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.2%）",
-    "RSI(33.4) 偏弱"
-   ],
-   "target": 26.28,
-   "dist_low60_pct": 1.16
+   "target": 30.7,
+   "dist_low60_pct": 12.55
   },
   {
    "symbol": "300760",
    "name": "迈瑞医疗",
    "market": "stock",
-   "action": "BUY",
-   "score": 4,
-   "price": 26.91,
+   "action": "SELL",
+   "score": -4,
+   "price": 26.73,
    "reasons": [
-    "价格处于60日低位区（距60日低点 1.8%）",
-    "RSI(36.9) 偏弱"
+    "价格处于60日高位区（距60日高点 -4.7%）",
+    "MACD 死叉（1日前）"
    ],
-   "target": 31.25,
-   "dist_low60_pct": 1.82
+   "target": 24.02,
+   "dist_low60_pct": 16.93
   },
   {
-   "symbol": "600438",
-   "name": "通威股份",
+   "symbol": "601088",
+   "name": "中国神华",
    "market": "stock",
    "action": "BUY",
    "score": 4,
-   "price": 43.55,
+   "price": 20.92,
    "reasons": [
     "价格处于60日低位区（距60日低点 3.3%）",
-    "RSI(37.0) 偏弱",
+    "RSI(30.5) 偏弱"
+   ],
+   "target": 27.75,
+   "dist_low60_pct": 3.26
+  },
+  {
+   "symbol": "000568",
+   "name": "泸州老窖",
+   "market": "stock",
+   "action": "SELL",
+   "score": -4,
+   "price": 24.93,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -4.3%）",
+    "MACD 死叉（2日前）"
+   ],
+   "target": 21.95,
+   "dist_low60_pct": 18.1
+  },
+  {
+   "symbol": "159919",
+   "name": "沪深300ETF嘉实",
+   "market": "fund",
+   "action": "BUY",
+   "score": 4,
+   "price": 1.49,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 0.7%）",
+    "RSI(38.8) 偏弱"
+   ],
+   "target": 1.8,
+   "dist_low60_pct": 0.68
+  },
+  {
+   "symbol": "515880",
+   "name": "通信ETF",
+   "market": "fund",
+   "action": "BUY",
+   "score": 4,
+   "price": 1.64,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.9%）",
+    "RSI(36.4) 偏弱",
     "触及/跌破布林下轨"
    ],
-   "target": 50.22,
-   "dist_low60_pct": 3.27
+   "target": 1.93,
+   "dist_low60_pct": 1.86
+  },
+  {
+   "symbol": "516160",
+   "name": "新能源ETF",
+   "market": "fund",
+   "action": "BUY",
+   "score": 4,
+   "price": 1.47,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 2.1%）",
+    "RSI(30.4) 偏弱"
+   ],
+   "target": 2.1,
+   "dist_low60_pct": 2.08
+  },
+  {
+   "symbol": "518880",
+   "name": "黄金ETF",
+   "market": "fund",
+   "action": "BUY",
+   "score": 4,
+   "price": 1.67,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 2.5%）",
+    "RSI(35.2) 偏弱"
+   ],
+   "target": 2.13,
+   "dist_low60_pct": 2.45
+  },
+  {
+   "symbol": "513130",
+   "name": "恒生科技ETF",
+   "market": "fund",
+   "action": "BUY",
+   "score": 4,
+   "price": 2.22,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 2.3%）",
+    "RSI(38.6) 偏弱"
+   ],
+   "target": 2.47,
+   "dist_low60_pct": 2.3
+  },
+  {
+   "symbol": "600030",
+   "name": "中信证券",
+   "market": "stock",
+   "action": "SELL",
+   "score": -3.8,
+   "price": 32.17,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -5.1%）",
+    "MACD 死叉（5日前）"
+   ],
+   "target": 29.26,
+   "dist_low60_pct": 10.44
   },
   {
    "symbol": "600019",
    "name": "宝钢股份",
    "market": "stock",
    "action": "BUY",
-   "score": 4.0,
-   "price": 26.4,
+   "score": 3.8,
+   "price": 33.38,
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.3%）",
-    "近期新闻面偏多（情绪 0.5），利好加持"
+    "价格处于60日低位区（距60日低点 5.9%）",
+    "近期新闻面偏多（情绪 0.4），利好加持"
    ],
-   "target": 28.09,
-   "dist_low60_pct": 5.35
-  },
-  {
-   "symbol": "000063",
-   "name": "中兴通讯",
-   "market": "stock",
-   "action": "BUY",
-   "score": 4,
-   "price": 33.18,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 3.8%）",
-    "RSI(37.3) 偏弱"
-   ],
-   "target": 37.43,
-   "dist_low60_pct": 3.85
-  },
-  {
-   "symbol": "002241",
-   "name": "歌尔股份",
-   "market": "stock",
-   "action": "BUY",
-   "score": 4.0,
-   "price": 28.07,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.6%）",
-    "近期新闻面偏多（情绪 0.5），利好加持"
-   ],
-   "target": 29.93,
-   "dist_low60_pct": 5.61
+   "target": 38.92,
+   "dist_low60_pct": 5.87
   },
   {
    "symbol": "600660",
    "name": "福耀玻璃",
    "market": "stock",
    "action": "BUY",
-   "score": 4.0,
-   "price": 20.55,
+   "score": 3.8,
+   "price": 26.63,
    "reasons": [
-    "价格处于60日低位区（距60日低点 4.6%）",
-    "近期新闻面偏多（情绪 0.5），利好加持"
+    "价格处于60日低位区（距60日低点 5.5%）",
+    "近期新闻面偏多（情绪 0.4），利好加持"
    ],
-   "target": 25.04,
-   "dist_low60_pct": 4.58
+   "target": 31.45,
+   "dist_low60_pct": 5.51
   },
   {
-   "symbol": "588000",
-   "name": "科创50ETF",
-   "market": "fund",
+   "symbol": "600519",
+   "name": "贵州茅台",
+   "market": "stock",
    "action": "BUY",
-   "score": 4,
-   "price": 1.7,
+   "score": 3.6,
+   "price": 29.71,
    "reasons": [
-    "价格处于60日低位区（距60日低点 1.8%）",
-    "RSI(36.4) 偏弱"
+    "价格处于60日低位区（距60日低点 4.7%）",
+    "近期新闻面偏多（情绪 0.3），利好加持"
    ],
-   "target": 2.06,
-   "dist_low60_pct": 1.8
-  },
-  {
-   "symbol": "588080",
-   "name": "科创50ETF易方达",
-   "market": "fund",
-   "action": "BUY",
-   "score": 4,
-   "price": 1.66,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.2%）",
-    "RSI(33.4) 偏弱"
-   ],
-   "target": 2.06,
-   "dist_low60_pct": 1.22
-  },
-  {
-   "symbol": "159919",
-   "name": "沪深300ETF嘉实",
-   "market": "fund",
-   "action": "SELL",
-   "score": -4,
-   "price": 2.34,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -3.3%）",
-    "MACD 死叉（4日前）"
-   ],
-   "target": 2.15,
-   "dist_low60_pct": 10.38
-  },
-  {
-   "symbol": "512660",
-   "name": "军工ETF",
-   "market": "fund",
-   "action": "SELL",
-   "score": -4,
-   "price": 1.77,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -4.3%）",
-    "MACD 死叉（3日前）"
-   ],
-   "target": 1.62,
-   "dist_low60_pct": 14.19
-  },
-  {
-   "symbol": "512760",
-   "name": "芯片ETF",
-   "market": "fund",
-   "action": "SELL",
-   "score": -4,
-   "price": 2.18,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -4.0%）",
-    "MACD 死叉（5日前）"
-   ],
-   "target": 1.97,
-   "dist_low60_pct": 11.79
-  },
-  {
-   "symbol": "515030",
-   "name": "新能源车ETF",
-   "market": "fund",
-   "action": "SELL",
-   "score": -4,
-   "price": 2.18,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -3.1%）",
-    "RSI(62.6) 偏强",
-    "触及布林上轨"
-   ],
-   "target": 1.93,
-   "dist_low60_pct": 14.74
-  },
-  {
-   "symbol": "511260",
-   "name": "十年国债ETF",
-   "market": "fund",
-   "action": "SELL",
-   "score": -4,
-   "price": 1.8,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -1.6%）",
-    "触及布林上轨"
-   ],
-   "target": 1.62,
-   "dist_low60_pct": 11.8
-  },
-  {
-   "symbol": "163406",
-   "name": "兴全合润混合",
-   "market": "open_fund",
-   "action": "BUY",
-   "score": 4,
-   "price": 2.32,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 3.8%）",
-    "RSI(39.1) 偏弱"
-   ],
-   "target": 2.95,
-   "dist_low60_pct": 3.82
+   "target": 32.07,
+   "dist_low60_pct": 4.69
   },
   {
    "symbol": "300750",
    "name": "宁德时代",
    "market": "stock",
    "action": "BUY",
-   "score": 3.8,
-   "price": 17.54,
+   "score": 3,
+   "price": 19.04,
    "reasons": [
-    "价格处于60日低位区（距60日低点 4.0%）",
-    "近期新闻面偏多（情绪 0.4），利好加持"
+    "价格处于60日低位区（距60日低点 1.8%）"
    ],
-   "target": 18.77,
-   "dist_low60_pct": 4.03
+   "target": 21.9,
+   "dist_low60_pct": 1.76
   },
   {
-   "symbol": "000001",
-   "name": "平安银行",
+   "symbol": "601398",
+   "name": "工商银行",
    "market": "stock",
-   "action": "BUY",
-   "score": 3.6,
-   "price": 34.29,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 5.0%）",
-    "近期新闻面偏多（情绪 0.3），利好加持"
-   ],
-   "target": 39.34,
-   "dist_low60_pct": 4.99
-  },
-  {
-   "symbol": "002415",
-   "name": "海康威视",
-   "market": "stock",
-   "action": "BUY",
-   "score": 3.4,
-   "price": 22.48,
-   "reasons": [
-    "价格处于60日低位区（距60日低点 1.5%）",
-    "RSI(30.0) 偏弱",
-    "近期新闻面偏多（情绪 0.7），利好加持"
-   ],
-   "target": 34.23,
-   "dist_low60_pct": 1.54
-  },
-  {
-   "symbol": "600031",
-   "name": "三一重工",
-   "market": "stock",
-   "action": "SELL",
-   "score": -3.4,
-   "price": 19.1,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -5.3%）",
-    "MACD 死叉（1日前）"
-   ],
-   "target": 14.29,
-   "dist_low60_pct": 35.56
-  },
-  {
-   "symbol": "600309",
-   "name": "万华化学",
-   "market": "stock",
-   "action": "SELL",
-   "score": -3,
-   "price": 25.5,
-   "reasons": [
-    "价格处于60日高位区（距60日高点 -1.5%）",
-    "RSI(66.9) 偏强"
-   ],
-   "target": 19.22,
-   "dist_low60_pct": 23.85
-  },
-  {
-   "symbol": "510300",
-   "name": "沪深300ETF",
-   "market": "fund",
    "action": "BUY",
    "score": 3,
-   "price": 1.76,
+   "price": 27.37,
    "reasons": [
-    "RSI(33.8) 偏弱",
-    "MACD 金叉（3日前）"
+    "价格处于60日低位区（距60日低点 4.9%）"
    ],
-   "target": 2.69,
-   "dist_low60_pct": 6.02
+   "target": 28.27,
+   "dist_low60_pct": 4.91
   },
   {
-   "symbol": "515050",
-   "name": "5G通信ETF",
+   "symbol": "600585",
+   "name": "海螺水泥",
+   "market": "stock",
+   "action": "SELL",
+   "score": -3,
+   "price": 21.43,
+   "reasons": [
+    "RSI(62.6) 偏强",
+    "触及布林上轨"
+   ],
+   "target": 19.92,
+   "dist_low60_pct": 14.23
+  },
+  {
+   "symbol": "002714",
+   "name": "牧原股份",
+   "market": "stock",
+   "action": "BUY",
+   "score": 3,
+   "price": 25.0,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 1.1%）",
+    "RSI(26.6) 超卖"
+   ],
+   "target": 31.6,
+   "dist_low60_pct": 1.09
+  },
+  {
+   "symbol": "600048",
+   "name": "保利发展",
+   "market": "stock",
+   "action": "BUY",
+   "score": 3.0,
+   "price": 22.03,
+   "reasons": [
+    "触及/跌破布林下轨",
+    "近期新闻面偏多（情绪 0.5），利好加持"
+   ],
+   "target": 23.37,
+   "dist_low60_pct": 14.8
+  },
+  {
+   "symbol": "002475",
+   "name": "立讯精密",
+   "market": "stock",
+   "action": "BUY",
+   "score": 3.0,
+   "price": 16.86,
+   "reasons": [
+    "MACD 金叉（2日前）",
+    "近期新闻面偏多（情绪 0.5），利好加持"
+   ],
+   "target": 18.69,
+   "dist_low60_pct": 7.18
+  },
+  {
+   "symbol": "510310",
+   "name": "沪深300ETF易方达",
    "market": "fund",
    "action": "SELL",
    "score": -3,
-   "price": 2.16,
+   "price": 2.12,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -2.3%）",
-    "RSI(60.4) 偏强"
+    "价格处于60日高位区（距60日高点 -4.9%）"
    ],
-   "target": 1.98,
-   "dist_low60_pct": 18.68
+   "target": 1.7,
+   "dist_low60_pct": 26.95
+  },
+  {
+   "symbol": "512690",
+   "name": "酒ETF",
+   "market": "fund",
+   "action": "SELL",
+   "score": -3,
+   "price": 3.03,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -1.3%）",
+    "RSI(62.8) 偏强",
+    "触及布林上轨"
+   ],
+   "target": 2.7,
+   "dist_low60_pct": 13.91
+  },
+  {
+   "symbol": "515790",
+   "name": "光伏ETF",
+   "market": "fund",
+   "action": "SELL",
+   "score": -3,
+   "price": 1.74,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -1.1%）",
+    "RSI(67.1) 偏强",
+    "触及布林上轨"
+   ],
+   "target": 1.41,
+   "dist_low60_pct": 35.94
   },
   {
    "symbol": "516970",
    "name": "基建50ETF",
    "market": "fund",
-   "action": "SELL",
-   "score": -3,
-   "price": 2.24,
+   "action": "BUY",
+   "score": 3,
+   "price": 2.17,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -3.0%）",
-    "RSI(60.2) 偏强"
+    "价格处于60日低位区（距60日低点 5.3%）"
    ],
-   "target": 1.98,
-   "dist_low60_pct": 15.46
+   "target": 2.19,
+   "dist_low60_pct": 5.34
   },
   {
    "symbol": "513100",
@@ -1952,70 +1833,139 @@
    "market": "fund",
    "action": "SELL",
    "score": -3,
-   "price": 1.5,
+   "price": 1.8,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -2.6%）",
-    "RSI(63.3) 偏强"
+    "价格处于60日高位区（距60日高点 -2.2%）",
+    "RSI(66.3) 偏强"
    ],
-   "target": 1.26,
-   "dist_low60_pct": 19.05
+   "target": 1.66,
+   "dist_low60_pct": 19.21
   },
   {
-   "symbol": "513130",
+   "symbol": "513500",
+   "name": "标普500ETF",
+   "market": "fund",
+   "action": "BUY",
+   "score": 3,
+   "price": 2.29,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 5.5%）"
+   ],
+   "target": 2.41,
+   "dist_low60_pct": 5.53
+  },
+  {
+   "symbol": "513180",
    "name": "恒生科技ETF",
    "market": "fund",
    "action": "SELL",
    "score": -3,
-   "price": 1.84,
+   "price": 1.45,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -0.5%）",
-    "RSI(68.8) 偏强",
-    "触及布林上轨"
+    "价格处于60日高位区（距60日高点 -2.0%）",
+    "RSI(62.8) 偏强"
    ],
-   "target": 1.4,
-   "dist_low60_pct": 34.31
+   "target": 1.2,
+   "dist_low60_pct": 20.83
   },
   {
-   "symbol": "159920",
-   "name": "恒生ETF",
+   "symbol": "159934",
+   "name": "黄金ETF",
    "market": "fund",
    "action": "SELL",
    "score": -3,
-   "price": 2.25,
+   "price": 2.01,
    "reasons": [
-    "价格处于60日高位区（距60日高点 -4.3%）",
-    "RSI(62.0) 偏强"
+    "价格处于60日高位区（距60日高点 -3.4%）",
+    "RSI(68.2) 偏强"
    ],
-   "target": 1.91,
-   "dist_low60_pct": 22.28
+   "target": 1.63,
+   "dist_low60_pct": 25.62
   },
   {
-   "symbol": "601628",
-   "name": "中国人寿",
+   "symbol": "601888",
+   "name": "中国中免",
+   "market": "stock",
+   "action": "SELL",
+   "score": -2.6,
+   "price": 28.92,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -3.4%）",
+    "RSI(65.5) 偏强"
+   ],
+   "target": 26.37,
+   "dist_low60_pct": 14.4
+  },
+  {
+   "symbol": "000001",
+   "name": "平安银行",
    "market": "stock",
    "action": "BUY",
-   "score": 1.6,
-   "price": 12.23,
+   "score": 2.6,
+   "price": 31.67,
    "reasons": [
-    "价格处于60日低位区（距60日低点 5.2%）",
+    "MACD 金叉（2日前）",
     "近期新闻面偏多（情绪 0.3），利好加持"
    ],
-   "target": 15.22,
-   "dist_low60_pct": 5.16
+   "target": 35.05,
+   "dist_low60_pct": 7.39
+  },
+  {
+   "symbol": "600028",
+   "name": "中国石化",
+   "market": "stock",
+   "action": "BUY",
+   "score": 2.6,
+   "price": 19.35,
+   "reasons": [
+    "价格处于60日低位区（距60日低点 2.9%）",
+    "近期新闻面偏多（情绪 0.8），利好加持"
+   ],
+   "target": 22.02,
+   "dist_low60_pct": 2.87
+  },
+  {
+   "symbol": "601318",
+   "name": "中国平安",
+   "market": "stock",
+   "action": "SELL",
+   "score": -2.0,
+   "price": 41.31,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -0.9%）",
+    "RSI(68.8) 偏强",
+    "触及布林上轨"
+   ],
+   "target": 33.12,
+   "dist_low60_pct": 25.07
   },
   {
    "symbol": "603288",
    "name": "海天味业",
    "market": "stock",
-   "action": "BUY",
-   "score": 1.6,
-   "price": 28.02,
+   "action": "SELL",
+   "score": -2.0,
+   "price": 33.28,
    "reasons": [
-    "RSI(36.0) 偏弱",
-    "近期新闻面偏多（情绪 0.3），利好加持"
+    "价格处于60日高位区（距60日高点 -0.4%）",
+    "RSI(64.2) 偏强",
+    "触及布林上轨"
    ],
-   "target": 28.9,
-   "dist_low60_pct": 20.57
+   "target": 28.06,
+   "dist_low60_pct": 36.73
+  },
+  {
+   "symbol": "002415",
+   "name": "海康威视",
+   "market": "stock",
+   "action": "SELL",
+   "score": -1.6,
+   "price": 38.61,
+   "reasons": [
+    "价格处于60日高位区（距60日高点 -5.8%）"
+   ],
+   "target": 35.43,
+   "dist_low60_pct": 8.98
   }
  ],
  "strategy": {
@@ -2326,7 +2276,7 @@
    }
   ],
   "tagline": "以量价技术指标为核心，识别阶段低/高位，结合新闻面给出可解释的买卖建议。",
-  "updated_at": "2026-08-25",
+  "updated_at": "2026-08-27",
   "version": "v2.1"
  }
 }

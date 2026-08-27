@@ -114,6 +114,8 @@ function clearSearched(){ try{ localStorage.removeItem(LS_SEARCHED); }catch(e){}
 
 /* ---------- router ---------- */
 function router(){
+  // 离开 alerts 页时清掉实时行情 timer
+  if(window._alertTimer && location.hash.slice(2)!=='alerts'){ clearInterval(window._alertTimer); window._alertTimer=null; }
   const h = location.hash.slice(2) || '';
   if(h.startsWith('detail/')){ const [m,s]=h.slice(7).split('/'); renderDetail(m, decodeURIComponent(s)); }
   else if(h.startsWith('analyzing/')){ const [m,s]=h.slice(10).split('/'); renderAnalyzing(m, decodeURIComponent(s)); }
@@ -669,18 +671,23 @@ async function renderAlerts(){
   const openFundAlerts=all.filter(a=>a.market==='open_fund');
   function rows(list){
     if(!list.length) return '<tr><td colspan=6 class="muted" style="padding:30px;text-align:center">该类型暂无信号</td></tr>';
-    return list.map(a=>`
-      <tr onclick="location.hash='#/detail/${a.market}/${a.symbol}'" style="cursor:pointer">
+    return list.map(a=>{
+      // 计算 60 日低点基准（用于实时跳动时保持基线不变）
+      const p = +a.price;
+      const low60 = (p > 0 && a.dist_low60_pct != null) ? (p / (1 + (+a.dist_low60_pct) / 100)) : 0;
+      return `
+      <tr data-symbol="${a.symbol}" data-market="${a.market}" data-low60="${low60.toFixed(4)}" onclick="location.hash='#/detail/${a.market}/${a.symbol}'" style="cursor:pointer">
         <td><b>${a.name}</b> <span class="muted">${a.symbol}</span></td>
         <td>${a.market==='open_fund'?'场外基金':a.market==='fund'?'场内基金':'股票'}</td>
         <td><span class="alert-pill ${a.action.toLowerCase()}">${a.action==='BUY'?'买入':'卖出'}</span></td>
-        <td>${fmt(a.price)}</td>
-        <td class="${a.dist_low60_pct>0?'up':'down'}">${fmt(a.dist_low60_pct,1)}%</td>
+        <td class="price-cell">${fmt(p)}</td>
+        <td class="dist-cell ${a.dist_low60_pct>0?'up':'down'}">${fmt(a.dist_low60_pct,1)}%</td>
         <td class="muted" style="font-size:12px">${(a.reasons||[]).join('；')||'—'}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
   }
   el.innerHTML=`<div class="section-title"><span class="bar"></span>信号提醒中心
-    <span class="live" style="margin-left:10px">${MODE==='backend'?'实时':'快照'} · ${d.generated_at||''}</span></div>
+    <span class="live" id="alert-live-ts" style="margin-left:10px">${MODE==='backend'?'实时 · '+d.generated_at:'⏳ 实时跳动启动中…'}</span></div>
     <div class="tabs" id="alert-tabs-full">
       <div class="tab active" data-tab="all">全部 <span class="ct">${all.length}</span></div>
       <div class="tab" data-tab="stock">📈 股票 <span class="ct">${stockAlerts.length}</span></div>
@@ -689,17 +696,65 @@ async function renderAlerts(){
     </div>
     <div class="panel" id="alert-pane-full"><table class="table"><thead><tr>
       <th>标的</th><th>类型</th><th>信号</th><th>现价</th><th>距60低</th><th>触发理由</th></tr></thead>
-      <tbody id="alert-tbody"></tbody></table></div>`;
+      <tbody id="alert-tbody"></tbody></table>
+      <div class="muted" style="font-size:11px;margin-top:8px;padding:0 4px">⚡ 价格每 15 秒直连东方财富更新；场外基金每日公布净值，仅日内静态价。</div>
+    </div>`;
   function render(tab){
     const list = tab==='all'?all : tab==='stock'?stockAlerts : tab==='fund'?fundAlerts : openFundAlerts;
     document.getElementById('alert-tbody').innerHTML = rows(list);
     document.querySelectorAll('#alert-tabs-full .tab').forEach(x=>x.classList.toggle('active', x.dataset.tab===tab));
+    // 切换 tab 后立即对当前可见行执行一次 tick
+    if(MODE!=='backend' && typeof _tickAlerts==='function') _tickAlerts();
   }
   render('all');
   document.getElementById('alert-tabs-full').addEventListener('click', e=>{
     const t=e.target.closest('.tab'); if(t) render(t.dataset.tab);
   });
+
+  // === 实时行情跳动（前端直连东方财富，静态部署即可用） ===
+  if(MODE!=='backend'){
+    // 先清理可能残留的旧 timer
+    if(window._alertTimer){ clearInterval(window._alertTimer); window._alertTimer = null; }
+    window._tickAlerts = async function(){
+      const tbody = document.getElementById('alert-tbody');
+      if(!tbody) return;
+      const trs = Array.from(tbody.querySelectorAll('tr[data-market]')).filter(r=>r.dataset.market!=='open_fund');
+      if(!trs.length) return;
+      const tasks = trs.map(async r=>{
+        try{
+          const secid = secidOf(r.dataset.symbol);
+          const r1 = await fetch(`https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f60,f170`,{cache:'no-store'});
+          if(!r1.ok) return null;
+          const j = await r1.json();
+          const qd = j && j.data;
+          if(!qd || +qd.f43===0) return null;
+          return {row:r, price:+qd.f43, low60:parseFloat(r.dataset.low60), preClose:+qd.f60, high:+qd.f44, low:+qd.f45, open:+qd.f46};
+        }catch(e){ return null; }
+      });
+      const results = (await Promise.all(tasks)).filter(Boolean);
+      const ok = [];
+      for(const {row,price,low60,preClose,high,low,open} of results){
+        const pc = row.querySelector('.price-cell');
+        const dc = row.querySelector('.dist-cell');
+        if(!pc||!dc) continue;
+        pc.innerHTML = fmt(price) + (preClose&&preClose!==price?` <span class="muted" style="font-size:11px">${fmt((price-preClose)/preClose*100,2)}%</span>`:'');
+        if(low60>0){
+          const dist = (price - low60)/low60*100;
+          dc.textContent = fmt(dist,1) + '%';
+          dc.className = 'dist-cell ' + (dist>=0?'up':'down');
+        }
+        ok.push(row);
+      }
+      // 时间戳
+      const ts = document.getElementById('alert-live-ts');
+      if(ts) ts.innerHTML = `🔴 实时 · ${results.length}/${trs.length} 价已更新 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
+    };
+    // 立即拉取一次，然后每 15 秒刷新
+    _tickAlerts().catch(()=>{});
+    window._alertTimer = setInterval(()=>_tickAlerts().catch(()=>{}), 15000);
+  }
 }
+// 离开 alerts 页时清理 timer（hashchange 路由）
 
 /* ---------- strategy ---------- */
 async function renderStrategy(){

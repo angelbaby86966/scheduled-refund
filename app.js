@@ -3683,6 +3683,11 @@ async function stableClientToken(rid, iid) {
   return 'wb-' + _djb2hex(key) + _djb2hex(key.split('').reverse().join(''));
 }
 
+// 浏览器会话内「已退订实例集合」：对标后端 refund_state.json / 参考站 lastTriggered。
+// 同一会话里对已成功/已报退订的实例不再二次发起请求，避免反复退、提速。
+var __refundedIds = window.__refundedIds || (window.__refundedIds = new Set());
+function markRefundedFrontend(iid) { if (iid) __refundedIds.add(iid); }
+
 // 令牌桶：take() 在令牌不足时等待补足，保证整体速率 ≤ refillPerSec
 function makeTokenBucket(capacity, refillPerSec) {
   var tokens = capacity;
@@ -3753,9 +3758,9 @@ async function runBoundedRefund(tasks, opts) {
         }
       });
       var rn2 = REGION_INFO[task.rid] || task.rid;
-      if (r.kind === 'skipped') { total.skipped++; log('⚪ [' + rn2 + '] ' + r.id + ': 已退订/不存在，跳过', 'info'); }
+      if (r.kind === 'skipped') { total.skipped++; markRefundedFrontend(r.id); log('⚪ [' + rn2 + '] ' + r.id + ': 已退订/不存在，跳过', 'info'); }
       else if (r.kind === 'locked') { total.locked++; log('🔒 [' + rn2 + '] ' + r.id + ': ' + r.err + ' (跳过，不再重试)', 'warn'); }
-      else if (r.ok) { total.success++; log('   ✅ [' + rn2 + '] ' + r.id + ' 退订成功', 'success'); }
+      else if (r.ok) { total.success++; markRefundedFrontend(r.id); log('   ✅ [' + rn2 + '] ' + r.id + ' 退订成功', 'success'); }
       else {
         total.fail++; log('❌ [' + rn2 + '] ' + r.id + ': ' + r.err, 'error');
         if (opts.recordFailures) {
@@ -3787,7 +3792,9 @@ async function refundByRegionParallel(byRegion, opts) {
     if (!arr.length) { log('   🌏 [' + (REGION_INFO[rid] || rid) + '] 无实例，跳过', 'info'); return; }
     for (var i = 0; i < arr.length; i++) {
       var it = arr[i];
-      tasks.push({ rid: rid, iid: it.InstanceId || it.instanceId });
+      var id = it.InstanceId || it.instanceId;
+      if (__refundedIds.has(id)) continue; // 会话内已退订 → 跳过（对标参考站 lastTriggered 去重）
+      tasks.push({ rid: rid, iid: id });
     }
     log('   🌏 [' + (REGION_INFO[rid] || rid) + '] 共 ' + arr.length + ' 台待退订', 'info');
   });

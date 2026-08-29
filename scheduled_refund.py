@@ -58,7 +58,7 @@ REGION_INFO = {
     "cn-guangzhou": "广州",
     "cn-heyuan": "河源",
     "cn-wuhan-lr": "武汉",
-    "cn-qingdao": "青岛",
+    "cn-wulanchabu": "乌兰察布",
 }
 
 # BSS 退订（锁定）错误模式（与前端 BSS_LOCKED_PATTERNS 一致）

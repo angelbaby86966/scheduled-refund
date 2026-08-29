@@ -24,6 +24,10 @@ jobs:
         with:
           python-version: '3.11'
       - name: Run scheduled refund
+        env:
+          ALIYUN_AK: ${{ secrets.ALIYUN_AK }}
+          ALIYUN_SK: ${{ secrets.ALIYUN_SK }}
+          REGIONS: ${{ vars.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan-lr,cn-wulanchabu' }}
         run: python3 scheduled_refund.py
       - name: Commit refunded state
         if: always()

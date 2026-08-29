@@ -61,6 +61,18 @@ REGION_INFO = {
     "cn-wulanchabu": "乌兰察布",
 }
 
+# ===================== 106.53 乾亿益平台（参考站）退订对接 =====================
+# 对齐参考站「乾亿益」(http://106.53.202.147) 的「定时退订」：走自家后端
+#   POST /api/instances/batch-unsubscribe {user_id, instance_ids} → code===0 成功
+# 默认仍走阿里云 BSS 直退（与前端一致）；仅 QIANYIY_ENABLED=1 时改走 106.53 API。
+QIANYIY_ENABLED = os.environ.get("QIANYIY_ENABLED", "0") == "1"
+QIANYIY_BASE_URL = os.environ.get("QIANYIY_BASE_URL", "http://106.53.202.147/api").rstrip("/")
+QIANYIY_USER = os.environ.get("QIANYIY_USER", "admin")
+QIANYIY_PASS = os.environ.get("QIANYIY_PASS", "86966azr")
+QIANYIY_TARGET_USER_ID = os.environ.get("QIANYIY_TARGET_USER_ID", "24")  # 退订目标租户；默认 zhangruiyao=24
+QIANYIY_SYNC_FIRST = os.environ.get("QIANYIY_SYNC_FIRST", "1") == "1"    # 退订前先 sync-all 把阿里云实例同步进 106.53
+QIANYIY_BATCH_SIZE = int(os.environ.get("QIANYIY_BATCH_SIZE", "50"))     # 每批 instance_ids 数量（对齐参考站批量语义）
+
 # BSS 退订（锁定）错误模式（与前端 BSS_LOCKED_PATTERNS 一致）
 BSS_LOCKED_PATTERNS = [
     "NoApplicable", "NotApplicable", "ExceedRefundQuota", "ExistUnPaidOrder",
@@ -371,6 +383,88 @@ def refund_instance_retry(ak, sk, region_id, instance_id, max_retry=None):
     return False, last_kind, last_msg
 
 
+# ===================== 106.53 乾亿益平台客户端（对齐参考站批量退订） =====================
+def qy_http(method, path, token=None, body=None, timeout=60):
+    """调用 106.53 平台 API，返回解析后的 JSON dict。Bearer token 鉴权。"""
+    url = QIANYIY_BASE_URL + path
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"_raw": raw, "code": -1, "message": "ParseError"}
+
+
+def qy_login():
+    r = qy_http("POST", "/auth/login", body={"username": QIANYIY_USER, "password": QIANYIY_PASS})
+    if r.get("code") != 0 or not r.get("data", {}).get("token"):
+        raise RuntimeError(f"106.53 登录失败: {r.get('message') or r}")
+    return r["data"]["token"]
+
+
+def qy_sync_all(user_id, token):
+    r = qy_http("POST", "/instances/sync-all", token=token, body={"user_id": user_id})
+    log(f"[106.53] sync-all user={user_id}: code={r.get('code')} msg={r.get('message')}", "INFO")
+    return r
+
+
+def qy_list_instances(user_id, region_id, token):
+    r = qy_http("GET", f"/instances?user_id={user_id}&region_id={region_id}", token=token)
+    if r.get("code") != 0:
+        raise RuntimeError(f"[106.53] 列实例失败 region={region_id}: {r.get('message') or r}")
+    arr = r.get("data") or []
+    return [i.get("instanceId") or i.get("instance_id") for i in arr if (i.get("instanceId") or i.get("instance_id"))]
+
+
+def qy_batch_unsubscribe(user_id, instance_ids, token):
+    r = qy_http("POST", "/instances/batch-unsubscribe", token=token,
+                body={"user_id": user_id, "instance_ids": instance_ids})
+    ok = r.get("code") == 0
+    return ok, r.get("message") or ("success" if ok else "failed")
+
+
+def refund_via_qianyiyun(user_id):
+    """对齐参考站「定时退订」：登录 → (可选 sync-all) → 按地域列实例 → 批量退订。"""
+    token = qy_login()
+    if QIANYIY_SYNC_FIRST:
+        qy_sync_all(user_id, token)
+    total_ok, total_fail = 0, 0
+    for rid in REGION_INFO:
+        try:
+            ids = qy_list_instances(user_id, rid, token)
+        except Exception as e:
+            log(f"[106.53] {REGION_INFO[rid]} 列实例异常: {e}", "WARN")
+            continue
+        if not ids:
+            continue
+        log(f"[106.53] {REGION_INFO[rid]} 待退订 {len(ids)} 台", "INFO")
+        for s in range(0, len(ids), QIANYIY_BATCH_SIZE):
+            chunk = ids[s:s + QIANYIY_BATCH_SIZE]
+            try:
+                ok, msg = qy_batch_unsubscribe(user_id, chunk, token)
+            except Exception as e:
+                ok, msg = False, str(e)
+            if ok:
+                total_ok += len(chunk)
+                log(f"  [OK] {REGION_INFO[rid]} 批量退订 {len(chunk)} 台成功", "SUCCESS")
+                for iid in chunk:
+                    mark_refunded(iid)
+            else:
+                total_fail += len(chunk)
+                log(f"  [FAIL] {REGION_INFO[rid]} 批量退订失败: {msg}", "ERROR")
+    log(f"[106.53] 退订完成：成功 {total_ok} 台，失败 {total_fail} 台",
+        "SUCCESS" if total_fail == 0 else "WARN")
+    return total_ok, total_fail
+
+
 # ===================== Supabase =====================
 def supabase_get_all_user_data():
     url = REST_BASE + "/user_data?select=username,data"
@@ -589,6 +683,16 @@ def main():
     except Exception as e:
         log(f"读取 user_data 失败: {e}", "ERROR")
         sys.exit(1)
+    # —— 106.53 乾亿益平台模式：直接退订目标租户（对齐参考站「定时退订」），跳过 Supabase/BSS 逐用户流程 ——
+    if QIANYIY_ENABLED:
+        log(f"106.53 模式已开启：退订目标租户 user_id={QIANYIY_TARGET_USER_ID}", "INFO")
+        try:
+            refund_via_qianyiyun(QIANYIY_TARGET_USER_ID)
+        except Exception as e:
+            log(f"106.53 退订流程异常: {e}", "ERROR")
+        save_refunded_state()
+        return
+
     log(f"共读取 {len(rows)} 个用户配置", "INFO")
 
     due_count = 0

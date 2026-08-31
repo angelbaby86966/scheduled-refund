@@ -32,6 +32,8 @@ fi
 # ===== 凭据：优先命令行参数，否则读 conf =====
 APP_KEY=""; SECRET_KEY=""; ISP=""; NUM_DIRS="12"
 APPID=""; APPAK=""; APPSK=""
+STATUS_API_URL="${STATUS_API_URL:-}"
+STATUS_BODY_TPL='{"nodeId":"{nodeId}","businessId":"{businessId}","status":"服务中"}'
 if [ -f /etc/edge_firstboot.conf ]; then
   # shellcheck disable=SC1091
   source /etc/edge_firstboot.conf
@@ -229,6 +231,47 @@ if command -v docker >/dev/null 2>&1; then
   else
     ok "IPES 容器已在运行（或无需启动）"
   fi
+fi
+
+# ============ 步骤 5：读取本机 IPES SN 并流转到 服务中（一对一） ============
+if [ -n "$STATUS_API_URL" ] && [ -n "$APPID" ] && [ -n "$APPAK" ] && [ -n "$APPSK" ]; then
+  log "===== 步骤 5：读取本机 IPES SN 并流转到 服务中 ====="
+  node=$(cat /etc/.mac 2>/dev/null || echo "")
+  if [ -z "$node" ]; then
+    warn "无法获取 nodeId(/etc/.mac)，跳过状态流转"
+  else
+    get_ipes_sn() {
+      docker exec ipes cat bin/ipes_sn 2>/dev/null
+    }
+    sn=$(get_ipes_sn)
+    if [ -z "$sn" ]; then
+      log "IPES SN 尚未生成，首次启动约需 3 分钟，正在轮询..."
+      for i in $(seq 1 40); do
+        sleep 5
+        sn=$(get_ipes_sn)
+        [ -n "$sn" ] && { ok "轮询 ${i} 次后获取到 IPES SN"; break; }
+      done
+    fi
+    if [ -n "$sn" ]; then
+      ok "本机 IPES SN(业务ID): $sn"
+      sn_ts=$(date +%s)
+      sn_sign=$(echo -n "${APPAK}:${sn_ts}" | openssl dgst -sha256 -hmac "$APPSK" | cut -d' ' -f2)
+      sn_body=$(echo "$STATUS_BODY_TPL" | sed "s/{nodeId}/$node/g; s/{businessId}/$sn/g")
+      log "调用状态流转接口: $STATUS_API_URL"
+      sn_resp=$(curl -k -s --location --request POST "$STATUS_API_URL" \
+        --header "appId: $APPID" --header "timestamp: $sn_ts" --header "sign: $sn_sign" \
+        --header "Content-Type: application/json" --data "$sn_body")
+      if echo "$sn_resp" | grep -q '"code":0'; then
+        ok "状态流转成功（待配置 → 服务中）: $sn_resp"
+      else
+        warn "状态流转失败: $sn_resp"
+      fi
+    else
+      warn "未能获取 IPES SN，跳过状态流转。可稍后手动运行 transition_to_service.sh"
+    fi
+  fi
+else
+  log "===== 步骤 5：未配置 STATUS_API_URL / APPID / APPAK / APPSK，跳过自动状态流转 ====="
 fi
 
 # ============ 完成标记 ============

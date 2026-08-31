@@ -67,6 +67,7 @@ INSTALLER_DIR="/opt/zyy_install"
 # ===== 参数解析 =====
 TOKEN=""; APP_KEY=""; SECRET_KEY=""; ISP=""; NUM_DIRS="12"
 APPID=""; APPAK=""; APPSK=""
+STATUS_API_URL="${STATUS_API_URL:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token)    TOKEN="$2"; shift 2;;
@@ -77,8 +78,9 @@ while [[ $# -gt 0 ]]; do
     --appid)    APPID="$2"; shift 2;;
     --appak)    APPAK="$2"; shift 2;;
     --appsk)    APPSK="$2"; shift 2;;
+    --status-api-url) STATUS_API_URL="$2"; shift 2;;
     -h|--help)
-      echo "用法: bash ipes_auto_deploy.sh --token <JWT> [--ak <ak> --sk <sk> --isp 电信 --num-dirs 12 --appid <appid> --appak <ak> --appsk <sk>]"
+      echo "用法: bash ipes_auto_deploy.sh --token <JWT> [--ak <ak> --sk <sk> --isp 电信 --num-dirs 12 --appid <appid> --appak <ak> --appsk <sk> --status-api-url <url>]"
       exit 0;;
     *) echo "❌ 未知参数: $1"; exit 1;;
   esac
@@ -309,6 +311,48 @@ if [ $DO_BIND -eq 1 ]; then
   fi
 else
   log "===== 步骤 6/6：绑定业务ID（已跳过，未提供绑定凭据） ====="
+fi
+
+# ============ 步骤 7：IPES SN 上报 + 状态流转到 服务中（一对一） ============
+if [ $DO_BIND -eq 1 ] && [ -n "$STATUS_API_URL" ]; then
+  log "===== 步骤 7/7：读取本机 IPES SN 并流转到 服务中 ====="
+  node=$(cat /etc/.mac 2>/dev/null || echo "")
+  if [ -z "$node" ]; then
+    warn "无法获取 nodeId(/etc/.mac)，跳过状态流转"
+  else
+    get_ipes_sn() {
+      docker exec ipes cat bin/ipes_sn 2>/dev/null
+    }
+    sn=$(get_ipes_sn)
+    if [ -z "$sn" ]; then
+      log "IPES SN 尚未生成，首次启动约需 3 分钟，正在轮询..."
+      for i in $(seq 1 40); do
+        sleep 5
+        sn=$(get_ipes_sn)
+        [ -n "$sn" ] && { ok "轮询 ${i} 次后获取到 IPES SN"; break; }
+      done
+    fi
+    if [ -n "$sn" ]; then
+      ok "本机 IPES SN(业务ID): $sn"
+      ts=$(date +%s)
+      sign_str="${APPAK}:${ts}"
+      sn_sign=$(echo -n "$sign_str" | openssl dgst -sha256 -hmac "$APPSK" | cut -d' ' -f2)
+      sn_body="{\"nodeId\":\"$node\",\"businessId\":\"$sn\",\"status\":\"服务中\"}"
+      log "调用状态流转接口: $STATUS_API_URL"
+      sn_resp=$(curl -k -s --location --request POST "$STATUS_API_URL" \
+        --header "appId: $APPID" --header "timestamp: $ts" --header "sign: $sn_sign" \
+        --header "Content-Type: application/json" --data "$sn_body")
+      if echo "$sn_resp" | grep -q '"code":0'; then
+        ok "状态流转成功（待配置 → 服务中）: $sn_resp"
+      else
+        warn "状态流转失败: $sn_resp"
+      fi
+    else
+      warn "未能获取 IPES SN，跳过状态流转。可稍后手动运行 transition_to_service.sh"
+    fi
+  fi
+elif [ $DO_BIND -eq 1 ]; then
+  log "===== 步骤 7/7：未提供 --status-api-url，跳过自动状态流转 ====="
 fi
 
 log "✅ 全部完成。请到控制台确认节点已上线、已注册并绑定业务。"

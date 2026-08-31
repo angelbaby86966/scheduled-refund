@@ -483,6 +483,11 @@
     return { ak_id: p.ak_id, ak_secret: p.ak_secret, name: p.name };
   }
 
+  function __runCommandLog(msg, level) {
+    if (typeof log === 'function') log(msg, level);
+    else console.log('[runCommand] ' + msg);
+  }
+
   window.AliyunClient = {
     setCredentials: setCredentials,
     hasCredentials: hasCredentials,
@@ -573,11 +578,6 @@
       var ids = Array.isArray(instanceIds) ? instanceIds : [instanceIds];
       if (ids.length === 0) throw new Error('实例列表为空');
       if (ids.length > 100) throw new Error('SWAS InvokeCommand 单次最多 100 台，请分批调用');
-      function doLog(msg, level) {
-        if (typeof log === 'function') log(msg, level);
-        else console.log('[runCommand] ' + msg);
-      }
-
       // SWAS InvokeCommand 必须传 CommandId，不能直接用 CommandContent。先创建命令模板。
       var createParams = {
         name: opts.name || ('custom-' + Date.now()),
@@ -590,7 +590,7 @@
       var cmdRes = await this.createCommand(regionId, createParams);
       var commandId = cmdRes && cmdRes.CommandId;
       if (!commandId) throw new Error('CreateCommand 未返回 CommandId');
-      doLog('📝 创建临时命令模板 CommandId=' + commandId, 'info');
+      __runCommandLog('📝 创建临时命令模板 CommandId=' + commandId, 'info');
 
       try {
         var invokeRes = await this.invokeCommand(regionId, commandId, ids);
@@ -695,17 +695,17 @@
       for (var attempt = 1; attempt <= retries; attempt++) {
         try {
           await this.deleteCommand(regionId, commandId);
-          doLog('🗑️ 已删除临时命令模板 ' + commandId + '（第 ' + attempt + ' 次成功）', 'info');
+          __runCommandLog('🗑️ 已删除临时命令模板 ' + commandId + '（第 ' + attempt + ' 次成功）', 'info');
           return true;
         } catch (delErr) {
           lastErr = delErr;
-          doLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + (delErr.message || delErr), 'warn');
+          __runCommandLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + (delErr.message || delErr), 'warn');
           if (attempt < retries) {
             await new Promise(function(r) { setTimeout(r, 800 * attempt); });
           }
         }
       }
-      doLog('❌ 删除临时命令模板 ' + commandId + ' 经过 ' + retries + ' 次重试仍失败，模板可能残留于命令助手，请手动清理', 'error');
+      __runCommandLog('❌ 删除临时命令模板 ' + commandId + ' 经过 ' + retries + ' 次重试仍失败，模板可能残留于命令助手，请手动清理', 'error');
       return false;
     },
 

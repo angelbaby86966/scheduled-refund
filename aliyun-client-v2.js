@@ -566,7 +566,7 @@
 
     /** 调用命令 */
     async invokeCommand(regionId, commandId, instanceIds) {
-      const params = { CommandId: commandId };
+      const params = { RegionId: regionId, CommandId: commandId };
       params.InstanceIds = JSON.stringify(instanceIds);
       return callAliyunApi(regionId, 'InvokeCommand', params);
     },
@@ -672,6 +672,7 @@
     /** 创建命令模板 */
     async createCommand(regionId, params) {
       var apiParams = {
+        RegionId: regionId,
         Name: params.name,
         Type: params.type || 'RunShellScript',
         CommandContent: params.content,
@@ -684,7 +685,7 @@
 
     /** 删除命令模板 */
     async deleteCommand(regionId, commandId) {
-      return callAliyunApi(regionId, 'DeleteCommand', { CommandId: commandId });
+      return callAliyunApi(regionId, 'DeleteCommand', { RegionId: regionId, CommandId: commandId });
     },
 
     /** 删除临时命令模板（带重试兜底）：自定义命令执行完必须清掉，避免残留到命令助手。

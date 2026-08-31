@@ -301,10 +301,59 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyun(regionEndpoint(regionId||"cn-hangzhou"),"ListPlans",{RegionId:regionId||"cn-hangzhou"},ak_id,ak_secret);
         return json({success:true,data});
       }
-      case "listImages": {
-        const {ak_id,ak_secret,regionId} = p;
+      case "listImages":
+      case "ListImages": {
+        const {ak_id,ak_secret,params} = p;
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
-        const data = await callAliyun(regionEndpoint(regionId||"cn-hangzhou"),"ListImages",{RegionId:regionId||"cn-hangzhou"},ak_id,ak_secret);
+        const regionId = params?.RegionId || p.regionId || "cn-hangzhou";
+        const queryParams: any = {RegionId: regionId};
+        if (params?.PageSize) queryParams.PageSize = params.PageSize;
+        if (params?.PageNumber) queryParams.PageNumber = params.PageNumber;
+        const data = await callAliyun(regionEndpoint(regionId),"ListImages",queryParams,ak_id,ak_secret);
+        return json({success:true,data});
+      }
+      case "CreateCustomImage": {
+        const {ak_id,ak_secret,params} = p;
+        if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
+        if (!params?.RegionId || !params?.InstanceId || !params?.ImageName) {
+          return json({error:"缺少 params.RegionId/InstanceId/ImageName"},400);
+        }
+        const data = await callAliyun(regionEndpoint(params.RegionId),"CreateCustomImage",{
+          RegionId: params.RegionId,
+          InstanceId: params.InstanceId,
+          ImageName: params.ImageName,
+        },ak_id,ak_secret);
+        return json({success:true,data});
+      }
+      case "CreateInstances": {
+        const {ak_id,ak_secret,params} = p;
+        if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
+        if (!params?.RegionId || !params?.ImageId || !params?.PlanId) {
+          return json({error:"缺少 params.RegionId/ImageId/PlanId"},400);
+        }
+        const apiParams: any = {
+          RegionId: params.RegionId,
+          ImageId: params.ImageId,
+          PlanId: params.PlanId,
+          Amount: params.Amount ?? 1,
+          Period: params.Period ?? 1,
+          PeriodUnit: params.PeriodUnit || "Month",
+          AutoPay: params.AutoPay === true || params.AutoPay === "true",
+        };
+        if (params.ClientToken) apiParams.ClientToken = params.ClientToken;
+        const data = await callAliyun(regionEndpoint(params.RegionId),"CreateInstances",apiParams,ak_id,ak_secret);
+        return json({success:true,data});
+      }
+      case "DeleteCustomImage": {
+        const {ak_id,ak_secret,params} = p;
+        if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
+        if (!params?.RegionId || !params?.ImageId) {
+          return json({error:"缺少 params.RegionId/ImageId"},400);
+        }
+        const data = await callAliyun(regionEndpoint(params.RegionId),"DeleteCustomImage",{
+          RegionId: params.RegionId,
+          ImageId: params.ImageId,
+        },ak_id,ak_secret);
         return json({success:true,data});
       }
       case "ListInstances": case "listInstances": {

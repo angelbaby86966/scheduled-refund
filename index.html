@@ -112,7 +112,7 @@
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')">⏰ 定时退订</button>
             <button class="tab" data-tab="order" onclick="switchTab('order')">🛒 批量下单</button>
             <button class="tab" data-tab="quota" onclick="switchTab('quota')">📈 批量提额</button>
-            <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')">🖼️ 镜像克隆</button>
+            <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')">镜像克隆</button>
           </div>
 
           <!-- 节点ID提取面板 -->
@@ -546,7 +546,7 @@
           <div class="tab-content admin-only-panel" id="tab-imageclone">
             <div class="card">
               <div class="card-header">
-                <h3>🖼️ 黄金镜像克隆部署（PCDN 缓存节点）</h3>
+                <h3>黄金镜像克隆部署（PCDN 缓存节点）</h3>
                 <p class="card-desc">把一台已配好 PCDN 缓存的机器打成<b>自定义镜像</b>，再基于镜像批量开通新云主机，开机即缓存节点。仅管理员 zhangruiyao 可用。</p>
               </div>
               <div class="card-body">
@@ -555,51 +555,19 @@
                   <select id="icRegion" class="input" style="max-width:320px;"></select>
                 </div>
 
-                <!-- ⑤ 一键全自动部署 -->
-                <fieldset style="border:2px solid #1677ff;border-radius:8px;padding:14px;margin-bottom:16px;background:#f0f5ff;">
-                  <legend style="font-weight:700;color:#1677ff;padding:0 6px;">🤖 一键全自动部署（推荐）</legend>
-                  <p style="font-size:12px;color:#555;margin:0 0 10px;">只需填源实例ID和数量，系统自动：创建镜像 → 轮询等镜像就绪 → 自动选中 → 批量开通。全程写进下方「操作日志」。</p>
-                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;">
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">源实例ID（装好 PCDN 的黄金主机）</label>
-                      <input type="text" id="icAutoSrcInstance" class="input" placeholder="例如 swas-abc123" />
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">套餐 PlanId</label>
-                      <input type="text" id="icAutoPlanId" class="input" placeholder="默认锁定套餐" />
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">开通数量（1~100）</label>
-                      <input type="number" id="icAutoAmount" class="input" value="1" min="1" max="100" />
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">购买时长（月）</label>
-                      <input type="number" id="icAutoPeriod" class="input" value="1" min="1" max="60" />
-                    </div>
-                    <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                      <input type="checkbox" id="icAutoPay" />
-                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（勾选才扣费，默认待支付订单）</label>
-                    </div>
-                    <button class="btn btn-primary" style="font-size:15px;padding:10px 24px;" onclick="icAutoDeploy()">🚀 一键全自动部署</button>
-                  </div>
-                  <div id="icAutoProgress" style="margin-top:12px;font-size:13px;"></div>
-                  <div id="icAutoStatus" style="margin-top:8px;font-size:13px;color:#666;"></div>
-                  <div id="icAutoResult" style="margin-top:8px;font-size:13px;"></div>
-                </fieldset>
-
                 <!-- ① 打镜像 -->
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">① 从实例创建黄金镜像（CreateCustomImage）</legend>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
                     <div class="form-group" style="margin:0;flex:1;min-width:200px;">
-                      <label style="font-size:12px;">源实例ID（已装好 PCDN 缓存的机器）</label>
+                      <label style="font-size:12px;">源实例ID (已装好 PCDN 缓存的机器)</label>
                       <input type="text" id="icSrcInstance" class="input" placeholder="例如 swas-abc123" />
                     </div>
                     <div class="form-group" style="margin:0;flex:1;min-width:200px;">
                       <label style="font-size:12px;">镜像名称</label>
                       <input type="text" id="icImageName" class="input" placeholder="例如 pcdn-golden-20260818" />
                     </div>
-                    <button class="btn btn-primary" onclick="icCreateImage()">📸 创建镜像</button>
+                    <button class="btn btn-primary" onclick="icCreateImage()">创建镜像</button>
                   </div>
                   <div id="icCreateImgStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
@@ -608,7 +576,7 @@
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">② 选择自定义镜像（ListImages）</legend>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-                    <button class="btn btn-sm" onclick="icLoadImages()">🔄 加载我的自定义镜像</button>
+                    <button class="btn btn-sm" onclick="icLoadImages()">加载我的自定义镜像</button>
                     <select id="icImageSelect" class="input" style="flex:1;min-width:240px;"></select>
                   </div>
                   <div id="icImagesList" style="margin-top:10px;font-size:13px;color:#666;"></div>
@@ -617,25 +585,25 @@
                 <!-- ③ 开通 -->
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">③ 基于镜像开通新云主机（CreateInstances）</legend>
-                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;">
-                    <div class="form-group" style="margin:0;">
+                  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
+                    <div class="form-group" style="margin:0;flex:1;min-width:160px;">
                       <label style="font-size:12px;">套餐 PlanId</label>
                       <input type="text" id="icPlanId" class="input" placeholder="默认锁定套餐" />
                     </div>
-                    <div class="form-group" style="margin:0;">
+                    <div class="form-group" style="margin:0;flex:1;min-width:140px;">
                       <label style="font-size:12px;">开通数量（1~100）</label>
                       <input type="number" id="icAmount" class="input" value="1" min="1" max="100" />
                     </div>
-                    <div class="form-group" style="margin:0;">
+                    <div class="form-group" style="margin:0;flex:1;min-width:140px;">
                       <label style="font-size:12px;">购买时长（月）</label>
                       <input type="number" id="icPeriod" class="input" value="1" min="1" max="60" />
                     </div>
                     <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                      <input type="checkbox" id="icLaunchAutoPay" />
-                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（取消则生成待支付订单，默认待支付）</label>
+                      <input type="checkbox" id="icLaunchAutoPay" checked />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（取消则生成待支付订单）</label>
                     </div>
-                    <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icLaunchFromImage()">🚀 开通</button>
                   </div>
+                  <button class="btn btn-primary" style="background:#52c41a;border:none;margin-top:12px;width:100%;" onclick="icLaunchFromImage()">开通</button>
                   <div id="icLaunchStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                   <div id="icLaunchResult" style="margin-top:8px;font-size:13px;"></div>
                 </fieldset>
@@ -645,63 +613,51 @@
                   <legend style="font-weight:600;color:#389e0d;padding:0 6px;">④ 黄金主机标准化脚本（打镜像前必做）</legend>
                   <p style="font-size:12px;color:#555;margin:0 0 10px;">先在黄金主机上按此顺序操作，再执行上方「① 创建镜像」：<br>
                   1) 把首启自举脚本部署到黄金主机并 <code>enable</code> → 2) 跑去个性化脚本 → 3) 打自定义镜像。新机基于镜像开机即自动首启。</p>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('prep')">下载 去个性化脚本</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-sh')">下载 首启脚本 .sh</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-svc')">下载 首启服务 .service</button>
+                  </div>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('prep')">📥 下载 去个性化脚本</button>
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-sh')">📥 下载 首启脚本 .sh</button>
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-svc')">📥 下载 首启服务 .service</button>
+                    <button class="btn btn-sm" style="background:#13c2c2;border:none;color:#fff;" onclick="icRunStandardizationOnSource()">一键执行标准化（在上方源实例ID上运行）</button>
+                    <button class="btn btn-sm" style="background:#fa8c16;border:none;color:#fff;" onclick="icRunFullAutoFlow()">一键全流程（标准化→打镜像→开通，全自动）</button>
                   </div>
+                  <div id="icStdStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
 
-                <!-- ⑥ 空白主机一键部署链接 -->
-                <fieldset style="border:1px solid #722ed1;border-radius:8px;padding:14px;margin-bottom:16px;background:#f9f0ff;">
-                  <legend style="font-weight:600;color:#722ed1;padding:0 6px;">⑥ 空白主机一键部署链接（给团队直接跑）</legend>
-                  <p style="font-size:12px;color:#555;margin:0 0 10px;">在全新 CentOS 7.9 云主机上用 root 执行下方命令，即自动完成全流程：<b>装 Docker → 部署 IPES → 预热调优 → 装 ZyCloud Agent → 注册设备 → 绑定业务ID</b>。填写下方 Token 与凭据后命令实时生成，<b>过期/变更后在此更新重跑（链接不变）</b>。</p>
-
-                  <div class="form-group" style="margin:0 0 10px;">
-                    <label style="font-size:12px;">IPES Token（JWT，自带过期时间）— 必填</label>
-                    <input type="text" id="icDeployToken" class="input" style="width:100%;" value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVVUlEIjoiMzhjZTQ2YTctZDNkMi00YzVlLWJkNTYtM2I3YzFlMDNkNmYyIiwiSUQiOjQwLCJVc2VybmFtZSI6IjE3Njk1OTM3NzU2IiwiTmlja05hbWUiOiLlvKDnnb8iLCJBdXRob3JpdHlJZCI6MjEsIlVzZXJUeXBlIjoxLCJSZWxhdGVkUGFydHlJRCI6MCwiWnlVaWRzIjoiIiwiQnVmZmVyVGltZSI6ODY0MDAsImlzcyI6Inp5eSIsImF1ZCI6WyJHVkEiXSwiZXhwIjoxNzg3NzE0NTcwLCJuYmYiOjE3ODYwMTE3Mjd9.f1mhluA8snL_OQRvOsgamsqUxs5tphpVdumRnfucnC8" oninput="icRenderDeployCmd()" />
-                  </div>
-
-                  <div style="border:1px dashed #b37feb;border-radius:6px;padding:10px;margin:0 0 10px;background:#fff;">
-                    <div style="font-size:12px;font-weight:600;color:#722ed1;margin-bottom:6px;">① 注册设备凭据（api.zhouyi.top）</div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                      <input type="text" id="icAk" class="input" style="flex:1;min-width:150px;" placeholder="appKey" oninput="icRenderDeployCmd()" />
-                      <input type="text" id="icSk" class="input" style="flex:1;min-width:150px;" placeholder="secretKey" oninput="icRenderDeployCmd()" />
-                      <input type="text" id="icIsp" class="input" style="width:120px;" placeholder="运营商 如 电信" oninput="icRenderDeployCmd()" />
-                      <input type="text" id="icNumDirs" class="input" style="width:90px;" placeholder="num-dirs" value="12" oninput="icRenderDeployCmd()" />
-                    </div>
-                  </div>
-
-                  <div style="border:1px dashed #b37feb;border-radius:6px;padding:10px;margin:0 0 10px;background:#fff;">
-                    <div style="font-size:12px;font-weight:600;color:#722ed1;margin-bottom:6px;">② 绑定业务ID凭据（admin.zhouyi.top）</div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                      <input type="text" id="icAppid" class="input" style="flex:1;min-width:140px;" placeholder="appid" oninput="icRenderDeployCmd()" />
-                      <input type="text" id="icAppak" class="input" style="flex:1;min-width:140px;" placeholder="ak" oninput="icRenderDeployCmd()" />
-                      <input type="text" id="icAppsk" class="input" style="flex:1;min-width:140px;" placeholder="sk" oninput="icRenderDeployCmd()" />
-                    </div>
-                  </div>
-
-                  <div style="display:flex;gap:10px;align-items:flex-start;">
-                    <pre id="icDeployCmd" style="flex:1;margin:0;background:#1e1e1e;color:#7fff7f;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;"></pre>
-                    <button class="btn btn-sm" style="background:#722ed1;border:none;color:#fff;white-space:nowrap;" onclick="icCopyText('icDeployCmd')">📋 复制命令</button>
-                  </div>
-                  <p style="font-size:11px;color:#999;margin:8px 0 0;">默认走 GitHub Pages 主链接；若拉取慢，可手动把 URL 前缀换成 <code>https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/gh-pages/</code>。仅填 Token 时只跑部署→Agent→预热（注册/绑定因缺凭据自动跳过）。</p>
-                </fieldset>
-
-                <!-- ⑦ 半黄金镜像（批量克隆每台独立注册绑定） -->
+                <!-- ⑤ 绑定舟翼云 -->
                 <fieldset style="border:1px solid #fa8c16;border-radius:8px;padding:14px;margin-bottom:16px;background:#fff7e6;">
-                  <legend style="font-weight:600;color:#fa8c16;padding:0 6px;">⑦ 半黄金镜像 · 批量克隆（每台独立注册绑定）</legend>
-                  <p style="font-size:12px;color:#555;margin:0 0 10px;">
-                    解决"整镜像克隆导致多台共用同一设备ID、注册绑定冲突"的问题。两步：<br>
-                    ① <b>源机预装</b>：在「已装好环境的空白 CentOS 7.9」上跑下面生成的命令（复用上方 Token+凭据），它会装 Docker+IPES+开机自启，但<b>不装 Agent/不注册</b>，并把凭据写进私有镜像；<br>
-                    ② <b>打镜像 + 克隆</b>：用该实例创建自定义镜像，克隆出的新机<b>首次启动自动</b>装 Agent（全新设备ID）→ 注册 → 绑定（每台独立）。<br>
-                    <span style="color:#fa541c;">注意：上面 ⑥ 区的 Token 与两组凭据会同时用于本命令，请确保已填写完整。</span>
-                  </p>
-                  <div style="display:flex;gap:10px;align-items:flex-start;">
-                    <pre id="icPrepareCmd" style="flex:1;margin:0;background:#1e1e1e;color:#ffd666;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;"></pre>
-                    <button class="btn btn-sm" style="background:#fa8c16;border:none;color:#fff;white-space:nowrap;" onclick="icCopyText('icPrepareCmd')">📋 复制命令</button>
+                  <legend style="font-weight:600;color:#fa8c16;padding:0 6px;">⑤ 绑定舟翼云（开通后执行，注册节点到小程序）</legend>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">自定义镜像只含 IPES 缓存，不含舟翼云绑定。开完机器后在这里填平台的 appKey / secretKey / 运营商，选实例点「绑定」即可把节点注册到小程序。<br>
+                  建议先选 1 台点绑定验证：登录该机看 <code>/var/log/zycloud_agent_setup.log</code> 末尾「注册成功」、小程序出现新设备，再批量绑其余。凭证不下发到镜像，只在本会话运行时使用。</p>
+                  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
+                    <div class="form-group" style="margin:0;flex:1;min-width:180px;">
+                      <label style="font-size:12px;">舟翼云 appKey (--ak)</label>
+                      <input type="text" id="icBindAk" class="input" placeholder="例如 06d78b19bd0d9fc0aa300c6d" />
+                    </div>
+                    <div class="form-group" style="margin:0;flex:1;min-width:180px;">
+                      <label style="font-size:12px;">舟翼云 secretKey (--sk)</label>
+                      <input type="text" id="icBindSk" class="input" placeholder="secretKey" />
+                    </div>
+                    <div class="form-group" style="margin:0;min-width:120px;">
+                      <label style="font-size:12px;">运营商 (--isp)</label>
+                      <select id="icBindIsp" class="input">
+                        <option value="电信" selected>电信</option>
+                        <option value="联通">联通</option>
+                        <option value="移动">移动</option>
+                      </select>
+                    </div>
                   </div>
-                  <p style="font-size:11px;color:#999;margin:8px 0 0;">新机首次启动的注册/绑定由 systemd 服务 <code>edge-firstboot.service</code> 自动完成（脚本已内置，无需手动干预）。</p>
+                  <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                    <button class="btn btn-sm" style="background:#1677ff;border:none;color:#fff;" onclick="icLoadInstancesForBind()">加载「当前地域」实例</button>
+                    <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                      <input type="checkbox" id="icBindClearMac" checked />
+                      绑定前清除 /etc/.mac（镜像若带旧设备身份，先清掉让每台重新生成唯一ID，防重复）
+                    </label>
+                  </div>
+                  <div id="icBindInstanceList" style="margin-top:10px;font-size:13px;"></div>
+                  <button class="btn btn-primary" style="background:#fa8c16;border:none;margin-top:12px;width:100%;" onclick="icBindSelectedToZhouyi()">绑定选中实例到舟翼云</button>
+                  <div id="icBindStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
 
                 <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">

@@ -3,7 +3,8 @@
  * 仅管理员 zhangruiyao 可用：UI 通过 admin-only-tab / admin-only-panel 隐藏，
  * 这里再做一次函数级权限兜底。
  * 依赖：AliyunClient.callCentralApi(action, params)（走 aliyun-proxy 代理，避免浏览器 CORS）
- *       —— ② 加载镜像用 callCentralApi('ListImages', {ImageType:'Custom'}) 仅取自定义镜像，区别于批量下单的 listImages（返回官方系统镜像）
+ *       AliyunClient.runCommandOnInstance(region, instanceIds, opts)（Cloud Assistant）
+ *       AliyunClient.listInstances(region, options)
  *       REGION_INFO / LOCKED_PLAN_ID（app.js 全局）
  * ========================================================================= */
 (function () {
@@ -46,13 +47,8 @@
     if (plan && !plan.value && typeof LOCKED_PLAN_ID !== 'undefined' && LOCKED_PLAN_ID) {
       plan.value = LOCKED_PLAN_ID;
     }
-    var autoPlan = document.getElementById('icAutoPlanId');
-    if (autoPlan && !autoPlan.value && typeof LOCKED_PLAN_ID !== 'undefined' && LOCKED_PLAN_ID) {
-      autoPlan.value = LOCKED_PLAN_ID;
-    }
     var period = document.getElementById('icPeriod');
     if (period && !period.value) period.value = '1';
-    icRenderDeployCmd();
   }
 
   // ① 从实例创建自定义镜像
@@ -103,13 +99,10 @@
   // 过滤出本账号自定义镜像（前端过滤，因为 SWAS ListImages 不支持 ImageType 请求参数）
   function icFilterCustomImages(imgs) {
     return imgs.filter(function (im) {
-      // 优先按 ImageType=Custom 过滤
       var t = String(im.ImageType || '').toLowerCase();
       if (t === 'custom') return true;
       if (t === 'system') return false;
-      // 兜底：IsSelf / Self
       if (im.IsSelf === true || im.IsSelf === 'true' || im.Self === true || im.Self === 'true') return true;
-      // 兜底2：本工具生成的镜像名以 golden- 开头
       var n = String(im.ImageName || '');
       if (n.indexOf('golden-') === 0) return true;
       return false;
@@ -124,9 +117,6 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      // 走通用代理直调 SWAS ListImages。注意：ImageType 不是有效请求参数，
-      // 传它会报 "The specified parameter ImageType is invalid."
-      // 因此先拿全量镜像，再在前端按 ImageType/IsSelf/镜像名过滤出本账号自定义镜像。
       var r = await AliyunClient.callCentralApi('ListImages', {
         RegionId: region,
         PageSize: 100
@@ -146,111 +136,6 @@
     } catch (e) {
       box.innerHTML = '❌ 加载失败: ' + e.message;
       icLog('[镜像克隆] 加载镜像失败: ' + e.message, 'error');
-    }
-  }
-
-  // ⑤ 一键全自动部署：创建镜像 → 轮询 Available → 自动选中 → 开通 → 返回实例ID
-  async function icAutoDeploy() {
-    if (!icGuard()) return;
-    var region = icGetRegion();
-    var srcInstance = (document.getElementById('icAutoSrcInstance').value || '').trim();
-    var amount = parseInt(document.getElementById('icAutoAmount').value, 10) || 1;
-    var planId = (document.getElementById('icAutoPlanId').value || '').trim();
-    var period = parseInt(document.getElementById('icAutoPeriod').value, 10) || 1;
-    var autoPay = document.getElementById('icAutoPay').checked;
-    if (!srcInstance) { alert('请填写源实例ID'); return; }
-    if (!planId) { alert('请填写套餐 PlanId'); return; }
-    if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
-
-    // 自动生成镜像名：golden-{地域}-{日期}-{随机}
-    var today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    var imageName = 'golden-' + region + '-' + today + '-' + Math.random().toString(36).substring(2, 6);
-
-    var statusDiv = document.getElementById('icAutoStatus');
-    var progressDiv = document.getElementById('icAutoProgress');
-    var resultDiv = document.getElementById('icAutoResult');
-
-    function setStep(n, msg) {
-      progressDiv.innerHTML = '<div style="font-size:16px;font-weight:600;color:#1677ff;margin-bottom:4px;">第 ' + n + '/5 步</div>' +
-        '<div style="color:#333;">' + msg + '</div>';
-      icLog('[全自动] 第 ' + n + '/5 步：' + msg, 'info');
-    }
-
-    statusDiv.innerHTML = '⏳ 全自动部署已开始，请等待...';
-    progressDiv.innerHTML = '';
-    resultDiv.innerHTML = '';
-
-    try {
-      // Step 1: 创建镜像
-      setStep(1, '从实例 ' + srcInstance + ' 创建自定义镜像「' + imageName + '」...');
-      var createRes = await AliyunClient.callCentralApi('CreateCustomImage', {
-        RegionId: region,
-        InstanceId: srcInstance,
-        ImageName: imageName
-      });
-      var imageId = createRes.ImageId || createRes.imageId;
-      if (!imageId) throw new Error('创建镜像未返回 ImageId，响应：' + JSON.stringify(createRes));
-      icLog('[全自动] 镜像已提交，ImageId=' + imageId + '，镜像名=' + imageName, 'success');
-
-      // Step 2: 轮询镜像 Available
-      setStep(2, '等待镜像 ' + imageId + ' 状态变为 Available（每10秒检查，最多10分钟）...');
-      var foundImage = null;
-      var imageAvailable = false;
-      for (var i = 0; i < 60; i++) {
-        await icSleep(10000);
-        var listRes = await AliyunClient.callCentralApi('ListImages', {
-          RegionId: region, PageSize: 100
-        });
-        var imgs = icFilterCustomImages(icParseImages(listRes));
-        for (var k = 0; k < imgs.length; k++) {
-          if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
-        }
-        if (foundImage) {
-          var st = foundImage.Status || '未知';
-          icLog('[全自动] 第 ' + (i + 1) + ' 次检查，镜像状态=' + st, 'info');
-          if (st === 'Available') { imageAvailable = true; break; }
-        } else {
-          icLog('[全自动] 第 ' + (i + 1) + ' 次检查，镜像尚未入库...', 'info');
-        }
-      }
-      if (!imageAvailable) {
-        throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
-      }
-      icLog('[全自动] 镜像已就绪 Available，ImageId=' + imageId, 'success');
-
-      // Step 3: 自动选中新镜像
-      setStep(3, '已自动选中镜像 ' + imageId + '，准备开通 ' + amount + ' 台...');
-      var sel = document.getElementById('icImageSelect');
-      if (sel) {
-        sel.innerHTML = '<option value="' + imageId + '">' + imageName + ' (' + imageId + ') [Available]</option>';
-        sel.value = imageId;
-      }
-      await icSleep(500);
-
-      // Step 4: 开通实例
-      setStep(4, '基于镜像 ' + imageId + ' 调用 CreateInstances 开通 ' + amount + ' 台（' + region + '）...');
-      var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
-        RegionId: region,
-        ImageId: imageId,
-        PlanId: planId,
-        Amount: amount,
-        Period: period,
-        PeriodUnit: 'Month',
-        AutoPay: autoPay,
-        ClientToken: 'wb-auto-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
-      });
-      var ids = icParseInstanceIds(launchRes);
-      icLog('[全自动] 开通请求已提交，返回实例数=' + ids.length + (autoPay ? '（自动支付）' : '（待支付订单）'), 'success');
-
-      // Step 5: 完成
-      setStep(5, '完成。新实例ID：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）'));
-      statusDiv.innerHTML = '✅ 全自动部署完成，共 ' + ids.length + ' 台。';
-      resultDiv.innerHTML = ids.length ? ('<div style="margin-top:8px;"><strong>新实例ID：</strong><br><code>' + ids.join('</code><br><code>') + '</code></div>') : '';
-      if (typeof renderAll === 'function') renderAll();
-    } catch (e) {
-      progressDiv.innerHTML = '<div style="color:#ff4d4f;font-weight:600;">❌ 全自动部署中断</div><div style="color:#666;font-size:13px;">' + e.message + '</div>';
-      statusDiv.innerHTML = '❌ 失败：' + e.message;
-      icLog('[全自动] 部署中断：' + e.message, 'error');
     }
   }
 
@@ -281,7 +166,7 @@
         Period: period,
         PeriodUnit: 'Month',
         AutoPay: autoPay,
-        ClientToken: 'wb-ic-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
+        ClientToken: 'wb-ic-' + region + '-' + imageId + '-' + amount
       });
       var ids = icParseInstanceIds(r);
       st.innerHTML = '✅ 开通请求已提交' + (autoPay ? '（自动支付）' : '（生成待支付订单）');
@@ -421,49 +306,243 @@
     if (t) icDownload(t.name, t.body);
   }
 
-  // ====== ⑥ 空白主机一键部署链接（给团队直接跑） ======
-  function icRenderDeployCmd() {
-    var tokEl = document.getElementById('icDeployToken');
-    var cmdEl = document.getElementById('icDeployCmd');
-    if (!tokEl || !cmdEl) return;
-    var tok = (tokEl.value || '').trim();
-    if (!tok) { cmdEl.textContent = '（请填写 IPES Token）'; return; }
-    function getv(id) { var e = document.getElementById(id); return e ? (e.value || '').trim() : ''; }
-    var base = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/ipes_auto_deploy.sh | bash -s -- --token "' + tok + '"';
-    // 注册凭据：ak + sk + isp 齐备才追加
-    var ak = getv('icAk'), sk = getv('icSk'), isp = getv('icIsp'), numDirs = getv('icNumDirs');
-    if (ak && sk && isp) {
-      base += ' --ak "' + ak + '" --sk "' + sk + '" --isp "' + isp + '"';
-      if (numDirs) base += ' --num-dirs "' + numDirs + '"';
+  // ④ 一键执行标准化：在源实例ID上运行去个性化脚本
+  async function icRunStandardizationOnSource() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var srcInstance = (document.getElementById('icSrcInstance').value || '').trim();
+    if (!srcInstance) { alert('请先在「① 源实例ID」中填写要打镜像的实例'); return; }
+    if (!confirm('确定在实例 ' + srcInstance + ' 上执行去个性化标准化？\n\n会停止 IPES、清理节点身份/缓存、重生成 SSH host key、重置 machine-id/hostname。')) return;
+
+    var st = document.getElementById('icStdStatus');
+    st.innerHTML = '⏳ 正在对 ' + srcInstance + ' 执行标准化...';
+    icLog('[标准化] 在 ' + srcInstance + ' 执行去个性化脚本', 'info');
+
+    var script = [
+      '#!/bin/bash',
+      'set -e',
+      'exec > /var/log/ipes_golden_prep.log 2>&1',
+      'echo "[$(date "+%F %T")] 开始去个性化标准化"',
+      '',
+      '# 停止 IPES 服务/容器',
+      'if command -v docker >/dev/null 2>&1; then',
+      '  docker stop ipes 2>/dev/null || true',
+      '  docker rm ipes 2>/dev/null || true',
+      'fi',
+      'systemctl stop ipes-agent 2>/dev/null || true',
+      'systemctl stop ipes 2>/dev/null || true',
+      '',
+      '# 清理 PCDN 节点身份与缓存数据',
+      'for d in /data/happ /data/happ.* /var/lib/ipescache /var/lib/ipes /var/cache/ipes /etc/ipes /var/lib/zycloud /opt/zyy_install; do',
+      '  [ -d "$d" ] && rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null || true',
+      'done',
+      '',
+      '# 清理旧设备ID与首启标记',
+      'rm -f /etc/.mac /etc/edge_firstboot_done /etc/edge_firstboot.conf',
+      '',
+      '# 重生成 SSH host key',
+      'rm -f /etc/ssh/ssh_host_*',
+      'ssh-keygen -A',
+      '',
+      '# 重置 machine-id 与日志',
+      'rm -f /etc/machine-id && systemd-machine-id-setup',
+      'rm -f /var/log/ipes*.log /var/log/zycloud*.log /var/log/batch_preheat*.log 2>/dev/null || true',
+      ': > /etc/hostname',
+      '',
+      'echo "[$(date "+%F %T")] 去个性化完成，请确认 IPES 配置绑定的是 0.0.0.0 / 动态IP，然后即可打自定义镜像。"'
+    ].join('\n');
+
+    try {
+      await AliyunClient.runCommandOnInstance(region, [srcInstance], {
+        name: 'ipes-golden-prep-' + Date.now(),
+        content: script,
+        type: 'RunShellScript',
+        timeout: 300
+      });
+      st.innerHTML = '✅ 标准化命令已提交到 ' + srcInstance + '，请查看 /var/log/ipes_golden_prep.log';
+      icLog('[标准化] 命令已提交: ' + srcInstance, 'success');
+    } catch (e) {
+      st.innerHTML = '❌ 标准化失败: ' + e.message;
+      icLog('[标准化] 失败: ' + e.message, 'error');
     }
-    // 绑定业务凭据：appid + appak + appsk 齐备才追加
-    var appid = getv('icAppid'), appak = getv('icAppak'), appsk = getv('icAppsk');
-    if (appid && appak && appsk) {
-      base += ' --appid "' + appid + '" --appak "' + appak + '" --appsk "' + appsk + '"';
-    }
-    cmdEl.textContent = base;
-    icRenderPrepareCmd();
   }
 
-  // ====== ⑦ 半黄金镜像：生成源机预装命令（复用上方 Token + 两组凭据） ======
-  function icRenderPrepareCmd() {
-    var tokEl = document.getElementById('icDeployToken');
-    var cmdEl = document.getElementById('icPrepareCmd');
-    if (!tokEl || !cmdEl) return;
-    var tok = (tokEl.value || '').trim();
-    if (!tok) { cmdEl.textContent = '（请先填写 ⑥ 区的 IPES Token）'; return; }
-    function getv(id) { var e = document.getElementById(id); return e ? (e.value || '').trim() : ''; }
-    var ak = getv('icAk'), sk = getv('icSk'), isp = getv('icIsp'), numDirs = getv('icNumDirs');
-    var appid = getv('icAppid'), appak = getv('icAppak'), appsk = getv('icAppsk');
-    if (!ak || !sk || !isp || !appid || !appak || !appsk) {
-      cmdEl.textContent = '（请完整填写 ⑥ 区的 ① 注册设备凭据 与 ② 绑定业务ID凭据，否则新机首次启动无法注册绑定）';
-      return;
+  // ④ 一键全流程：标准化 → 打镜像 → 等 Available → 开通
+  async function icRunFullAutoFlow() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var srcInstance = (document.getElementById('icSrcInstance').value || '').trim();
+    var planId = (document.getElementById('icPlanId').value || '').trim();
+    var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
+    var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
+    var autoPay = document.getElementById('icLaunchAutoPay').checked;
+    if (!srcInstance) { alert('请填写「① 源实例ID」'); return; }
+    if (!planId) { alert('请填写「③ 套餐 PlanId」'); return; }
+    if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
+    if (!confirm('一键全流程将：\n1) 在 ' + srcInstance + ' 执行标准化\n2) 创建自定义镜像\n3) 等待镜像 Available\n4) 基于镜像开通 ' + amount + ' 台\n\n确定继续？')) return;
+
+    var st = document.getElementById('icStdStatus');
+    st.innerHTML = '⏳ 一键全流程开始...';
+    try {
+      st.innerHTML = '第 1/4 步：在 ' + srcInstance + ' 执行标准化...';
+      await icRunStandardizationOnSource();
+      icLog('[全流程] 标准化完成，等待 15 秒让实例状态稳定...', 'info');
+      await icSleep(15000);
+
+      var today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      var imageName = 'golden-' + region + '-' + today + '-' + Math.random().toString(36).substring(2, 6);
+      st.innerHTML = '第 2/4 步：创建镜像 ' + imageName + '...';
+      var createRes = await AliyunClient.callCentralApi('CreateCustomImage', {
+        RegionId: region, InstanceId: srcInstance, ImageName: imageName
+      });
+      var imageId = createRes.ImageId || createRes.imageId;
+      if (!imageId) throw new Error('创建镜像未返回 ImageId，响应：' + JSON.stringify(createRes));
+      icLog('[全流程] 镜像已提交: ' + imageId, 'success');
+
+      st.innerHTML = '第 3/4 步：等待镜像 ' + imageId + ' 变为 Available...';
+      var foundImage = null, imageAvailable = false;
+      for (var i = 0; i < 60; i++) {
+        await icSleep(10000);
+        var listRes = await AliyunClient.callCentralApi('ListImages', { RegionId: region, PageSize: 100 });
+        var imgs = icFilterCustomImages(icParseImages(listRes));
+        for (var k = 0; k < imgs.length; k++) {
+          if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
+        }
+        if (foundImage) {
+          var st2 = foundImage.Status || '未知';
+          icLog('[全流程] 第 ' + (i + 1) + ' 次检查，镜像状态=' + st2, 'info');
+          if (st2 === 'Available') { imageAvailable = true; break; }
+        }
+      }
+      if (!imageAvailable) throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
+
+      st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...';
+      var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
+        RegionId: region, ImageId: imageId, PlanId: planId,
+        Amount: amount, Period: period, PeriodUnit: 'Month', AutoPay: autoPay,
+        ClientToken: 'wb-ic-flow-' + region + '-' + imageId + '-' + amount
+      });
+      var ids = icParseInstanceIds(launchRes);
+      st.innerHTML = '✅ 一键全流程完成，新实例：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）');
+      icLog('[全流程] 完成，新实例: ' + (ids.length ? ids.join(', ') : '未返回'), 'success');
+      if (typeof renderAll === 'function') renderAll();
+    } catch (e) {
+      st.innerHTML = '❌ 一键全流程失败: ' + e.message;
+      icLog('[全流程] 失败: ' + e.message, 'error');
     }
-    var base = 'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/edge_prepare_golden.sh | bash -s -- --token "' + tok + '"';
-    base += ' --ak "' + ak + '" --sk "' + sk + '" --isp "' + isp + '"';
-    if (numDirs) base += ' --num-dirs "' + numDirs + '"';
-    base += ' --appid "' + appid + '" --appak "' + appak + '" --appsk "' + appsk + '"';
-    cmdEl.textContent = base;
+  }
+
+  // ====== ⑤ 绑定舟翼云 ======
+  var __icBindInstances = [];
+
+  function icBuildBindScript(ak, sk, isp, clearMac) {
+    var clearPart = clearMac ? (
+      'echo "[$(date "+%F %T")] 清除旧 /etc/.mac"\n' +
+      'rm -f /etc/.mac /etc/edge_firstboot_done /etc/edge_firstboot.conf\n'
+    ) : '';
+    return [
+      '#!/bin/bash',
+      'set -e',
+      'exec > /var/log/zycloud_agent_setup.log 2>&1',
+      'echo "[$(date "+%F %T")] 开始绑定舟翼云"',
+      '',
+      clearPart,
+      '# 写入注册/绑定凭据',
+      'cat > /etc/edge_firstboot.conf <<\'EOF\'',
+      'APP_KEY="' + ak + '"',
+      'SECRET_KEY="' + sk + '"',
+      'ISP="' + isp + '"',
+      'EOF',
+      '',
+      '# 下载并执行首启注册绑定脚本',
+      'echo "[$(date "+%F %T")] 下载 edge_firstboot_register.sh..."',
+      'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/edge_firstboot_register.sh -o /tmp/edge_firstboot_register.sh',
+      'chmod +x /tmp/edge_firstboot_register.sh',
+      'bash /tmp/edge_firstboot_register.sh',
+      'echo "[$(date "+%F %T")] 绑定流程结束"'
+    ].join('\n');
+  }
+
+  async function icLoadInstancesForBind() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var box = document.getElementById('icBindInstanceList');
+    box.innerHTML = '⏳ 加载中...';
+    try {
+      var r = await AliyunClient.listInstances(region, { pageSize: 100 });
+      var all = r.Instances || [];
+      __icBindInstances = all.filter(function (it) {
+        var st = String(it.Status || '').toLowerCase();
+        return st === 'running';
+      });
+      if (!__icBindInstances.length) {
+        box.innerHTML = '⚠️ 当前地域暂无运行中的实例';
+        return;
+      }
+      var html = '<div style="display:flex;flex-direction:column;gap:6px;">' +
+        '<label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600;">' +
+          '<input type="checkbox" id="icBindSelectAll" checked onchange="icToggleBindSelectAll(this.checked)" /> 全选/取消全选' +
+        '</label>';
+      __icBindInstances.forEach(function (it, idx) {
+        var ip = it.PublicIpAddress || it.InnerIpAddress || '-';
+        html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">' +
+          '<input type="checkbox" class="ic-bind-chk" data-idx="' + idx + '" checked /> ' +
+          '<span>' + (it.InstanceName || '') + ' <code>' + it.InstanceId + '</code> (' + ip + ')</span>' +
+          '</label>';
+      });
+      html += '</div>';
+      box.innerHTML = html;
+      icLog('[绑定] 已加载 ' + __icBindInstances.length + ' 个运行中实例', 'info');
+    } catch (e) {
+      box.innerHTML = '❌ 加载失败: ' + e.message;
+      icLog('[绑定] 加载失败: ' + e.message, 'error');
+    }
+  }
+
+  function icToggleBindSelectAll(checked) {
+    document.querySelectorAll('.ic-bind-chk').forEach(function (chk) { chk.checked = checked; });
+  }
+
+  async function icBindSelectedToZhouyi() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var ak = (document.getElementById('icBindAk').value || '').trim();
+    var sk = (document.getElementById('icBindSk').value || '').trim();
+    var isp = document.getElementById('icBindIsp').value;
+    var clearMac = document.getElementById('icBindClearMac').checked;
+    if (!ak || !sk) { alert('请填写舟翼云 appKey 和 secretKey'); return; }
+
+    var checked = [];
+    document.querySelectorAll('.ic-bind-chk:checked').forEach(function (chk) {
+      var idx = parseInt(chk.dataset.idx, 10);
+      if (__icBindInstances[idx]) checked.push(__icBindInstances[idx]);
+    });
+    if (!checked.length) { alert('请先「加载当前地域实例」并勾选要绑定的机器'); return; }
+    if (!confirm('确定绑定 ' + checked.length + ' 台实例到舟翼云？\n运营商：' + isp + '\n' + (clearMac ? '会先清除 /etc/.mac 让每台重新生成设备ID。' : '不清除 /etc/.mac，若镜像带旧ID可能导致重复。'))) return;
+
+    var st = document.getElementById('icBindStatus');
+    st.innerHTML = '⏳ 开始绑定 ' + checked.length + ' 台实例...';
+    var success = 0, fail = 0;
+    for (var i = 0; i < checked.length; i++) {
+      var inst = checked[i];
+      var iid = inst.InstanceId;
+      st.innerHTML = '⏳ 绑定第 ' + (i + 1) + '/' + checked.length + ' 台: ' + iid + '...';
+      try {
+        var script = icBuildBindScript(ak, sk, isp, clearMac);
+        await AliyunClient.runCommandOnInstance(region, [iid], {
+          name: 'zycloud-bind-' + iid + '-' + Date.now(),
+          content: script,
+          type: 'RunShellScript',
+          timeout: 600
+        });
+        success++;
+        icLog('[绑定] ' + iid + ' 命令已提交', 'success');
+      } catch (e) {
+        fail++;
+        icLog('[绑定] ' + iid + ' 失败: ' + e.message, 'error');
+      }
+    }
+    st.innerHTML = '✅ 绑定完成：成功 ' + success + ' 台，失败 ' + fail + ' 台。请登录实例查看 /var/log/zycloud_agent_setup.log';
   }
 
   function icFallbackCopy(text) {
@@ -474,8 +553,8 @@
     document.body.appendChild(ta);
     ta.focus();
     ta.select();
-    try { document.execCommand('copy'); alert('✅ 已复制部署命令到剪贴板'); }
-    catch (e) { alert('复制失败，请手动选中命令文本复制'); }
+    try { document.execCommand('copy'); alert('✅ 已复制到剪贴板'); }
+    catch (e) { alert('复制失败，请手动选中复制'); }
     document.body.removeChild(ta);
   }
 
@@ -485,7 +564,7 @@
     var text = el.textContent || el.innerText || '';
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(
-        function () { alert('✅ 已复制部署命令到剪贴板'); },
+        function () { alert('✅ 已复制到剪贴板'); },
         function () { icFallbackCopy(text); }
       );
     } else {
@@ -499,9 +578,11 @@
   window.icCreateImage = icCreateImage;
   window.icLoadImages = icLoadImages;
   window.icLaunchFromImage = icLaunchFromImage;
-  window.icAutoDeploy = icAutoDeploy;
-    window.icRenderDeployCmd = icRenderDeployCmd;
-  window.icRenderPrepareCmd = icRenderPrepareCmd;
+  window.icRunStandardizationOnSource = icRunStandardizationOnSource;
+  window.icRunFullAutoFlow = icRunFullAutoFlow;
+  window.icLoadInstancesForBind = icLoadInstancesForBind;
+  window.icToggleBindSelectAll = icToggleBindSelectAll;
+  window.icBindSelectedToZhouyi = icBindSelectedToZhouyi;
   window.icCopyText = icCopyText;
 
   if (document.readyState === 'loading') {

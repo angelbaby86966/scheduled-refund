@@ -61,7 +61,7 @@
     var st = document.getElementById('icCreateImgStatus');
     st.innerHTML = '⏳ 正在从 ' + instId + ' 创建镜像「' + name + '」...';
     try {
-      var r = await AliyunClient.callSwasApi('CreateCustomImage', {
+      var r = await AliyunClient.callCentralApi('CreateCustomImage', {
         RegionId: region, InstanceId: instId, ImageName: name
       });
       st.innerHTML = '✅ 已提交，ImageId=' + (r.ImageId || r.imageId || '(处理中，稍后刷新镜像列表)');
@@ -117,7 +117,7 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      var r = await AliyunClient.callSwasApi('ListImages', {
+      var r = await AliyunClient.callCentralApi('ListImages', {
         RegionId: region,
         PageSize: 100
       });
@@ -152,7 +152,7 @@
     var box = document.getElementById('icImagesList');
     box.innerHTML = '⏳ 正在删除 ' + imageId + ' ...';
     try {
-      await AliyunClient.callSwasApi('DeleteCustomImage', {
+      await AliyunClient.callCentralApi('DeleteCustomImage', {
         RegionId: region,
         ImageId: imageId
       });
@@ -185,7 +185,7 @@
     st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...';
     res.innerHTML = '';
     try {
-      var r = await AliyunClient.callSwasApi('CreateInstances', {
+      var r = await AliyunClient.callCentralApi('CreateInstances', {
         RegionId: region,
         ImageId: imageId,
         PlanId: planId,
@@ -419,7 +419,7 @@
       var today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       var imageName = 'golden-' + region + '-' + today + '-' + Math.random().toString(36).substring(2, 6);
       st.innerHTML = '第 2/4 步：创建镜像 ' + imageName + '...';
-      var createRes = await AliyunClient.callSwasApi('CreateCustomImage', {
+      var createRes = await AliyunClient.callCentralApi('CreateCustomImage', {
         RegionId: region, InstanceId: srcInstance, ImageName: imageName
       });
       var imageId = createRes.ImageId || createRes.imageId;
@@ -430,7 +430,7 @@
       var foundImage = null, imageAvailable = false;
       for (var i = 0; i < 60; i++) {
         await icSleep(10000);
-        var listRes = await AliyunClient.callSwasApi('ListImages', { RegionId: region, PageSize: 100 });
+        var listRes = await AliyunClient.callCentralApi('ListImages', { RegionId: region, PageSize: 100 });
         var imgs = icFilterCustomImages(icParseImages(listRes));
         for (var k = 0; k < imgs.length; k++) {
           if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
@@ -444,7 +444,7 @@
       if (!imageAvailable) throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
 
       st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...';
-      var launchRes = await AliyunClient.callSwasApi('CreateInstances', {
+      var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
         RegionId: region, ImageId: imageId, PlanId: planId,
         Amount: amount, Period: period, PeriodUnit: 'Month', AutoPay: autoPay,
         ClientToken: 'wb-ic-flow-' + region + '-' + imageId + '-' + amount

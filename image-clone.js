@@ -117,7 +117,7 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      var r = await AliyunClient.callCentralApi('ListImages', {
+      var r = await AliyunClient.callSwasApi('ListImages', {
         RegionId: region,
         PageSize: 100
       });
@@ -136,6 +136,33 @@
     } catch (e) {
       box.innerHTML = '❌ 加载失败: ' + e.message;
       icLog('[镜像克隆] 加载镜像失败: ' + e.message, 'error');
+    }
+  }
+
+  // 删除选中的自定义镜像
+  async function icDeleteImage() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var sel = document.getElementById('icImageSelect');
+    var imageId = sel ? sel.value : '';
+    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像'); return; }
+    var imageText = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : imageId;
+    if (!confirm('确定删除自定义镜像？\n\n' + imageText + '\n\n此操作不可恢复，请确认该镜像未用于运行中的实例。')) return;
+
+    var box = document.getElementById('icImagesList');
+    box.innerHTML = '⏳ 正在删除 ' + imageId + ' ...';
+    try {
+      await AliyunClient.callSwasApi('DeleteCustomImage', {
+        RegionId: region,
+        ImageId: imageId
+      });
+      box.innerHTML = '✅ 已删除镜像 ' + imageId;
+      icLog('[镜像克隆] 删除镜像成功: ' + imageId, 'success');
+      sel.innerHTML = '';
+      setTimeout(icLoadImages, 1000);
+    } catch (e) {
+      box.innerHTML = '❌ 删除失败: ' + e.message;
+      icLog('[镜像克隆] 删除镜像失败: ' + e.message, 'error');
     }
   }
 
@@ -583,6 +610,7 @@
   window.icDownloadTpl = icDownloadTpl;
   window.icCreateImage = icCreateImage;
   window.icLoadImages = icLoadImages;
+  window.icDeleteImage = icDeleteImage;
   window.icLaunchFromImage = icLaunchFromImage;
   window.icRunStandardizationOnSource = icRunStandardizationOnSource;
   window.icRunFullAutoFlow = icRunFullAutoFlow;

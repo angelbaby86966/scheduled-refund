@@ -29,6 +29,40 @@ if [ -f /etc/edge_firstboot_done ]; then
   exit 0
 fi
 
+# ============ 步骤 0（黄金镜像防御）：每台克隆机强制重置身份 ============
+# 即便黄金镜像去个性化没做干净、或同一镜像被复用多次，
+# 这里也会再清一次：旧的 /etc/.mac（舟翼云设备 ID）、旧的 SSH host key、旧的 machine-id、
+# IPES 容器数据（重生 SN），确保每台新机拿到全新设备 ID 和新 SN。
+log "===== 步骤 0：黄金镜像防御 · 强制重置本机身份 ====="
+if [ -f /etc/.mac ]; then
+  rm -f /etc/.mac && ok "已清 /etc/.mac（旧设备ID）"
+else
+  ok "/etc/.mac 不存在，跳过"
+fi
+rm -f /etc/edge_firstboot_done 2>/dev/null || true
+rm -f /etc/ssh/ssh_host_* 2>/dev/null && ssh-keygen -A >/dev/null 2>&1 && ok "已重生成 SSH host key" || warn "SSH host key 重生失败"
+if [ -f /etc/machine-id ]; then
+  rm -f /etc/machine-id && systemd-machine-id-setup >/dev/null 2>&1 && ok "已重置 machine-id" || warn "machine-id 重置失败"
+fi
+# 清 IPES 缓存数据目录 + 重启容器 → 让 IPES 容器重新生成 SN（与源实例不同）
+if command -v docker >/dev/null 2>&1; then
+  for ipes_data in /var/lib/ipescache /var/lib/ipes /opt/ipes/data; do
+    if [ -d "$ipes_data" ]; then
+      rm -rf "$ipes_data"/* 2>/dev/null && ok "已清 IPES 数据目录: $ipes_data" || warn "清 IPES 数据目录失败: $ipes_data"
+    fi
+  done
+  ipes_cid=$(docker ps -aq --filter "name=ipes" 2>/dev/null | head -1)
+  if [ -z "$ipes_cid" ]; then
+    ipes_cid=$(docker ps -aq 2>/dev/null | head -1)
+  fi
+  if [ -n "$ipes_cid" ]; then
+    docker restart "$ipes_cid" >/dev/null 2>&1 && ok "已重启 IPES 容器(将重新生成 SN): $ipes_cid" || warn "重启 IPES 容器失败"
+  fi
+fi
+# 清边缘节点旧凭据，避免复用
+rm -f /usr/local/edge/registration_info 2>/dev/null || true
+ok "身份重置完成，继续首次启动注册流程"
+
 # ===== 凭据：优先命令行参数，否则读 conf =====
 APP_KEY=""; SECRET_KEY=""; ISP=""; NUM_DIRS="12"
 APPID=""; APPAK=""; APPSK=""

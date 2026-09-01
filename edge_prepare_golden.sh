@@ -45,6 +45,7 @@ IPES_INSTALL_FLAG_T="${IPES_INSTALL_FLAG_T:-2}"
 # ===== 参数解析 =====
 TOKEN=""; APP_KEY=""; SECRET_KEY=""; ISP=""; NUM_DIRS="12"
 APPID=""; APPAK=""; APPSK=""
+PARAM_CLEANUP="1"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token)    TOKEN="$2"; shift 2;;
@@ -55,8 +56,9 @@ while [[ $# -gt 0 ]]; do
     --appid)    APPID="$2"; shift 2;;
     --appak)    APPAK="$2"; shift 2;;
     --appsk)    APPSK="$2"; shift 2;;
+    --no-cleanup) PARAM_CLEANUP="0"; shift;;
     -h|--help)
-      echo "用法: bash edge_prepare_golden.sh --token <JWT> [--ak/--sk/--isp/--num-dirs/--appid/--appak/--appsk]"
+      echo "用法: bash edge_prepare_golden.sh --token <JWT> [--ak/--sk/--isp/--num-dirs/--appid/--appak/--appsk] [--no-cleanup]"
       exit 0;;
     *) echo "❌ 未知参数: $1"; exit 1;;
   esac
@@ -143,6 +145,61 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl enable edge-firstboot.service 2>/dev/null && ok "已启用 edge-firstboot 服务（新机首次启动自动注册/绑定）" \
   || warn "systemctl enable 失败（非 systemd 环境？），可改用 rc.local 触发"
 
-log "✅ 半黄金镜像预装完成！"
-log "下一步：在阿里云控制台用本实例创建自定义镜像（CreateCustomImage）。"
-log "克隆出的新机首次启动会自动：装 Agent → 注册设备 → 绑定业务ID（每台独立设备ID）。"
+log "===== 半黄金镜像预装完成 ====="
+
+# ============ 步骤 8：黄金镜像去个性化（必跑，否则克隆机复用源实例 ID） ============
+if [ "$PARAM_CLEANUP" = "1" ]; then
+  log "===== 步骤 8/8：黄金镜像去个性化 ====="
+  log "⚠️  本步骤会清掉本机 /etc/.mac、SSH host key、machine-id、IPES 数据目录。"
+  log "   跑完本机身份失效，请确认：1) 已在 admin.zhouyi.top 完成绑定业务 ID；2) 立刻去阿里云控制台 CreateCustomImage 打镜像。"
+
+  # 舟翼云设备 ID
+  if [ -f /etc/.mac ]; then
+    rm -f /etc/.mac && ok "已清 /etc/.mac"
+  else
+    ok "/etc/.mac 不存在，跳过"
+  fi
+
+  # 边缘节点首启标记（防止镜像里这个文件已存在，导致新机跳过首启注册）
+  rm -f /etc/edge_firstboot_done 2>/dev/null && ok "已清 /etc/edge_firstboot_done" || true
+
+  # SSH host key
+  if ls /etc/ssh/ssh_host_* >/dev/null 2>&1; then
+    rm -f /etc/ssh/ssh_host_*
+    ssh-keygen -A >/dev/null 2>&1 && ok "已重生成 SSH host key" || warn "SSH host key 重生失败"
+  fi
+
+  # machine-id
+  if [ -f /etc/machine-id ]; then
+    rm -f /etc/machine-id && systemd-machine-id-setup >/dev/null 2>&1 && ok "已重置 machine-id" || warn "machine-id 重置失败"
+  fi
+
+  # IPES 容器数据目录（让克隆机首启后容器启动时重新生成 SN）
+  if command -v docker >/dev/null 2>&1; then
+    for ipes_data in /var/lib/ipescache /var/lib/ipes /opt/ipes/data; do
+      if [ -d "$ipes_data" ]; then
+        rm -rf "$ipes_data"/* 2>/dev/null && ok "已清 IPES 数据目录: $ipes_data" || warn "清 IPES 数据目录失败: $ipes_data"
+      fi
+    done
+    # 重启 IPES 容器以彻底刷新状态（如果用户改主意没去打镜像，本机还能继续用）
+    ipes_cid=$(docker ps -aq --filter "name=ipes" 2>/dev/null | head -1)
+    if [ -n "$ipes_cid" ]; then
+      docker restart "$ipes_cid" >/dev/null 2>&1 && ok "已重启 IPES 容器: $ipes_cid" || warn "重启 IPES 容器失败"
+    fi
+  fi
+
+  # 清理 IPES 日志
+  rm -rf /var/log/ipescache/*.log 2>/dev/null || true
+  : > /etc/hostname 2>/dev/null || true
+
+  # 清理边缘节点凭据缓存
+  rm -f /usr/local/edge/registration_info 2>/dev/null || true
+
+  ok "✅ 黄金镜像去个性化完成！"
+  log "👉 下一步：在阿里云控制台用本实例 CreateCustomImage 打镜像，然后立刻关掉/释放本机。"
+  log "   克隆出的新机首次启动会自动：清身份 → 装 Agent → 拿新设备ID → 注册 → 绑定 → 读新 SN → 流转服务中。"
+else
+  log "===== 步骤 8/8：黄金镜像去个性化（已用 --no-cleanup 跳过）====="
+  warn "⚠️  你选择了不去个性化。克隆机首启时会复用本机的 /etc/.mac 和 IPES SN，"
+  warn "    必须确保 edge_firstboot_register.sh 的步骤 0（强制重置身份）存在，否则多台机器会冲突。"
+fi

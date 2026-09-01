@@ -166,6 +166,66 @@
     }
   }
 
+  // 只下单不扣费：调 SWAS CreateOrder
+  // 兼容两种 Edge Function 版本：
+  //   - 线上已部署的小写 createOrder（V3 签名，服务端透传 params，Commodity 需嵌套传）
+  //   - 新版大写 CreateOrder（服务端拼 Commodity，扁平参数即可）
+  // 先试小写；若 Edge Function 走到 default（返回 hint=aliyun-proxy alive）说明该 case 不存在，再试大写。
+  function icIsAliveProbe(e) {
+    var r = e && e.response;
+    return !!(r && r.hint === 'aliyun-proxy alive');
+  }
+
+  async function icCreateOrder(region, imageId, planId, amount, period) {
+    var fullParams = {
+      RegionId: region,
+      OrderType: 'Buy',
+      Commodity: {
+        Period: period,
+        PeriodUnit: 'Month',
+        PayType: 'Prepaid',
+        CommodityType: 'Server',
+        PlanId: planId,
+        ImageId: imageId,
+        Amount: amount,
+        DataDiskSize: 0,
+        AutoPay: false,
+        AutoRenew: false
+      }
+      // 注意：CreateOrder 不支持 ClientToken 参数，传了可能被拒，故不带
+    };
+    var flatParams = {
+      RegionId: region,
+      ImageId: imageId,
+      PlanId: planId,
+      Amount: amount,
+      Period: period,
+      PeriodUnit: 'Month'
+    };
+    var attempts = [
+      { action: 'createOrder', params: fullParams },
+      { action: 'CreateOrder', params: flatParams }
+    ];
+    var lastErr = null;
+    for (var i = 0; i < attempts.length; i++) {
+      try {
+        var r = await AliyunClient.callCentralApi(attempts[i].action, attempts[i].params);
+        var orderId = r && (r.OrderId || r.orderId);
+        if (orderId) return { OrderId: orderId, raw: r };
+        lastErr = new Error('响应无 OrderId：' + JSON.stringify(r).slice(0, 200));
+      } catch (e) {
+        lastErr = e;
+        // 该 action 未部署 → 换下一个；否则（真实业务错误）直接抛出
+        if (icIsAliveProbe(e)) {
+          icLog('[镜像克隆] action=' + attempts[i].action + ' 未在 Edge Function 部署，尝试下一个', 'info');
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr || new Error('CreateOrder 调用失败');
+  }
+
   // ③ 基于镜像开通新云主机
   async function icLaunchFromImage() {
     if (!icGuard()) return;
@@ -202,19 +262,10 @@
                                     : '下单已提交，请到阿里云控制台查看实例');
         icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + ' 自动支付', 'success');
       } else {
-        r = await AliyunClient.callCentralApi('CreateOrder', {
-          RegionId: region,
-          ImageId: imageId,
-          PlanId: planId,
-          Amount: amount,
-          Period: period,
-          PeriodUnit: 'Month',
-          ClientToken: 'wb-ic-order-' + region + '-' + imageId + '-' + amount
-        });
-        var orderId = (r && (r.OrderId || r.orderId)) || '(未返回)';
+        var ord = await icCreateOrder(region, imageId, planId, amount, period);
         st.innerHTML = '✅ 已生成待支付订单（不扣费）';
-        res.innerHTML = '📋 订单号：<code>' + orderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
-        icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + orderId, 'success');
+        res.innerHTML = '📋 订单号：<code>' + ord.OrderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
+        icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + ord.OrderId, 'success');
       }
     } catch (e) {
       st.innerHTML = '❌ 开通失败: ' + e.message;
@@ -471,14 +522,9 @@
         st.innerHTML = '✅ 一键全流程完成，新实例：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）');
         icLog('[全流程] 完成，新实例: ' + (ids.length ? ids.join(', ') : '未返回'), 'success');
       } else {
-        launchRes = await AliyunClient.callCentralApi('CreateOrder', {
-          RegionId: region, ImageId: imageId, PlanId: planId,
-          Amount: amount, Period: period, PeriodUnit: 'Month',
-          ClientToken: 'wb-ic-flow-order-' + region + '-' + imageId + '-' + amount
-        });
-        var orderId = (launchRes && (launchRes.OrderId || launchRes.orderId)) || '(未返回)';
-        st.innerHTML = '✅ 一键全流程完成，已生成待支付订单：<code>' + orderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
-        icLog('[全流程] 完成，待支付订单: ' + orderId, 'success');
+        var ord2 = await icCreateOrder(region, imageId, planId, amount, period);
+        st.innerHTML = '✅ 一键全流程完成，已生成待支付订单：<code>' + ord2.OrderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
+        icLog('[全流程] 完成，待支付订单: ' + ord2.OrderId, 'success');
       }
       if (typeof renderAll === 'function') renderAll();
     } catch (e) {

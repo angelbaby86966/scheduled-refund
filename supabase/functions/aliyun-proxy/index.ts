@@ -350,24 +350,37 @@ Deno.serve(async (req:Request)=>{
         if (!params?.RegionId || !params?.ImageId || !params?.PlanId) {
           return json({error:"缺少 params.RegionId/ImageId/PlanId"},400);
         }
+        // SWAS CreateOrder 只下单、不扣费（AutoPay=false），余额不足也能生成待支付订单
+        const commodity: any = {
+          Period: params.Period ?? 1,
+          PeriodUnit: params.PeriodUnit || "Month",
+          PayType: "Prepaid",
+          CommodityType: "Server",
+          PlanId: params.PlanId,
+          ImageId: params.ImageId,
+          Amount: params.Amount ?? 1,
+          DataDiskSize: params.DataDiskSize ?? 0,
+          AutoPay: false,
+          AutoRenew: false,
+        };
         const apiParams: any = {
           RegionId: params.RegionId,
           OrderType: "Buy",
-          Commodity: JSON.stringify({
-            Period: params.Period ?? 1,
-            PeriodUnit: params.PeriodUnit || "Month",
-            PayType: "Prepaid",
-            CommodityType: "Server",
-            PlanId: params.PlanId,
-            ImageId: params.ImageId,
-            Amount: params.Amount ?? 1,
-            DataDiskSize: params.DataDiskSize ?? 0,
-            AutoPay: false,
-            AutoRenew: false,
-          }),
+          Commodity: commodity,
         };
         if (params.ClientToken) apiParams.ClientToken = params.ClientToken;
-        const data = await callAliyun(regionEndpoint(params.RegionId),"CreateOrder",apiParams,ak_id,ak_secret);
+
+        // CreateOrder 要求 V3 签名 + flat 参数格式，优先走 V3；失败回退 V1（Commodity 用 JSON 串）
+        const ep = regionEndpoint(params.RegionId);
+        let data: any, lastErr = "";
+        try {
+          data = await callAliyunV3(ep,"CreateOrder",apiParams,ak_id,ak_secret);
+        } catch (e1) {
+          lastErr = String((e1 as Error)?.message || e1);
+          console.log("[aliyun-proxy] CreateOrder V3 failed:", lastErr, "-> fallback V1");
+          const v1Params: any = { ...apiParams, Commodity: JSON.stringify(commodity) };
+          data = await callAliyun(ep,"CreateOrder",v1Params,ak_id,ak_secret);
+        }
         return json({success:true,data});
       }
       case "DeleteCustomImage": {

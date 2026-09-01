@@ -51,12 +51,28 @@ if command -v docker >/dev/null 2>&1; then
       rm -rf "$ipes_data"/* 2>/dev/null && ok "已清 IPES 数据目录: $ipes_data" || warn "清 IPES 数据目录失败: $ipes_data"
     fi
   done
-  ipes_cid=$(docker ps -aq --filter "name=ipes" 2>/dev/null | head -1)
+  # 找 IPES 容器：按名字精确匹配（先精确等于 ipes，再退化到 ipes 前缀，再退化到含 ipes 子串）
+  # 找不到就 warn 跳过，绝不把空串传给 docker restart
+  ipes_cid=""
+  while IFS='|' read -r cid name; do
+    [ -z "$cid" ] && continue
+    case "$name" in
+      ipes|ipes-*|ipes_*) ipes_cid="$cid"; break;;
+    esac
+  done < <(docker ps -a --format '{{.ID}}|{{.Names}}' 2>/dev/null)
   if [ -z "$ipes_cid" ]; then
-    ipes_cid=$(docker ps -aq 2>/dev/null | head -1)
+    while IFS='|' read -r cid name; do
+      [ -z "$cid" ] && continue
+      case "$name" in
+        *ipes*|*IPES*) ipes_cid="$cid"; break;;
+      esac
+    done < <(docker ps -a --format '{{.ID}}|{{.Names}}' 2>/dev/null)
   fi
   if [ -n "$ipes_cid" ]; then
-    docker restart "$ipes_cid" >/dev/null 2>&1 && ok "已重启 IPES 容器(将重新生成 SN): $ipes_cid" || warn "重启 IPES 容器失败"
+    docker start "$ipes_cid" >/dev/null 2>&1 || true
+    docker restart "$ipes_cid" >/dev/null 2>&1 && ok "已重启 IPES 容器(将重新生成 SN): $ipes_cid" || warn "重启 IPES 容器失败: $ipes_cid"
+  else
+    warn "未发现 IPES 容器（docker ps -a 里没有 name 含 ipes 的）"
   fi
 fi
 # 清边缘节点旧凭据，避免复用

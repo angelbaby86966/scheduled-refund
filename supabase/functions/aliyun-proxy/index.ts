@@ -338,10 +338,36 @@ Deno.serve(async (req:Request)=>{
           Amount: params.Amount ?? 1,
           Period: params.Period ?? 1,
           PeriodUnit: params.PeriodUnit || "Month",
-          AutoPay: params.AutoPay === true || params.AutoPay === "true",
         };
+        // SWAS CreateInstances 没有 AutoPay 参数，文档明确：调用前需确保账户余额充足，否则创建失败
         if (params.ClientToken) apiParams.ClientToken = params.ClientToken;
         const data = await callAliyun(regionEndpoint(params.RegionId),"CreateInstances",apiParams,ak_id,ak_secret);
+        return json({success:true,data});
+      }
+      case "CreateOrder": {
+        const {ak_id,ak_secret,params} = p;
+        if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
+        if (!params?.RegionId || !params?.ImageId || !params?.PlanId) {
+          return json({error:"缺少 params.RegionId/ImageId/PlanId"},400);
+        }
+        const apiParams: any = {
+          RegionId: params.RegionId,
+          OrderType: "Buy",
+          Commodity: JSON.stringify({
+            Period: params.Period ?? 1,
+            PeriodUnit: params.PeriodUnit || "Month",
+            PayType: "Prepaid",
+            CommodityType: "Server",
+            PlanId: params.PlanId,
+            ImageId: params.ImageId,
+            Amount: params.Amount ?? 1,
+            DataDiskSize: params.DataDiskSize ?? 0,
+            AutoPay: false,
+            AutoRenew: false,
+          }),
+        };
+        if (params.ClientToken) apiParams.ClientToken = params.ClientToken;
+        const data = await callAliyun(regionEndpoint(params.RegionId),"CreateOrder",apiParams,ak_id,ak_secret);
         return json({success:true,data});
       }
       case "DeleteCustomImage": {

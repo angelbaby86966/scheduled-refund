@@ -443,7 +443,7 @@
       }
       if (!imageAvailable) throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
 
-      st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...';
+      st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...<br><span style="color:#d46b08;font-size:12px;">支付模式：' + (autoPay ? '自动支付（立即扣费）' : '生成待支付订单（不扣费）') + '</span>';
       var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
         RegionId: region, ImageId: imageId, PlanId: planId,
         Amount: amount, Period: period, PeriodUnit: 'Month', AutoPay: autoPay,

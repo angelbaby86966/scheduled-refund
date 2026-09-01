@@ -599,10 +599,12 @@
                       <label style="font-size:12px;">购买时长（月）</label>
                       <input type="number" id="icPeriod" class="input" value="1" min="1" max="60" />
                     </div>
-                    <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
-                      <input type="checkbox" id="icLaunchAutoPay" />
-                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（不勾选则生成待支付订单，不扣费）</label>
-                    </div>
+                  </div>
+                  <div style="margin-top:10px;padding:10px;border:1px solid #ffa940;border-radius:6px;background:#fff7e6;display:flex;align-items:center;gap:8px;">
+                    <input type="checkbox" id="icLaunchAutoPay" style="width:16px;height:16px;cursor:pointer;" />
+                    <label style="font-size:13px;margin:0;cursor:pointer;font-weight:500;color:#d46b08;">
+                      自动支付（勾选则立即扣费；<b>不勾选默认生成待支付订单，不扣费</b>）
+                    </label>
                   </div>
                   <button class="btn btn-primary" style="background:#52c41a;border:none;margin-top:12px;width:100%;" onclick="icLaunchFromImage()">开通</button>
                   <div id="icLaunchStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>

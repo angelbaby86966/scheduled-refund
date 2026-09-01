@@ -76,9 +76,46 @@ log "===== 步骤 1/7：安装 Docker ====="
 curl -fsSL "$DOCKER_INSTALL_URL" | bash || warn "Docker 安装返回非0，后续步骤可能异常"
 
 # ============ 步骤 2：部署 IPES 边缘缓存 ============
+# 找回 IPES 容器名的公共函数（按名字精确匹配，找不到返回空）
+find_ipes_cid() {
+  local _cid=""
+  while IFS='|' read -r cid name; do
+    [ -z "$cid" ] && continue
+    case "$name" in
+      ipes|ipes-*|ipes_*) _cid="$cid"; break;;
+    esac
+  done < <(docker ps -a --format '{{.ID}}|{{.Names}}' 2>/dev/null)
+  if [ -z "$_cid" ]; then
+    while IFS='|' read -r cid name; do
+      [ -z "$cid" ] && continue
+      case "$name" in
+        *ipes*|*IPES*|*ecache*) _cid="$cid"; break;;
+      esac
+    done < <(docker ps -a --format '{{.ID}}|{{.Names}}' 2>/dev/null)
+  fi
+  printf '%s' "$_cid"
+}
+
 log "===== 步骤 2/7：部署 IPES 边缘缓存 ====="
-curl -fsSL "$IPES_INSTALL_URL" | bash -s -- -i "$IPES_INSTALL_FLAG_I" -t "$IPES_INSTALL_FLAG_T" token "$TOKEN" \
-  || warn "IPES 部署命令返回非0，请检查节点状态"
+if ! curl -fsSL "$IPES_INSTALL_URL" | bash -s -- -i "$IPES_INSTALL_FLAG_I" -t "$IPES_INSTALL_FLAG_T" token "$TOKEN"; then
+  warn "IPES 部署命令返回非0，30 秒后校验容器是否真的起来了"
+fi
+sleep 30
+
+# 部署后强制校验：没有 IPES 容器 = 镜像里没有业务，必须中断
+# （旧版这里只 warn 不中断，导致源实例装 IPES 失败后仍打出"空壳镜像"，
+#   克隆机开出来没有 IPES 容器、拿不到新 SN）
+IPES_CID="$(command -v docker >/dev/null 2>&1 && find_ipes_cid || true)"
+if [ -z "$IPES_CID" ]; then
+  echo "" >&2
+  echo "❌❌❌ IPES 容器未启动，镜像将缺少业务本体，禁止继续打镜像！❌❌❌" >&2
+  echo "   请检查：1) token 是否有效/过期  2) 磁盘是否足够  3) 下方日志" >&2
+  echo "   tail -50 /var/log/ipes_deploy.log" >&2
+  echo "   修复后重跑本脚本，确认出现 'IPES 容器已就绪' 再去打镜像。" >&2
+  log "❌ 步骤 2 终止：未检测到 IPES 容器"
+  exit 1
+fi
+ok "IPES 容器已就绪: $IPES_CID（镜像将包含业务本体）"
 
 # ============ 步骤 3：预热调优 + 健康检查 ============
 log "===== 步骤 3/7：预热调优 + 健康检查 ====="
@@ -214,10 +251,30 @@ if [ "$PARAM_CLEANUP" = "1" ]; then
   rm -f /usr/local/edge/registration_info 2>/dev/null || true
 
   ok "✅ 黄金镜像去个性化完成！"
-  log "👉 下一步：在阿里云控制台用本实例 CreateCustomImage 打镜像，然后立刻关掉/释放本机。"
-  log "   克隆出的新机首次启动会自动：清身份 → 装 Agent → 拿新设备ID → 注册 → 绑定 → 读新 SN → 流转服务中。"
 else
   log "===== 步骤 8/8：黄金镜像去个性化（已用 --no-cleanup 跳过）====="
   warn "⚠️  你选择了不去个性化。克隆机首启时会复用本机的 /etc/.mac 和 IPES SN，"
   warn "    必须确保 edge_firstboot_register.sh 的步骤 0（强制重置身份）存在，否则多台机器会冲突。"
 fi
+
+# ============ 打镜像前最终校验：IPES 容器必须在 ============
+# 这一步是最后一道保险：无论步骤 2 之后发生了什么（步骤 8 清理、人为误操作），
+# 只要此刻 docker 里没有 IPES 容器，打出来的镜像就是"空壳"，克隆机不会有业务。
+log "===== 打镜像前最终校验 ====="
+FINAL_CID=""
+if command -v docker >/dev/null 2>&1; then
+  FINAL_CID="$(find_ipes_cid)"
+fi
+if [ -z "$FINAL_CID" ]; then
+  echo "" >&2
+  echo "❌❌❌ 最终校验失败：当前没有 IPES 容器，禁止打镜像！❌❌❌" >&2
+  echo "   现在打镜像 = 克隆机开出来没有 IPES 业务，会重现本次事故。" >&2
+  echo "   请在源实例重装 IPES："
+  echo "     curl -fsSL $IPES_INSTALL_URL | bash -s -- -i $IPES_INSTALL_FLAG_I -t $IPES_INSTALL_FLAG_T token <JWT>" >&2
+  echo "   装完确认 docker ps -a 能看到 ipes 容器，再重跑本脚本。" >&2
+  log "❌ 最终校验失败：无 IPES 容器"
+  exit 1
+fi
+ok "最终校验通过：IPES 容器存在 ($FINAL_CID)"
+log "👉 下一步：在阿里云控制台用本实例 CreateCustomImage 打镜像，然后立刻关掉/释放本机。"
+log "   克隆出的新机首次启动会自动：清身份 → 装 Agent → 拿新设备ID → 注册 → 绑定 → 读新 SN → 流转服务中。"

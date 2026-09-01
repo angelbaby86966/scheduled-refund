@@ -182,24 +182,40 @@
 
     var st = document.getElementById('icLaunchStatus');
     var res = document.getElementById('icLaunchResult');
-    st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...';
+    st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...<br><span style="color:#d46b08;font-size:12px;">支付模式：' + (autoPay ? '自动支付（立即扣费）' : '生成待支付订单（不扣费）') + '</span>';
     res.innerHTML = '';
     try {
-      var r = await AliyunClient.callCentralApi('CreateInstances', {
-        RegionId: region,
-        ImageId: imageId,
-        PlanId: planId,
-        Amount: amount,
-        Period: period,
-        PeriodUnit: 'Month',
-        AutoPay: autoPay,
-        ClientToken: 'wb-ic-' + region + '-' + imageId + '-' + amount
-      });
-      var ids = icParseInstanceIds(r);
-      st.innerHTML = '✅ 开通请求已提交' + (autoPay ? '（自动支付）' : '（生成待支付订单）');
-      res.innerHTML = (ids.length ? ('🚀 新实例ID：<br><code>' + ids.join('</code><br><code>') + '</code>')
-                                  : '下单已提交，请到阿里云控制台查看实例/订单');
-      icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + (autoPay ? ' 自动支付' : ' 待支付'), 'success');
+      var r;
+      if (autoPay) {
+        r = await AliyunClient.callCentralApi('CreateInstances', {
+          RegionId: region,
+          ImageId: imageId,
+          PlanId: planId,
+          Amount: amount,
+          Period: period,
+          PeriodUnit: 'Month',
+          ClientToken: 'wb-ic-' + region + '-' + imageId + '-' + amount
+        });
+        var ids = icParseInstanceIds(r);
+        st.innerHTML = '✅ 开通请求已提交（自动支付）';
+        res.innerHTML = (ids.length ? ('🚀 新实例ID：<br><code>' + ids.join('</code><br><code>') + '</code>')
+                                    : '下单已提交，请到阿里云控制台查看实例');
+        icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + ' 自动支付', 'success');
+      } else {
+        r = await AliyunClient.callCentralApi('CreateOrder', {
+          RegionId: region,
+          ImageId: imageId,
+          PlanId: planId,
+          Amount: amount,
+          Period: period,
+          PeriodUnit: 'Month',
+          ClientToken: 'wb-ic-order-' + region + '-' + imageId + '-' + amount
+        });
+        var orderId = (r && (r.OrderId || r.orderId)) || '(未返回)';
+        st.innerHTML = '✅ 已生成待支付订单（不扣费）';
+        res.innerHTML = '📋 订单号：<code>' + orderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
+        icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + orderId, 'success');
+      }
     } catch (e) {
       st.innerHTML = '❌ 开通失败: ' + e.message;
       icLog('[镜像克隆] 开通失败: ' + e.message, 'error');
@@ -444,14 +460,26 @@
       if (!imageAvailable) throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
 
       st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...<br><span style="color:#d46b08;font-size:12px;">支付模式：' + (autoPay ? '自动支付（立即扣费）' : '生成待支付订单（不扣费）') + '</span>';
-      var launchRes = await AliyunClient.callCentralApi('CreateInstances', {
-        RegionId: region, ImageId: imageId, PlanId: planId,
-        Amount: amount, Period: period, PeriodUnit: 'Month', AutoPay: autoPay,
-        ClientToken: 'wb-ic-flow-' + region + '-' + imageId + '-' + amount
-      });
-      var ids = icParseInstanceIds(launchRes);
-      st.innerHTML = '✅ 一键全流程完成，新实例：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）');
-      icLog('[全流程] 完成，新实例: ' + (ids.length ? ids.join(', ') : '未返回'), 'success');
+      var launchRes;
+      if (autoPay) {
+        launchRes = await AliyunClient.callCentralApi('CreateInstances', {
+          RegionId: region, ImageId: imageId, PlanId: planId,
+          Amount: amount, Period: period, PeriodUnit: 'Month',
+          ClientToken: 'wb-ic-flow-' + region + '-' + imageId + '-' + amount
+        });
+        var ids = icParseInstanceIds(launchRes);
+        st.innerHTML = '✅ 一键全流程完成，新实例：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）');
+        icLog('[全流程] 完成，新实例: ' + (ids.length ? ids.join(', ') : '未返回'), 'success');
+      } else {
+        launchRes = await AliyunClient.callCentralApi('CreateOrder', {
+          RegionId: region, ImageId: imageId, PlanId: planId,
+          Amount: amount, Period: period, PeriodUnit: 'Month',
+          ClientToken: 'wb-ic-flow-order-' + region + '-' + imageId + '-' + amount
+        });
+        var orderId = (launchRes && (launchRes.OrderId || launchRes.orderId)) || '(未返回)';
+        st.innerHTML = '✅ 一键全流程完成，已生成待支付订单：<code>' + orderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
+        icLog('[全流程] 完成，待支付订单: ' + orderId, 'success');
+      }
       if (typeof renderAll === 'function') renderAll();
     } catch (e) {
       st.innerHTML = '❌ 一键全流程失败: ' + e.message;

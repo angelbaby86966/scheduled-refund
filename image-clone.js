@@ -672,32 +672,75 @@
   }
 
   // 统一 admin 调用入口：优先用 HMAC 鉴权（三件套都填了），否则走 x-token (supabase fn 转发)
-  // 失败时抛 Error，调用方 catch；HMAC 走不通会回退到 x-token
+  // 失败时抛 Error，调用方 catch；HMAC 走不通（典型场景：admin 没开 CORS）自动回退到 x-token
+  // Fallback 仅在「网络层失败」时触发：HTTP 0、CORS 拦截、TypeError: Failed to fetch
+  // 业务错误（HTTP 4xx/5xx）说明请求已到达后端，不 fallback（HMAC 错 / 参数错 fallback 也救不了）
   async function icAdminCall(method, path, body) {
+    var hmacUsed = false;
+    var hmacErr = null;
     if (icHasAdminHmac()) {
+      hmacUsed = true;
       try {
         return await icAdminCallHmac(method, path, body);
       } catch (e) {
-        // CORS 失败（admin 没开跨域）或网络错 → 抛错让上层决定是否 fallback
-        throw e;
+        hmacErr = e;
+        if (!icIsNetworkErr(e)) {
+          // 业务错（HTTP 4xx/5xx 但请求成功到达后端）→ 不 fallback，直接抛
+          throw e;
+        }
+        // 网络/CORS 失败 → 继续往下走 x-token 兜底
       }
     }
     // 走 x-token 鉴权（supabase fn 转发）
     var token = icGetAdminToken();
-    if (!token) throw new Error('未填写 admin Token 也未填 appId/ak/sk 三件套，请二选一');
-    if (window.OcdAdmin && window.OcdAdmin.call) {
-      return await window.OcdAdmin.call(token, method || 'POST', path, '', body);
+    if (!token) {
+      if (hmacUsed && hmacErr) {
+        throw new Error('HMAC 通道因网络/CORS 失败（' + hmacErr.message + '），且未配置 x-token，无法回退。请在「绑定舟翼云」面板填 Token 或解决 admin CORS。');
+      }
+      throw new Error('未填写 admin Token 也未填 appId/ak/sk 三件套，请二选一');
     }
-    // 兜底：直接调 supabase fn（不通过 OcdAdmin 包装）
-    var resp = await fetch(IC_SUPABASE_FN, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
-      body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: '', body: (body === undefined ? null : body) })
-    });
-    var json = null;
-    try { json = await resp.json(); } catch (e2) {}
-    if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
-    return json;
+    try {
+      var result;
+      if (window.OcdAdmin && window.OcdAdmin.call) {
+        result = await window.OcdAdmin.call(token, method || 'POST', path, '', body);
+      } else {
+        // 兜底：直接调 supabase fn（不通过 OcdAdmin 包装）
+        var resp = await fetch(IC_SUPABASE_FN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
+          body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: '', body: (body === undefined ? null : body) })
+        });
+        var json = null;
+        try { json = await resp.json(); } catch (e2) {}
+        if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
+        result = json;
+      }
+      // fallback 成功时日志（仅一次提示）
+      if (hmacUsed && !icAdminCall._fallbackWarned) {
+        icAdminCall._fallbackWarned = true;
+        try { icLog('[image-clone] ⚠️ HMAC 通道不可用（' + hmacErr.message + '），已自动回退到 x-token 鉴权（本会话仅提示一次）', 'warn'); } catch (e3) {}
+      }
+      return result;
+    } catch (e4) {
+      // x-token 路径也失败 → 把两层错误合并抛出去
+      if (hmacUsed) {
+        throw new Error('HMAC 失败（' + (hmacErr ? hmacErr.message : '?') + '），fallback 到 x-token 也失败：' + e4.message);
+      }
+      throw e4;
+    }
+  }
+
+  // 识别「网络层失败」：HTTP 0 / CORS 拦截 / fetch 本身抛错
+  function icIsNetworkErr(e) {
+    if (!e) return false;
+    var msg = (e.message || String(e)).toLowerCase();
+    if (e instanceof TypeError) return true; // Failed to fetch / Load failed
+    if (msg.indexOf('failed to fetch') >= 0) return true;
+    if (msg.indexOf('networkerror') >= 0) return true;
+    if (msg.indexOf('load failed') >= 0) return true;
+    if (msg.indexOf('http 0') >= 0) return true; // fetch 在 CORS 失败时常见 status=0
+    if (msg.indexOf('cors') >= 0) return true;
+    return false;
   }
 
   // 从 ListImages 返回里解析自定义镜像数组

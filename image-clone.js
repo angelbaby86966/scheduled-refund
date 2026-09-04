@@ -836,9 +836,10 @@
       step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
 
       // ③ 轮询镜像就绪（最多 5 分钟）
-      // 阿里云 SWAS 镜像状态: 'Creating' / 'Available' / 'CreateFailed' / 'Waiting'
-      // ListImages 对未就绪的镜像有时不会返回，所以每一轮都要打出来才知道进展
-      // ⚠️ 历史踩坑：ListImages 在主地域一直空时，镜像其实创建到了别的地域（路由），需要跨地域扫描
+      // 【关键修复】SWAS ListImages 对自定义镜像不返回 Status 字段（实测仅 ImageName/Platform/ImageId/ImageType），
+      // 因此“镜像出现在列表里”即视为就绪，不能再等 Status==='available'（永远等不到 → 超时中断 → 没有订单）。
+      // 仅当 Status 字段存在且显式为 Creating/Waiting 时继续轮询，显式为失败时才报错。
+      // 兜底：主地域一直空时跨地域扫描（镜像可能被路由到实例所在地域）。
       var allRegions = ['cn-hangzhou','cn-beijing','cn-shanghai','cn-shenzhen','cn-chengdu',
                         'cn-guangzhou','cn-heyuan','cn-wuhan-lr','cn-wulanchabu'];
       var ready = false;
@@ -861,10 +862,13 @@
           return (nid && iid === nid) || im.ImageName === imageName;
         })[0];
         if (found) {
+          // 【修复】SWAS ListImages 对自定义镜像不返回 Status 字段（实测仅 ImageName/Platform/ImageId/ImageType）。
+          // 因此：镜像出现在列表里即视为就绪；仅当 Status 字段存在且显式为失败时判失败。
+          // 旧逻辑只读 s==='available'，而 s 永远为空 → ready 永不置真 → 30 轮超时后 return 中断整个流程（这就是“镜像有了却没订单”的根因）。
           var s = (found.Status || found.status || found.ImageStatus || '').toString();
-          var info = '状态="' + s + '" Progress="' + (found.Progress || found.Usage || '?') + '"';
+          var info = s ? ('状态="' + s + '"') : '（无Status字段=已就绪）';
           lastInfo = info;
-          if (s.toLowerCase() === 'available' || s.toLowerCase() === 'success') {
+          if (!s || s.toLowerCase() === 'available' || s.toLowerCase() === 'success' || s.toLowerCase() === 'ready') {
             newImageId = found.ImageId || newImageId; ready = true;
             step('✅ 镜像就绪（第 ' + (i + 1) + '/30 轮，' + info + '）');
             break;
@@ -873,7 +877,8 @@
             step('❌ 镜像创建失败：' + info + '\n原始=' + JSON.stringify(found).slice(0, 400));
             return;
           }
-          step('⏳ [轮询 ' + (i + 1) + '/30] ' + info);
+          // Status 显式还在 Creating/Waiting 等中间态：继续轮询
+          step('⏳ [轮询 ' + (i + 1) + '/30] ' + info + '，继续等待...');
         } else {
           step('⏳ [轮询 ' + (i + 1) + '/30] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
           // 关键节点打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
@@ -897,8 +902,8 @@
                 })[0];
                 if (hit) {
                   var s2 = (hit.Status || hit.status || hit.ImageStatus || '').toString();
-                  step('🎯 跨地域命中！实际 RegionId=' + rid + '，「' + imageName + '」状态="' + s2 + '"');
-                  if (s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success') {
+                  step('🎯 跨地域命中！实际 RegionId=' + rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
+                  if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
                     region = rid; newImageId = hit.ImageId || newImageId; ready = true;
                     step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/30 轮）');
                     break;

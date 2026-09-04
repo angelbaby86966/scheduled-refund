@@ -225,31 +225,39 @@
     var period = document.getElementById('icPeriod');
     if (period && !period.value) period.value = '1';
 
-    // ⑤ 绑定舟翼云：自动记忆上次输入的 ak/sk/isp，刷新页面自动回填
+    // ⑤ 绑定舟翼云：自动记忆整个面板的输入，刷新页面自动回填
+    //   - text/select：输入即存，load 时回填 value
+    //   - check：勾选即存，load 时回填 checked
+    //   - token：额外同步到一键部署面板的 ocdToken
     [
-      { id: 'icBindAk', key: 'wb_zyy_ak', ev: 'input' },
-      { id: 'icBindSk', key: 'wb_zyy_sk', ev: 'input' },
-      { id: 'icBindIsp', key: 'wb_zyy_isp', ev: 'change' },
-      { id: 'icBindOwnerId', key: 'wb_zyy_owner', ev: 'input' }
+      { id: 'icBindAk', key: 'wb_zyy_ak', type: 'text', ev: 'input' },
+      { id: 'icBindSk', key: 'wb_zyy_sk', type: 'text', ev: 'input' },
+      { id: 'icBindIsp', key: 'wb_zyy_isp', type: 'select', ev: 'change' },
+      { id: 'icBindOwnerId', key: 'wb_zyy_owner', type: 'text', ev: 'input' },
+      { id: 'icBindToken', key: 'zy_admin_token', type: 'text', ev: 'input' },
+      { id: 'icBindCleanMac', key: 'wb_zyy_cleanmac', type: 'check', ev: 'change' }
     ].forEach(function (f) {
       var el = document.getElementById(f.id);
       if (!el) return;
       try {
         var saved = localStorage.getItem(f.key);
-        if (saved !== null) el.value = saved;
+        if (saved !== null) {
+          if (f.type === 'check') el.checked = (saved === '1' || saved === 'true');
+          else el.value = saved;
+        }
       } catch (e) {}
       el.addEventListener(f.ev, function () {
-        try { localStorage.setItem(f.key, el.value); } catch (e) {}
+        try {
+          var v = (f.type === 'check') ? (el.checked ? '1' : '0') : el.value;
+          localStorage.setItem(f.key, v);
+          // token 输入框：同时同步到一键部署面板的 ocdToken
+          if (f.id === 'icBindToken') {
+            var ocdToken = document.getElementById('ocdToken');
+            if (ocdToken) ocdToken.value = el.value;
+          }
+        } catch (e) {}
       });
     });
-    // token：从 localStorage 回显到本页输入框（也兼容一键部署面板的 ocdToken）
-    var tokenEl = document.getElementById('icBindToken');
-    if (tokenEl) {
-      try {
-        var savedToken = localStorage.getItem('zy_admin_token');
-        if (savedToken) tokenEl.value = savedToken;
-      } catch (e) {}
-    }
     // 进入页面：先合并云端 clone 映射（Bug B 修复：清缓存/换浏览器不丢），再渲染
     icSyncCloudBizMap();
   }
@@ -828,21 +836,69 @@
       step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
 
       // ③ 轮询镜像就绪（最多 5 分钟）
+      // 阿里云 SWAS 镜像状态: 'Creating' / 'Available' / 'CreateFailed' / 'Waiting'
+      // ListImages 对未就绪的镜像有时不会返回，所以每一轮都要打出来才知道进展
       var ready = false;
+      var lastInfo = '';
       for (var i = 0; i < 30; i++) {
         await icSleep(10000);
-        var lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+        var lr;
+        try {
+          lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+        } catch (e) {
+          step('⚠️ [轮询 ' + (i + 1) + '/30] ListImages 报错：' + e.message);
+          continue;
+        }
         var imgs = icParseImgs(lr);
+        // ImageId 可能带/不带 'm-' 前缀，两边都试
+        var nid = (newImageId || '').replace(/^m-/, '');
         var found = imgs.filter(function (im) {
-          return (newImageId && im.ImageId === newImageId) || im.ImageName === imageName;
+          var iid = (im.ImageId || '').replace(/^m-/, '');
+          return (nid && iid === nid) || im.ImageName === imageName;
         })[0];
         if (found) {
-          var s = (found.Status || found.status || '').toLowerCase();
-          if (s === 'available') { newImageId = found.ImageId; ready = true; break; }
-          if (s === 'failed' || s === 'error') break;
+          var s = (found.Status || found.status || found.ImageStatus || '').toString();
+          var info = '状态="' + s + '" Progress="' + (found.Progress || found.Usage || '?') + '"';
+          lastInfo = info;
+          if (s.toLowerCase() === 'available' || s.toLowerCase() === 'success') {
+            newImageId = found.ImageId || newImageId; ready = true;
+            step('✅ 镜像就绪（第 ' + (i + 1) + '/30 轮，' + info + '）');
+            break;
+          }
+          if (/fail|error|创建失败/i.test(s)) {
+            step('❌ 镜像创建失败：' + info + '\n原始=' + JSON.stringify(found).slice(0, 400));
+            return;
+          }
+          step('⏳ [轮询 ' + (i + 1) + '/30] ' + info);
+        } else {
+          step('⏳ [轮询 ' + (i + 1) + '/30] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
+          // 关键节点打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
+          if (i === 0 || i === 9 || i === 19 || i === 29) {
+            step('🔍 ListImages 返回前 3 个：' + JSON.stringify(imgs.slice(0, 3)).slice(0, 600));
+          }
         }
       }
-      if (!ready) { step('⚠️ 镜像未在 5 分钟内就绪，请到控制台确认后手动开通。'); return; }
+      if (!ready) {
+        step('⚠️ 镜像未在 5 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
+        // 兜底：去掉 ImageType 参数再查一次（SWAS 自定义镜像可能没这个 filter）
+        step('🔄 兜底：不带 ImageType 参数重试一次 ListImages...');
+        try {
+          var lr2 = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
+          var imgs2 = icParseImgs(lr2);
+          var found2 = imgs2.filter(function (im) {
+            return (newImageId && im.ImageId === newImageId) || im.ImageName === imageName;
+          })[0];
+          if (found2) {
+            var s2 = (found2.Status || found2.status || found2.ImageStatus || '').toString();
+            step('🔍 兜底找到，状态="' + s2 + '" ' + JSON.stringify(found2).slice(0, 400));
+          } else {
+            step('🔍 兜底仍未找到，原始列表：' + JSON.stringify(imgs2).slice(0, 400));
+          }
+        } catch (e2) {
+          step('🔍 兜底查询也失败：' + e2.message);
+        }
+        return;
+      }
       step('✅ 镜像就绪: ' + newImageId);
 
       // ④ 开通

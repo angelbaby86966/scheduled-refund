@@ -1252,6 +1252,18 @@
     if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
     var ids = chks.map(function (c) { return c.value; });
 
+    // 保险：如果还有未勾选的 Running 实例，提示用户（避免误漏克隆机）
+    var unchk = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:not(:checked)'));
+    var unchkRunning = unchk.filter(function (c) {
+      var lab = c.parentElement && c.parentElement.textContent || '';
+      return /Running/i.test(lab);
+    });
+    if (unchkRunning.length) {
+      var list = unchkRunning.slice(0, 5).map(function (c) { return c.value; }).join(', ');
+      var extra = unchkRunning.length > 5 ? (' 等共 ' + unchkRunning.length + ' 台') : '';
+      if (!confirm('⚠️ 还有 ' + unchkRunning.length + ' 台 Running 未勾选：' + list + extra + '\n\n只对当前勾选生效。继续？')) return;
+    }
+
     // 鉴权方式二选一：admin Token（x-token 走 supabase 转发）OR appId/ak/sk（HMAC 直连 admin）
     var token = icGetAdminToken();
     if (!token && !icHasAdminHmac()) { alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）'); return; }

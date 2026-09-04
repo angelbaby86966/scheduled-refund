@@ -887,7 +887,9 @@
       var r = await AliyunClient.callCentralApi('RunCommand', {
         RegionId: region,
         InstanceId: instId,
-        CommandContent: icB64(icBuildStandardizeScript()),
+        // ✅ SWAS RunCommand 的 CommandContent 必须发明文！云助手 agent 不会自动 base64 -d
+        // 之前用 icB64() 包装导致云助手把 base64 字符串当 shell 执行，报"line 1: REM9..."语法错
+        CommandContent: icBuildStandardizeScript(),
         Type: 'RunShellScript',
         Timeout: 600,
         Name: 'ipes-golden-prep'
@@ -929,9 +931,10 @@
     try {
       // ① 标准化
       step('① 下发标准化命令到 ' + instId + ' ...');
+      // ✅ SWAS RunCommand 的 CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
       await AliyunClient.callCentralApi('RunCommand', {
         RegionId: region, InstanceId: instId,
-        CommandContent: icB64(icBuildStandardizeScript()), Type: 'RunShellScript', Timeout: 600, Name: 'ipes-golden-prep'
+        CommandContent: icBuildStandardizeScript(), Type: 'RunShellScript', Timeout: 600, Name: 'ipes-golden-prep'
       });
       step('✅ 标准化命令已下发，等待 120 秒执行完成...');
       await icSleep(120000);
@@ -1190,9 +1193,10 @@
         // 该实例专属命令：绑定 + 把业务ID 写克隆机本地，使「设备ID ↔ 业务ID」在设备侧物理闭环
         var instCmd = cmd + (bid ? ('; mkdir -p /usr/local/edge && echo "' + bid + '" > /usr/local/edge/business_id') : '');
         try {
+          // ✅ CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
           await AliyunClient.callCentralApi('RunCommand', {
             RegionId: region, InstanceId: iid,
-            CommandContent: icB64(instCmd), Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
+            CommandContent: instCmd, Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
           });
           ok++;
           st.innerHTML += '<div style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发' + (bid ? '（标记业务ID ' + bid + '）' : '') + '</div>';
@@ -1286,7 +1290,8 @@
         try {
           await AliyunClient.callCentralApi('RunCommand', {
             RegionId: region, InstanceId: iid,
-            CommandContent: icB64(cmd), Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
+            // ✅ CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
+            CommandContent: cmd, Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
           });
           ok++;
           log('<span style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发</span>');
@@ -1330,9 +1335,10 @@
     var RC_DEADLINE = Date.now() + 180000;  // 3 分钟
     async function readDeviceCode(iid) {
       // 步骤 a: 发 RunCommand 读 device_code
+      // 步骤 a: 发 RunCommand 读 device_code（CommandContent 发明文，云助手不会自动 base64 -d）
       var r = await AliyunClient.callCentralApi('RunCommand', {
         RegionId: region, InstanceId: iid,
-        CommandContent: icB64(readCodeCmd),
+        CommandContent: readCodeCmd,
         Type: 'RunShellScript', Timeout: 30, Name: 'zyy-readcode'
       });
       var invId = r.InvokeId || r.invokeId || '';

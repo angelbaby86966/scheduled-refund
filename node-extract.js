@@ -1,6 +1,9 @@
 /* ============================================================
- * node-extract.js  v11
+ * node-extract.js  v13
  * 节点ID提取工具（集成到「阿里云工作台」原有网页）
+ *
+ * v13 更新：抓取模式默认查询条件从「在线且待配置」改为「在线」，
+ *         去掉 stage=configured 过滤，避免状态是「在线」但非待配置的节点被漏抓。
  *
  * v11 更新：粘贴/抓取模式均改为「舟翼云节点ID → 节点API → 公网IP」，
  *         节点记录自带 publicIP，无需再映射阿里云实例ID或调 SWAS API。
@@ -462,7 +465,7 @@ async function zyFetchOwner(token, ownerId, opts) {
   opts = opts || {};
   var method = (opts.method || 'GET').toUpperCase();
   var path   = opts.path || '/api/edgeNode/getEdgeNodeList';
-  var queryTpl = opts.query || 'ownerId={ownerId}&isOnline=1&status=online&stage=configured';
+  var queryTpl = opts.query || 'ownerId={ownerId}&isOnline=1';
   var query  = queryTpl.replace(/\{ownerId\}/g, encodeURIComponent(ownerId));
 
   // 同时尝试把 token 放到常见 header，兼容不同转发器/后台实现
@@ -577,7 +580,7 @@ function readAdvancedFromInputs() {
   return {
     method: (document.getElementById('zyApiMethod')  || {}).value || 'GET',
     path:   (document.getElementById('zyApiPath')    || {}).value || '/api/edgeNode/getEdgeNodeList',
-    query:  (document.getElementById('zyApiQuery')   || {}).value || 'ownerId={ownerId}&isOnline=1&status=online&stage=configured',
+    query:  (document.getElementById('zyApiQuery')   || {}).value || 'ownerId={ownerId}&isOnline=1',
   };
 }
 function zySaveAdvanced() {
@@ -588,7 +591,7 @@ function zySaveAdvanced() {
 }
 function zyResetAdvanced() {
   try { localStorage.removeItem(ZY_ADV_KEY); } catch (e) {}
-  var def = { method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1&status=online&stage=configured' };
+  var def = { method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
   var setVal = function (id, v) { var el = document.getElementById(id); if (el) el.value = v; };
   setVal('zyApiMethod', def.method);
   setVal('zyApiPath',   def.path);
@@ -695,7 +698,7 @@ async function zySearchNodes() {
   if (dedup.length) {
     var ownerLabel = ownerIds.length === 1 ? ownerIds[0] : (ownerIds.length + ' 个属主');
     renderZyNodes(dedup, ownerLabel);
-    var msg = '✅ 抓取到 <strong>' + dedup.length + '</strong> 个在线且待配置节点（' + ownerLabel + '）';
+    var msg = '✅ 抓取到 <strong>' + dedup.length + '</strong> 个在线节点（' + ownerLabel + '）';
     if (errors.length) msg += '<br><span style="color:#fa8c16;">⚠️ ' + errors.length + ' 个属主失败：' + errors.join('；') + '</span>';
     if (st) st.innerHTML = msg;
   } else {
@@ -704,7 +707,7 @@ async function zySearchNodes() {
       failMsg = '❌ 抓取失败（已重试 1 次）：' + errors.join('；');
       failMsg += '<br><small style="color:#666;">💡 排查：<b>①</b> 在 admin.zhouyi.top 后台按 F12 抓「资源池列表」的请求 URL/参数，填到上方「⚙ 高级」区即可切换到正确的接口；<b>②</b> 检查 token 是否过期。</small>';
     } else {
-      failMsg = '❌ 未抓取到任何节点（该属主可能无「在线且待配置」节点或权限不足）';
+      failMsg = '❌ 未抓取到任何节点（该属主可能无「在线」节点或权限不足）';
     }
     if (st) st.innerHTML = failMsg;
   }
@@ -748,7 +751,7 @@ async function zySearchAndQueryIps() {
 
   var r = await zyFetchOwnerIds(token, advCfg, ownerIds);
   if (!r.dedup.length) {
-    var failMsg = r.errors.length ? ('❌ 抓取失败：' + r.errors.join('；')) : '❌ 未抓取到任何「在线且待配置」节点（属主可能无此类节点或权限不足）';
+    var failMsg = r.errors.length ? ('❌ 抓取失败：' + r.errors.join('；')) : '❌ 未抓取到任何「在线」节点（属主可能无此类节点或权限不足）';
     if (st) st.innerHTML = failMsg;
     if (btn) { btn.disabled = false; btn.textContent = '🌐 抓取并查公网IP'; }
     return;

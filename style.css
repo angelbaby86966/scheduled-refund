@@ -1159,9 +1159,22 @@ body {
 }
 
 .fw-region-hint {
-  font-size: 11px;
-  color: #999;
-  margin-top: 4px;
+	font-size: 11px;
+	color: #999;
+	margin-top: 4px;
+}
+
+/* 命令助手：地域被设为“不执行”时的视觉提示 */
+.fw-region-item.skip-region {
+	opacity: 0.65;
+	background: #fafafa;
+}
+.fw-region-item.skip-region .fw-region-label {
+	color: #999;
+}
+.fw-region-item.skip-region select {
+	color: #999;
+	background: #f0f0f0;
 }
 
 .order-region-item .region-name {

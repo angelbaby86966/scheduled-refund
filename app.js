@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v44 已加载 - 退订失败回退:控制台按钮+ProductCode探测工具', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v94 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -77,7 +77,7 @@ function renderUserList() {
 
   // 从云端刷新用户数据
   if (window.CloudStore) {
-    CloudStore.getAllUsers(true).then(function(db) {
+    CloudStore.getAllUsers().then(function(db) {
       saveUserDB(db);
       renderUserListFromDB(db);
     }).catch(function(err) {
@@ -146,7 +146,7 @@ function addUser() {
   msgEl.innerHTML = '<span style="color:#1890ff;">☁️ 正在写入云端...</span>';
 
   // 从云端检查并写入
-  CloudStore.getAllUsers(true).then(function(db) {
+  CloudStore.getAllUsers().then(function(db) {
     if (db.users && db.users[username]) {
       msgEl.innerHTML = '<span style="color:#ff4d4f;">用户 "' + escapeHtmlText(username) + '" 已存在</span>';
       return Promise.reject('exists');
@@ -159,13 +159,7 @@ function addUser() {
     renderUserList();
   }).catch(function(err) {
     if (err === 'exists') return;
-    var text = err.message || String(err);
-    var friendly = text;
-    if (/duplicate key|23505|app_users_pkey/i.test(text)) {
-      friendly = '用户名「' + escapeHtmlText(username) + '」已存在，或用户表自增ID序列冲突。' +
-        '若用户名未重复，请去 Supabase 控制台执行：SELECT setval(\'app_users_id_seq\', (SELECT MAX(id) FROM app_users));';
-    }
-    msgEl.innerHTML = '<span style="color:#ff4d4f;">❌ 添加失败: ' + friendly + '</span>';
+    msgEl.innerHTML = '<span style="color:#ff4d4f;">❌ 添加失败: ' + (err.message || err) + '</span>';
   });
 }
 
@@ -305,7 +299,7 @@ var REGION_COLORS = {
   'cn-guangzhou': '#8b5cf6',
   'cn-heyuan':    '#06b6d4',
   'cn-wuhan-lr':  '#ec4899',
-  'cn-wulanchabu': '#84cc16',
+  'cn-wulanchabu': '#14b8a6',
 };
 
 // 超时设置的 fetch 封装（用于直接调用阿里云 API 的防超时）
@@ -682,14 +676,25 @@ async function loadAllSelectedRegionInstances() {
   log('🔄 加载实例...', 'info');
   var regionIds = Array.from(state.selectedRegions);
 
-  var results = await Promise.all(regionIds.map(function(rid) {
-    return AliyunClient.listInstances(rid, { pageSize: 100 }).then(function(data) {
-      state.regionData[rid].instances = data.Instances || [];
-      log('  ' + REGION_INFO[rid] + ': ' + (data.Instances ? data.Instances.length : 0) + ' 台', 'info');
-    }).catch(function(err) {
+  var results = await Promise.all(regionIds.map(async function(rid) {
+    try {
+      var allInsts = [];
+      var pageNum = 1;
+      var totalCount = 0;
+      do {
+        var data = await AliyunClient.listInstances(rid, { pageSize: 100, pageNumber: pageNum });
+        var insts = (data && data.Instances) || [];
+        allInsts = allInsts.concat(insts);
+        totalCount = data.TotalCount || allInsts.length;
+        pageNum++;
+      } while (allInsts.length < totalCount);
+      state.regionData[rid].instances = allInsts;
+      state.regionData[rid].totalCount = totalCount;
+      log('  ' + REGION_INFO[rid] + ': ' + allInsts.length + ' 台', 'info');
+    } catch (err) {
       log('  ' + REGION_INFO[rid] + ': 加载失败 - ' + err.message, 'error');
-      state.regionData[rid].instances = [];
-    });
+      if (!state.regionData[rid].instances) state.regionData[rid].instances = [];
+    }
   }));
 
   renderInstances();
@@ -1034,46 +1039,59 @@ async function batchApplyAllTemplates() {
     renderInstances();
 
     var totalSuccess = 0, totalFail = 0;
+    var ROUNDS = 3;          // 总共执行 3 遍
+    var ROUND_DELAY_MS = 2000; // 每遍之间间隔 2 秒
 
     // 地域之间并行执行，每个地域内部按 10 台分批（阿里云 ApplyFirewallTemplate 单次上限 10 个 InstanceId）
-    await Promise.all(regionIds.map(async function(rid3) {
-      var templateName = regionSelections[rid3];
-      if (!templateName) return;
+    for (var round = 1; round <= ROUNDS; round++) {
+      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+      log('🛡️ 第 ' + round + '/' + ROUNDS + ' 遍应用防火墙模板...', 'info');
 
-      var tmpl = state.allTemplates.find(function(t) { return t.name === templateName; });
-      if (!tmpl || !tmpl.regionTemplates[rid3]) { log('❌ [' + REGION_INFO[rid3] + '] 模板映射有问题', 'error'); return; }
+      await Promise.all(regionIds.map(async function(rid3) {
+        var templateName = regionSelections[rid3];
+        if (!templateName) return;
 
-      var templateId = tmpl.regionTemplates[rid3];
-      var rd = state.regionData[rid3];
-      var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
+        var tmpl = state.allTemplates.find(function(t) { return t.name === templateName; });
+        if (!tmpl || !tmpl.regionTemplates[rid3]) { log('❌ [' + REGION_INFO[rid3] + '] 模板映射有问题', 'error'); return; }
 
-      if (instanceIds.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
+        var templateId = tmpl.regionTemplates[rid3];
+        var rd = state.regionData[rid3];
+        var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
 
-      var BATCH_SIZE = 10;     // 阿里云 ApplyFirewallTemplate 单次最多 10 个 InstanceId
-      var BATCH_DELAY = 300;   // 批间间隔 ms
-      var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
-      log('🛡️ [' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台分 ' + batchCount + ' 批执行（每批最多10台）', 'info');
+        if (instanceIds.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
 
-      for (var b = 0; b < instanceIds.length; b += BATCH_SIZE) {
-        var batch = instanceIds.slice(b, b + BATCH_SIZE);
-        var batchNum = Math.floor(b / BATCH_SIZE) + 1;
-        try {
-          var result = await AliyunClient.applyFirewallTemplate(rid3, templateId, batch);
-          totalSuccess++;
-          log('  ✅ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): TaskId=' + (result.TaskId || 'OK'), 'success');
-        } catch (err) {
-          totalFail++;
-          log('  ❌ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): ' + (err.message || err), 'error');
+        var BATCH_SIZE = 10;     // 阿里云 ApplyFirewallTemplate 单次最多 10 个 InstanceId
+        var BATCH_DELAY = 300;   // 批间间隔 ms
+        var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
+        log('🛡️ [' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台分 ' + batchCount + ' 批执行（每批最多10台）', 'info');
+
+        for (var b = 0; b < instanceIds.length; b += BATCH_SIZE) {
+          var batch = instanceIds.slice(b, b + BATCH_SIZE);
+          var batchNum = Math.floor(b / BATCH_SIZE) + 1;
+          try {
+            var result = await AliyunClient.applyFirewallTemplate(rid3, templateId, batch);
+            totalSuccess++;
+            log('  ✅ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): TaskId=' + (result.TaskId || 'OK'), 'success');
+          } catch (err) {
+            totalFail++;
+            log('  ❌ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): ' + (err.message || err), 'error');
+          }
+          // 批间停顿避免限流
+          if (b + BATCH_SIZE < instanceIds.length) {
+            await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
+          }
         }
-        // 批间停顿避免限流
-        if (b + BATCH_SIZE < instanceIds.length) {
-          await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
-        }
+      }));
+
+      // 每遍之间停顿 2 秒（最后一遍后不需要）
+      if (round < ROUNDS) {
+        log('⏱️ 第 ' + round + ' 遍完成，等待 2 秒后继续...', 'info');
+        await new Promise(function(r) { setTimeout(r, ROUND_DELAY_MS); });
       }
-    }));
+    }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('📊 防火墙模板批量执行完成: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
+    log('📊 防火墙模板批量执行完成（共 ' + ROUNDS + ' 遍）: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
   } catch (err) {
     log('❌ 严重错误: ' + err.message, 'error');
     console.error(err);
@@ -1099,12 +1117,74 @@ async function loadAllRegionCommands() {
     }));
 
     updateCmdRegionGrid();
+    updateCmdBatchTemplateSelect();
     var totalCmds = 0;
     for (var i = 0; i < results.length; i++) { totalCmds += (results[i].totalCount || 0); }
     log('✅ 加载了 ' + totalCmds + ' 条命令（跨 ' + regionIds.length + ' 个地域）', 'success');
   } catch (err) {
     log('❌ 加载命令失败: ' + err.message, 'error');
   }
+}
+
+function updateCmdBatchTemplateSelect() {
+  var sel = document.getElementById('cmdBatchTemplateSelect');
+  var hint = document.getElementById('cmdBatchTemplateHint');
+  if (!sel) return;
+
+  // 收集所有地域都存在的命令模板（按 commandId 去重）
+  var regionIds = Object.keys(REGION_INFO);
+  var commandMap = {};
+  regionIds.forEach(function(rid) {
+    var cmds = state.regionCommands[rid] || [];
+    cmds.forEach(function(c) {
+      if (!commandMap[c.commandId]) {
+        commandMap[c.commandId] = { commandId: c.commandId, name: c.name, type: c.type, regionCount: 0 };
+      }
+      commandMap[c.commandId].regionCount++;
+    });
+  });
+
+  var allCommands = Object.values(commandMap).sort(function(a, b) { return a.name.localeCompare(b.name, 'zh-CN'); });
+
+  if (allCommands.length === 0) {
+    sel.innerHTML = '<option value="">暂无命令，请先同步</option>';
+    sel.disabled = true;
+    if (hint) hint.textContent = '同步后此处会列出所有可用命令模板';
+    return;
+  }
+
+  var html = '<option value="">选择模板一键应用到全部地域</option>';
+  allCommands.forEach(function(c) {
+    html += '<option value="' + c.commandId + '">' + c.name + ' (' + (c.type || 'Shell') + ') — ' + c.regionCount + ' 个地域可用</option>';
+  });
+  sel.innerHTML = html;
+  sel.disabled = false;
+  if (hint) hint.textContent = '一键应用到9个地域（已有选择的地域会被覆盖；想跳过请选“不执行”）';
+}
+
+function applyBatchCommandTemplate() {
+  var sel = document.getElementById('cmdBatchTemplateSelect');
+  if (!sel) return;
+  var commandId = sel.value;
+  if (!commandId) return;
+
+  var regionIds = Object.keys(REGION_INFO);
+  var applied = 0, skipped = 0;
+  regionIds.forEach(function(rid) {
+    var regionSel = document.querySelector('#cmdRegionGrid select[data-region="' + rid + '"]');
+    if (!regionSel) return;
+    var cmds = state.regionCommands[rid] || [];
+    var hasCmd = cmds.some(function(c) { return c.commandId === commandId; });
+    if (hasCmd) {
+      regionSel.value = commandId;
+      onCmdRegionChange(rid);
+      applied++;
+    } else {
+      skipped++;
+    }
+  });
+
+  log('📋 批量选择模板「' + (sel.options[sel.selectedIndex].text || commandId) + '」：已应用 ' + applied + ' 个地域' + (skipped > 0 ? '，' + skipped + ' 个地域无该模板已跳过' : ''), 'info');
 }
 
 function updateCmdRegionGrid() {
@@ -1121,20 +1201,25 @@ function updateCmdRegionGrid() {
     if (commands.length === 0) {
       selectHtml = '<select class="select" data-region="' + rid + '" disabled><option value="">暂无命令</option></select>';
     } else {
-      var opts = commands.map(function(c, i) {
+      // 默认第一项为“不执行”，允许用户显式跳过该地域
+      var opts = '<option value="__SKIP__">— 不执行 —</option>';
+      opts += commands.map(function(c, i) {
         return '<option value="' + c.commandId + '"' + (i === 0 ? ' selected' : '') + '>' + c.name + ' (' + (c.type || 'Shell') + ')' + '</option>';
       }).join('');
       selectHtml = '<select class="select" data-region="' + rid + '" onchange="onCmdRegionChange(\'' + rid + '\')">' + opts + '</select>';
     }
 
+    var isSkip = false;
     if (state._cmdRegionSelections && state._cmdRegionSelections[rid] && commands.length > 0) {
-      selectHtml = selectHtml.replace('value="' + state._cmdRegionSelections[rid] + '"', 'value="' + state._cmdRegionSelections[rid] + '" selected');
+      var saved = state._cmdRegionSelections[rid];
+      selectHtml = selectHtml.replace('value="' + saved + '"', 'value="' + saved + '" selected');
+      isSkip = (saved === '__SKIP__');
     }
 
-    return '<div class="fw-region-item">' +
+    return '<div class="fw-region-item' + (isSkip ? ' skip-region' : '') + '">' +
       '<div class="fw-region-label"><span class="region-dot" style="background:' + color + ';"></span>' + regionName + '</div>' +
       selectHtml +
-      (commands.length > 0 ? '<div class="fw-region-hint">' + commands.length + ' 条命令可用</div>' : '<div class="fw-region-hint" style="color:#e74c3c;">暂无命令</div>') +
+      (commands.length > 0 ? '<div class="fw-region-hint">' + commands.length + ' 条命令可用 · 选“不执行”可跳过</div>' : '<div class="fw-region-hint" style="color:#e74c3c;">暂无命令</div>') +
       '</div>';
   }).join('');
 }
@@ -1144,6 +1229,12 @@ function onCmdRegionChange(regionId) {
   if (!sel) return;
   if (!state._cmdRegionSelections) state._cmdRegionSelections = {};
   state._cmdRegionSelections[regionId] = sel.value || null;
+
+  // 视觉提示：选“不执行”时降低该卡片透明度
+  var item = sel.closest('.fw-region-item');
+  if (item) {
+    item.classList.toggle('skip-region', sel.value === '__SKIP__');
+  }
 }
 
 async function batchExecuteAllCommands() {
@@ -1163,11 +1254,11 @@ async function batchExecuteAllCommands() {
       var rid = regionIds[i];
       var commands = state.regionCommands[rid] || [];
       var sel = document.querySelector('#cmdRegionGrid select[data-region="' + rid + '"]');
-      if (commands.length > 0 && sel && sel.value) { regionSelections[rid] = sel.value; }
+      if (commands.length > 0 && sel && sel.value && sel.value !== '__SKIP__') { regionSelections[rid] = sel.value; }
     }
 
     if (Object.keys(regionSelections).length === 0) {
-      log('❌ 没有任何地域有可执行命令', 'error');
+      log('❌ 没有选中任何要执行的地域（全部被设为“不执行”或未同步命令）', 'error');
       return;
     }
 
@@ -1224,64 +1315,71 @@ async function batchExecuteAllCommands() {
       return;
     }
 
-    log('🔄 逐个地域执行命令（每批最多 100 台，并发地域之间并行）...', 'info');
-    var totalSuccess = 0, totalFail = 0;
+    var ROUNDS = 3;
+    var ROUND_DELAY_MS = 2000;
     var BATCH_SIZE = 100;      // 阿里云 InvokeCommand 硬上限：单次 ≤100 台
     var BATCH_DELAY = 400;     // 批间间隔 ms（每批之间的串行等待，避免触发 QPS 限流）
 
-    // 地域之间并行；每个地域内部按 100 台分批循环
-    await Promise.all(selRids.map(async function(rid3) {
-      var cmdId = regionSelections[rid3];
-      var rd = state.regionData[rid3];
-      var instances = (rd && rd.instances) || [];
-      if (instances.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
+    var totalSuccess = 0, totalFail = 0;
 
-      var instanceIds = instances.map(function(inst) { return inst.InstanceId; });
-      var regionSuccess = 0, regionFail = 0;
-      var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
-      if (batchCount > 1) {
-        log('🔄 [' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台 → 自动分 ' + batchCount + ' 批（每批最多 ' + BATCH_SIZE + ' 台）', 'info');
-      }
+    for (var round = 1; round <= ROUNDS; round++) {
+      log('🔄 第 ' + round + '/' + ROUNDS + ' 遍开始执行命令...', 'info');
+      var roundSuccess = 0, roundFail = 0;
 
-      // 每个地域内部：按 100 台顺序循环（保证 QPS 安全）
-      for (var bi = 0; bi < instanceIds.length; bi += BATCH_SIZE) {
-        var batchIdx = Math.floor(bi / BATCH_SIZE) + 1;
-        var slice = instanceIds.slice(bi, bi + BATCH_SIZE);
+      // 地域之间并行；每个地域内部按 100 台分批循环
+      await Promise.all(selRids.map(async function(rid3) {
+        var cmdId = regionSelections[rid3];
+        var rd = state.regionData[rid3];
+        var instances = (rd && rd.instances) || [];
+        if (instances.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
+
+        var instanceIds = instances.map(function(inst) { return inst.InstanceId; });
+        var regionSuccess = 0, regionFail = 0;
+        var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
         if (batchCount > 1) {
-          log('   📦 [' + REGION_INFO[rid3] + '] 第 ' + batchIdx + '/' + batchCount + ' 批：' + slice.length + ' 台…', 'info');
+          log('🔄 [第' + round + '遍][' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台 → 自动分 ' + batchCount + ' 批（每批最多 ' + BATCH_SIZE + ' 台）', 'info');
         }
-        try {
-          var result = await AliyunClient.invokeCommand(rid3, cmdId, slice);
-          regionSuccess += slice.length;
-          var lastInvoke = result && (result.InvokeId || result.InvokeId === '' ? result.InvokeId : '');
+
+        // 每个地域内部：按 100 台顺序循环（保证 QPS 安全）
+        for (var bi = 0; bi < instanceIds.length; bi += BATCH_SIZE) {
+          var batchIdx = Math.floor(bi / BATCH_SIZE) + 1;
+          var slice = instanceIds.slice(bi, bi + BATCH_SIZE);
           if (batchCount > 1) {
-            log('   ✅ [' + REGION_INFO[rid3] + '] 第 ' + batchIdx + ' 批完成 → InvokeId=' + (lastInvoke || 'OK'), 'success');
-          } else {
-            log('✅ [' + REGION_INFO[rid3] + '] ' + slice.length + ' 台 → InvokeId=' + (lastInvoke || 'OK'), 'success');
+            log('   📦 [第' + round + '遍][' + REGION_INFO[rid3] + '] 第 ' + batchIdx + '/' + batchCount + ' 批：' + slice.length + ' 台…', 'info');
           }
-        } catch (err) {
-          regionFail += slice.length;
-          log('   ❌ [' + REGION_INFO[rid3] + '] 第 ' + batchIdx + ' 批 (' + slice.length + ' 台) 失败: ' + (err.message || err), 'error');
+          try {
+            var result = await AliyunClient.invokeCommand(rid3, cmdId, slice);
+            regionSuccess += slice.length;
+            var lastInvoke = result && (result.InvokeId || result.InvokeId === '' ? result.InvokeId : '');
+            if (batchCount > 1) {
+              log('   ✅ [第' + round + '遍][' + REGION_INFO[rid3] + '] 第 ' + batchIdx + ' 批完成 → InvokeId=' + (lastInvoke || 'OK'), 'success');
+            } else {
+              log('✅ [第' + round + '遍][' + REGION_INFO[rid3] + '] ' + slice.length + ' 台 → InvokeId=' + (lastInvoke || 'OK'), 'success');
+            }
+          } catch (err) {
+            regionFail += slice.length;
+            log('   ❌ [第' + round + '遍][' + REGION_INFO[rid3] + '] 第 ' + batchIdx + ' 批 (' + slice.length + ' 台) 失败: ' + (err.message || err), 'error');
+          }
+          // 批间间隔（最后一批不等待）
+          if (bi + BATCH_SIZE < instanceIds.length) await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
         }
-        // 批间间隔（最后一批不等待）
-        if (bi + BATCH_SIZE < instanceIds.length) await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
+
+        roundSuccess += regionSuccess;
+        roundFail += regionFail;
+      }));
+
+      totalSuccess += roundSuccess;
+      totalFail += roundFail;
+      log('🏁 第 ' + round + '/' + ROUNDS + ' 遍完成：成功 ' + roundSuccess + ' 台，失败 ' + roundFail + ' 台', roundFail === 0 ? 'success' : 'warn');
+
+      if (round < ROUNDS) {
+        log('⏳ 等待 2 秒后继续下一遍...', 'info');
+        await new Promise(function(r) { setTimeout(r, ROUND_DELAY_MS); });
       }
-
-      // 累计到全局（异步闭包，外层 Promise.all 后统一打印；这里先填到一个对象上）
-      if (!state._cmdBatchStats) state._cmdBatchStats = {};
-      state._cmdBatchStats[rid3] = { success: regionSuccess, fail: regionFail };
-    }));
-
-    // 汇总
-    var statsRids = Object.keys(state._cmdBatchStats || {});
-    for (var si = 0; si < statsRids.length; si++) {
-      totalSuccess += state._cmdBatchStats[statsRids[si]].success;
-      totalFail += state._cmdBatchStats[statsRids[si]].fail;
     }
-    state._cmdBatchStats = null;
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('🏁 批量执行完成: 成功 ' + totalSuccess + ' 台, 失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
+    log('🏁 批量执行完成（共 ' + ROUNDS + ' 遍）: 成功 ' + totalSuccess + ' 台, 失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
     log('💡 提示：执行结果可在阿里云控制台「服务器运维 → 命令助手 → 执行历史」查看每台机器的输出', 'info');
   } catch (err) {
     log('❌ 严重错误: ' + err.message, 'error');
@@ -1310,7 +1408,10 @@ function initScheduleTimePicker() {
 function toggleCancelMode() {
   var mode = document.querySelector('input[name="cancelMode"]:checked').value;
   document.getElementById('scheduledTimeGroup').style.display = mode === 'scheduled' ? 'block' : 'none';
-  document.getElementById('confirmGroup').style.display = mode === 'scheduled' ? 'none' : 'block';
+  var btn = document.getElementById('cancelBtn');
+  if (btn) {
+    btn.textContent = mode === 'scheduled' ? '⏰ 保存定时任务' : '🗑️ 立即退订';
+  }
   checkConfirm();
 }
 
@@ -1324,8 +1425,7 @@ function checkConfirm() {
     var mEl = document.getElementById('scheduleMinute');
     btn.disabled = !(hEl && mEl && hEl.value !== '' && mEl.value !== '');
   } else {
-    var inputEl = document.getElementById('confirmInput');
-    btn.disabled = !(inputEl && inputEl.value.trim() === '确认退订');
+    btn.disabled = false;
   }
 }
 
@@ -1396,8 +1496,7 @@ async function executeCancel() {
   }
 
   // 立即退订
-  var confirmInput = document.getElementById('confirmInput').value.trim();
-  if (confirmInput !== '确认退订') { alert('请输入"确认退订"以确认操作'); return; }
+  if (!confirm('确认现在全部退订吗？')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🗑️ 开始【退订退款】所有地区的所有云主机（BSS RefundInstance，真正退款）...', 'warn');
@@ -1436,8 +1535,6 @@ async function executeCancel() {
 
     if (allInstances.length === 0) {
       log('✅ 未发现任何实例，无需退订', 'success');
-      document.getElementById('confirmInput').value = '';
-      document.getElementById('cancelBtn').disabled = true;
       return;
     }
 
@@ -1447,7 +1544,7 @@ async function executeCancel() {
       log('   • [' + (REGION_INFO[_rk] || _rk) + '] ' + byRegion[_rk].length + ' 台', 'info');
     }
 
-    // 第2步：按地域有界并发退订（并发≤REFUND_CONCURRENCY，速率≤REFUND_QPS/秒，限流自动退避重试，稳定 token 幂等不重复退款）
+    // 第2步：按地域并行退订（参考 scheduled-refund：全局有界并发 + 令牌桶限速，限流自动退避）
     var refundTotals = await refundByRegionParallel(byRegion, { recordFailures: true });
     var totalSuccess = refundTotals.success, totalSkipped = refundTotals.skipped,
         totalLocked = refundTotals.locked, totalFail = refundTotals.fail;
@@ -1465,8 +1562,6 @@ async function executeCancel() {
 
     await refreshAllRegions();
     deselectAllRegions();
-    document.getElementById('confirmInput').value = '';
-    document.getElementById('cancelBtn').disabled = true;
   } catch (err) {
     log('❌ 退订失败: ' + err.message, 'error');
     console.error(err);
@@ -1743,9 +1838,9 @@ async function refundSelectedInstances() {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 退订中...'; }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-    log('🗑️ 开始非全额退订：' + selectedItems.length + ' 台实例（按地区并行，每地区每批 50 台，批间 3 秒）', 'warn');
+    log('🗑️ 开始非全额退订：' + selectedItems.length + ' 台实例（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避）', 'warn');
 
-    // 按地区分组，复用 refundByRegionParallel 并行退订
+    // 按地区分组，复用 refundByRegionParallel 有界并发退订（参考 scheduled-refund v3.5 模式）
     var byRegion = {};
     for (var j = 0; j < selectedItems.length; j++) {
       var item = selectedItems[j];
@@ -1753,7 +1848,7 @@ async function refundSelectedInstances() {
       byRegion[item.regionId].push({ InstanceId: item.instanceId, instanceId: item.instanceId });
     }
 
-    var rt = await refundByRegionParallel(byRegion, {});
+    var rt = await refundByRegionParallel(byRegion, { recordFailures: true });
     var success = rt.success, skip = rt.skipped, fail = rt.fail + rt.locked;
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
@@ -2008,13 +2103,13 @@ async function executeScheduledRefund() {
         (byRegion[a.regionId] = byRegion[a.regionId] || []).push(a);
       }
 
-      log('🔄 第 ' + _round + ' 轮：退订 ' + allInstances.length + ' 台（有界并发，限流自动退避）...', 'warn');
-      var rt = await refundByRegionParallel(byRegion, {});
+      log('🔄 第 ' + _round + ' 轮：退订 ' + allInstances.length + ' 台（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避）...', 'warn');
+      var rt = await refundByRegionParallel(byRegion, { recordFailures: true });
       var success = rt.success, skip = rt.skipped, fail = rt.fail + rt.locked;
       _profSuccess += success; _profSkip += skip; _profFail += fail;
 
       log('  🔁 凭证「' + prof.name + '」第 ' + _round + ' 轮：成功 ' + success + ' 台，累计 ' + _profSuccess + '（继续复查…）', 'info');
-      await new Promise(function(r){ setTimeout(r, 800); }); // 让阿里云侧状态刷新（已缩短到 0.8s 以加快退订节奏）
+      await new Promise(function(r){ setTimeout(r, 2000); }); // 让阿里云侧状态刷新，避免连续查询命中缓存
     }
     if (_round >= _maxRounds) {
       log('  ⚠️ 凭证「' + prof.name + '」达到最大轮数仍有实例，停止以免死循环', 'warn');
@@ -2187,7 +2282,7 @@ async function batchCreateInstances() {
   state.orderResults = [];
 
   // 🔧 v35 修复：之前 for (var j=0;...) 循环内 var j = await resp.json() 重名导致循环提前终止
-  // 现在改为 map + Promise.all 并发执行 6 个地域下单（每个地域独立 try-catch，单个失败不影响其他）
+  // 现在改为 map + Promise.all 并发执行 9 个地域下单（每个地域独立 try-catch，单个失败不影响其他）
   log('📦 准备下单地区列表：' + regionOrders.map(function(o){return o.regionName+'×'+o.count;}).join('、'), 'info');
 
   // 实际下单处理函数（独立 try-catch，单个地区失败不影响其他地区；内置 3 次重试）
@@ -2233,12 +2328,8 @@ async function batchCreateInstances() {
         DataDiskSize: 0,
       };
 
-      // 幂等令牌：同一 order 对象（同地区同数量同批次）永远用同一个 ClientToken，
-      // 重试/复用同一 order 时不会重复下单；不同的 order 对象仍各自唯一（不会误吞合法新开批次）。
-      if (!order._clientToken) {
-        order._clientToken = 'wb-open-' + order.regionId + '-' + order.count + '-' + Date.now();
-      }
-      var clientToken = order._clientToken;
+      // 幂等令牌：同一地区同一次批量任务用同一个 ClientToken，重试时不会重复下单
+      var clientToken = 'wb-' + order.regionId + '-' + order.count + '-' + Date.now();
 
       // 🔄 重试：网络抖动 / Edge Function 偶发超时 / signal aborted 时自动重试
       var maxAttempts = 3;
@@ -2880,7 +2971,7 @@ async function executeCustomCommandToAllRegions() {
   var finalName = name || ('custom-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19));
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('✏️ 开始执行自定义命令: [' + finalName + '] type=' + type + ' 6个地域全部云主机', 'info');
+  log('✏️ 开始执行自定义命令: [' + finalName + '] type=' + type + ' 9个地域全部云主机', 'info');
   log('   命令内容（共 ' + content.length + ' 字符）：\n' + content, 'info');
 
   // 检查凭证
@@ -2895,9 +2986,9 @@ async function executeCustomCommandToAllRegions() {
   // 立即关闭弹窗，避免挡住操作日志
   closeCustomCommandModal();
 
-  // 1) 加载 6 个地域的全部实例（只调用 listInstances，运维类 API 走地域 endpoint 不需要代理）
+  // 1) 加载 9 个地域的全部实例（只调用 listInstances，运维类 API 走地域 endpoint 不需要代理）
   var regionIds = Object.keys(REGION_INFO);
-  log('🔄 加载 6 个地域的实例…', 'info');
+  log('🔄 加载 9 个地域的实例…', 'info');
   if (!state.regionData) state.regionData = {};
 
   await Promise.all(regionIds.map(function(rid) {
@@ -3202,60 +3293,6 @@ async function batchDeleteCommands() {
   await loadAllRegionCommands();
 }
 
-// 一键删除所有地域的全部命令模板
-async function deleteAllCommands() {
-  // 如果尚未加载命令，先同步一次
-  var hasLoaded = state.regionCommands && Object.keys(state.regionCommands).length > 0;
-  var regionIds = Object.keys(REGION_INFO);
-  if (!hasLoaded) {
-    log('🔄 尚未加载命令列表，先同步阿里云命令...', 'info');
-    await loadAllRegionCommands();
-  }
-
-  var allCommands = [];
-  for (var i = 0; i < regionIds.length; i++) {
-    var rid = regionIds[i];
-    var cmds = (state.regionCommands && state.regionCommands[rid]) || [];
-    for (var j = 0; j < cmds.length; j++) {
-      allCommands.push({ regionId: rid, commandId: cmds[j].commandId, name: cmds[j].name });
-    }
-  }
-
-  if (allCommands.length === 0) {
-    log('❌ 当前没有任何可删除的命令模板', 'error');
-    return;
-  }
-
-  if (!confirm('⚠️ 危险操作！\n\n确定要一键删除所有地域共 ' + allCommands.length + ' 条命令模板吗？\n此操作不可恢复！')) {
-    return;
-  }
-
-  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('🗑️ 一键删除所有命令: 共 ' + allCommands.length + ' 条', 'info');
-
-  var totalSuccess = 0, totalFail = 0;
-  for (var k = 0; k < allCommands.length; k++) {
-    var item = allCommands[k];
-    try {
-      await AliyunClient.deleteCommand(item.regionId, item.commandId);
-      totalSuccess++;
-      log('  ✅ [' + REGION_INFO[item.regionId] + '] 已删除: ' + (item.name || item.commandId), 'success');
-    } catch (err) {
-      totalFail++;
-      log('  ❌ [' + REGION_INFO[item.regionId] + '] 删除失败: ' + (item.name || item.commandId) + ' - ' + (err.message || err), 'error');
-    }
-    if (k < allCommands.length - 1) await new Promise(function(r) { setTimeout(r, 100); });
-  }
-
-  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('📊 一键删除完成: 成功 ' + totalSuccess + ', 失败 ' + totalFail, totalFail === 0 ? 'success' : 'warn');
-
-  // 刷新本地命令列表与UI
-  state.regionCommands = {};
-  updateCmdRegionGrid();
-  log('💡 已清空本地命令缓存，如需更新请重新点击「同步阿里云命令」', 'info');
-}
-
 // =====================================================================
 // 批量创建防火墙模板
 // =====================================================================
@@ -3469,26 +3506,49 @@ async function collectInstancesFromSelectedRegions() {
   }
   if (!state.hasCredentials) throw new Error('请先设置阿里云凭证');
   var regionIds = Array.from(state.selectedRegions);
-  // 强制刷一次该地域的实例（避免缓存为空）
+  // 批量操作前强制翻页重新拉取所选地域全部实例（不依赖缓存，避免地域概览只加载首屏100台导致截断）
   var groups = [];
   for (var i = 0; i < regionIds.length; i++) {
     var rid = regionIds[i];
     var rd = state.regionData[rid];
-    if (!rd || !rd.instances || rd.instances.length === 0) {
-      try {
-        var data = await AliyunClient.listInstances(rid, { pageSize: 100 });
+    try {
+      var allInsts = [];
+      var pageNum = 1;
+      var totalCount = 0;
+      do {
+        var data = await AliyunClient.listInstances(rid, { pageSize: 100, pageNumber: pageNum });
         var insts = (data && data.Instances) || [];
-        if (!state.regionData[rid]) state.regionData[rid] = { name: REGION_INFO[rid], totalCount: 0, instances: [] };
-        state.regionData[rid].instances = insts;
-        state.regionData[rid].totalCount = data.TotalCount || insts.length;
-        log('  ' + REGION_INFO[rid] + '：拉取 ' + insts.length + ' 台', 'info');
-      } catch (err) {
+        allInsts = allInsts.concat(insts);
+        totalCount = data.TotalCount || allInsts.length;
+        pageNum++;
+      } while (allInsts.length < totalCount);
+      if (!state.regionData[rid]) state.regionData[rid] = { name: REGION_INFO[rid], totalCount: 0, instances: [] };
+      state.regionData[rid].instances = allInsts;
+      state.regionData[rid].totalCount = totalCount;
+      log('  ' + REGION_INFO[rid] + '：拉取 ' + allInsts.length + ' 台', 'info');
+    } catch (err) {
+      // 翻页拉取失败：若已有缓存则复用缓存兜底，否则跳过该地域
+      if (rd && rd.instances && rd.instances.length) {
+        log('  ' + REGION_INFO[rid] + '：重新翻页失败，复用缓存 ' + rd.instances.length + ' 台 - ' + err.message, 'warn');
+      } else {
         log('  ' + REGION_INFO[rid] + '：拉取失败 - ' + err.message, 'error');
         continue;
       }
     }
     rd = state.regionData[rid];
-    rd.instances.forEach(function(inst) { groups.push({ regionId: rid, instance: inst }); });
+    // 过滤掉已释放/已过期/正在释放的实例，避免把它们带入退订/重启/重置等批量操作流程
+    var activeInsts = [];
+    var skippedStates = ['Deleted', 'Released', 'Expired', 'Deleting', 'Releasing'];
+    rd.instances.forEach(function(inst) {
+      var s = (inst.Status || '').toString();
+      if (skippedStates.indexOf(s) >= 0) return;
+      activeInsts.push(inst);
+    });
+    var removed = rd.instances.length - activeInsts.length;
+    if (removed > 0) {
+      log('  [' + REGION_INFO[rid] + '] 已过滤掉 ' + removed + ' 台（状态为 Deleted/Released/Expired/Deleting/Releasing）', 'info');
+    }
+    activeInsts.forEach(function(inst) { groups.push({ regionId: rid, instance: inst }); });
   }
   return groups;
 }
@@ -3519,7 +3579,7 @@ async function batchRebootSelectedRegions() {
     var byRegion = {};
     groups.forEach(function(g) { (byRegion[g.regionId] = byRegion[g.regionId] || []).push(g); });
 
-    // 6 个地域并行
+    // 9 个地域并行
     var regionPromises = Object.keys(byRegion).map(function(rid) {
       var arr = byRegion[rid];
       return (async function() {
@@ -3632,14 +3692,64 @@ function updateBatchUnsubBtn() {
 //   2) 并发上限：worker 池最多 REFUND_CONCURRENCY 个在途请求（有界并发）
 //   3) 幂等：每个实例固定一个 clientToken，限流重试时复用，绝不会重复退款
 //   4) 退避重试：Throttling/ServiceUnavailable 等瞬时错误指数退避重试，复用同一 token
-var REFUND_CONCURRENCY = 16;  // 同时最多在途请求数（有界并发上限，已从 8 提升到 16 提速）
-var REFUND_QPS = 12;          // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒，已从 8 提升到 12 提速）
+var REFUND_CONCURRENCY = 8;   // 同时最多在途请求数（有界并发上限，runBoundedRefund 使用）
+var REFUND_QPS = 8;           // 目标平稳速率（runBoundedRefund 令牌桶使用）
+
+// ====== 退订参数（已对齐 scheduled-refund v3.5：全局有界并发 + 令牌桶限速）======
+// 说明：主流入口已改用 refundByRegionParallel(runBoundedRefund)，全局并发≤REFUND_CONCURRENCY、QPS≤REFUND_QPS，
+// 通过令牌桶平滑削峰，减少限流触发；单实例限流时短退避重试（400ms 起、封顶 5s、最多 4 次）。
+// 下列旧分批参数仅作为 refundByRegionBatched 备用，主流程不再使用。
+var REFUND_BATCH_SIZE = 50;        // 每地区每批退订台数（备用）
+var REFUND_INTER_BATCH_MS = 3000;  // 每地区批次之间间隔（备用）
+var REFUND_PER_INSTANCE_TIMEOUT = 60000; // 单实例退订超时（含重试/退避，毫秒）
+var REFUND_MAX_RETRY = 4;          // 限流/瞬时错误退避最大重试次数
+var REFUND_BACKOFF_BASE_MS = 400;  // 退避基数：第 1 次 400ms，之后按 2 倍递增
+var REFUND_BACKOFF_MAX_MS = 5000;  // 单次退避上限（毫秒）
+
+// 读取已持久化的「已退订 / 不可退」实例 ID 集合（避免跨轮次重复退订）
+function loadPersistedRefundSkips() {
+  try {
+    var raw = localStorage.getItem(REFUND_SKIP_PERSIST_KEY);
+    if (raw) {
+      var arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr);
+    }
+  } catch (e) {}
+  return new Set();
+}
+
+// 保存「已退订 / 不可退」实例 ID 集合到 localStorage（CloudStore 异步兜底）
+function savePersistedRefundSkips(set) {
+  try {
+    var arr = Array.from(set || []);
+    localStorage.setItem(REFUND_SKIP_PERSIST_KEY, JSON.stringify(arr));
+  } catch (e) {}
+}
+
+// 清除持久化的退订跳过记录
+function clearPersistedRefundSkips() {
+  try { localStorage.removeItem(REFUND_SKIP_PERSIST_KEY); } catch (e) {}
+}
+
+// 暴露给 UI：清除本地记录的「已退订/不可退」实例，下一轮重新尝试全部实例
+function clearRefundSkipRecords() {
+  if (!confirm('🧹 清除退订记录？\n\n将删除本地记录的「已退订/不可退」实例 ID。\n清除后，下一轮退订会重新尝试所有实例（包括之前可能被误判跳过的）。')) return;
+  clearPersistedRefundSkips();
+  log('🧹 已清除本地退订记录，下一轮将重新尝试全部实例', 'warn');
+  var st = document.getElementById('refundSearchStatus');
+  if (st) st.innerHTML = '🧹 已清除退订记录';
+}
+
+// v2：v1 键名曾被「The resource status error」误持久化为跳过，导致未退订实例被永久跳过，故更换键名丢弃污染数据
+var REFUND_SKIP_PERSIST_KEY = 'refunded_or_locked_instance_ids_v2'; // CloudStore 持久化：仅记录【真正成功退订】与【已确认不存在】的实例 ID
 
 // 限流 / 服务瞬时不可用 错误模式（命中则退避重试）
+// 重点：阿里云 BSS 账号级限流会返回 "Request was denied due to user flow control."
 var REFUND_THROTTLE_PATTERNS = [
   'Throttling', 'Throttling.User', 'ServiceUnavailable', 'InternalError',
   'RequestLimitExceeded', 'SystemBusy', 'TryAgainLater', 'FrequencyLimit',
-  'OverFlow', 'Busy', 'Timeout', 'RequestTimeout'
+  'OverFlow', 'Busy', 'Timeout', 'RequestTimeout',
+  'flow control', 'FlowControl', 'Too Many Requests', 'too many requests'
 ];
 function isRefundThrottle(msg) {
   for (var i = 0; i < REFUND_THROTTLE_PATTERNS.length; i++) {
@@ -3648,7 +3758,10 @@ function isRefundThrottle(msg) {
   return false;
 }
 
-// BSS RefundInstance 不可退订（锁定）错误模式
+// BSS RefundInstance 不可退订（永久锁定，永不重试）错误模式
+// ⚠️ 注意：'The resource status error' / 'resource status error' 已移除！
+// 经验证该错误是【可重试的瞬时/状态错误】，并非「永不退订」。之前误归类为锁定并持久化跳过，
+// 导致未退订实例被永久跳过（用户反馈「没退过的又跳过」）。现归类为 fail，可重试且不持久化。
 var BSS_LOCKED_PATTERNS = [
   'NoApplicable', 'NotApplicable', 'ExceedRefundQuota', 'ExistUnPaidOrder',
   'ExistRefundingOrder', 'NoRestValue', 'AmbassadorOrderLimit', 'ActivityForbidden',
@@ -3664,33 +3777,6 @@ function classifyRefundErr(msg) {
   if (unsubIsSkipped(msg)) return 'skipped';
   return 'fail';
 }
-
-// 按 region:instance 派生的【稳定幂等 Token】：同一实例在任意进程/轮次/定时执行中永远同一 token，
-// 使 BSS 服务端视为同一请求（保留期内幂等），彻底杜绝「退完又反复退 / 重试重复退款」。
-// 与后端 scheduled_refund.py 的 stable_client_token 派生方式一致（wb- + sha1[:16]）。
-function _djb2hex(s) {
-  var h = 5381;
-  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return ('00000000' + h.toString(16)).slice(-8);
-}
-async function stableClientToken(rid, iid) {
-  var key = rid + ':' + iid;
-  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
-    try {
-      var buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(key));
-      var arr = new Uint8Array(buf), hex = '';
-      for (var i = 0; i < arr.length; i++) hex += ('0' + arr[i].toString(16)).slice(-2);
-      return 'wb-' + hex.slice(0, 16);
-    } catch (e) { /* 落到兜底哈希 */ }
-  }
-  // 兜底（非安全上下文）：稳定确定性哈希，同样保证幂等
-  return 'wb-' + _djb2hex(key) + _djb2hex(key.split('').reverse().join(''));
-}
-
-// 浏览器会话内「已退订实例集合」：对标后端 refund_state.json / 参考站 lastTriggered。
-// 同一会话里对已成功/已报退订的实例不再二次发起请求，避免反复退、提速。
-var __refundedIds = window.__refundedIds || (window.__refundedIds = new Set());
-function markRefundedFrontend(iid) { if (iid) __refundedIds.add(iid); }
 
 // 令牌桶：take() 在令牌不足时等待补足，保证整体速率 ≤ refillPerSec
 function makeTokenBucket(capacity, refillPerSec) {
@@ -3717,28 +3803,53 @@ function makeTokenBucket(capacity, refillPerSec) {
   };
 }
 
-// 单实例退订：令牌桶限速 + 稳定幂等 token + 限流退避重试
+// 信号量：限制同时运行的异步任务总数（用于跨地区 RefundInstance 总并发控制）
+function makeSemaphore(max) {
+  var waiting = [];
+  var count = 0;
+  return {
+    acquire: function () {
+      return new Promise(function (resolve) {
+        if (count < max) { count++; resolve(); }
+        else waiting.push(resolve);
+      });
+    },
+    release: function () {
+      count = Math.max(0, count - 1);
+      if (waiting.length) { count++; var next = waiting.shift(); next(); }
+    }
+  };
+}
+
+// 单实例退订：令牌桶限速 + 幂等 token + 限流/瞬时错误退避重试
 async function refundOneBounded(rid, instanceId, bucket, hooks) {
-  await bucket.take(1);
-  var clientToken = await stableClientToken(rid, instanceId); // 稳定 token：同一实例永远相同，杜绝反复退
-  var maxRetry = 5, attempt = 0;
+  if (bucket) await bucket.take(1);
+  var clientToken = 'wb-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+  var maxRetry = REFUND_MAX_RETRY, attempt = 0;
   var regionName = (REGION_INFO[rid] || rid);
   while (true) {
     try {
-      await AliyunClient.refundInstance(rid, instanceId, { clientToken: clientToken });
+      var resp = await AliyunClient.refundInstance(rid, instanceId, { clientToken: clientToken });
+      var data = (resp && resp.data) || {};
+      // 阿里云 BSS 对已退订/不存在的实例返回 Code=ResourceNotExists，但 success=true，
+      // 必须显式识别，否则会出现"实例已退完仍显示退订成功"的假成功。
+      if (data.Code === 'ResourceNotExists' || data.Code === 'Instance.NotFound' || data.Code === 'InvalidInstanceId.NotFound') {
+        return { ok: false, id: instanceId, kind: 'skipped', err: (data.Message || data.Code || '实例已不存在/已退订') };
+      }
       return { ok: true, id: instanceId, kind: 'success' };
     } catch (err) {
       var msg = (err && err.message) || String(err);
       var kind = classifyRefundErr(msg);
-      // 锁定/已退订：不可重试（幂等也无法改变结果），直接返回
-      if (kind !== 'fail') return { ok: false, id: instanceId, kind: kind, err: msg };
-      // 非限流失败：直接报失败；限流且未用尽重试次数：退避后复用同一 token 重试
-      if (!isRefundThrottle(msg) || attempt >= maxRetry) {
+      // 永久锁定/已退订：不可重试（幂等也无法改变结果），直接返回
+      if (kind === 'locked' || kind === 'skipped') return { ok: false, id: instanceId, kind: kind, err: msg };
+      // 限流 或 瞬时失败（含 The resource status error）：在重试次数内退避后复用同一 token 重试
+      if (attempt >= maxRetry) {
         return { ok: false, id: instanceId, kind: 'fail', err: msg };
       }
       attempt++;
-      var backoff = Math.min(3000, 500 * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
-      if (hooks && hooks.onThrottle) hooks.onThrottle(regionName, instanceId, attempt, backoff);
+      // 单实例限流退避：本实例等，其他实例继续跑，不全局暂停
+      var backoff = Math.min(REFUND_BACKOFF_MAX_MS, REFUND_BACKOFF_BASE_MS * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
+      if (hooks && hooks.onThrottle && attempt <= 2) hooks.onThrottle(regionName, instanceId, attempt, backoff);
       await new Promise(function (r) { setTimeout(r, backoff); });
     }
   }
@@ -3752,6 +3863,9 @@ async function runBoundedRefund(tasks, opts) {
   var bucket = makeTokenBucket(QPS, QPS);
   var total = { success: 0, skipped: 0, locked: 0, fail: 0 };
   if (!tasks.length) return total;
+  // 持久化：已退订/不存在的实例记录到本地，避免后续轮次重复调用 API
+  var persistedSkips = loadPersistedRefundSkips();
+  function markSkip(iid) { persistedSkips.add(iid); }
   var idx = 0, done = 0;
   async function worker() {
     while (idx < tasks.length) {
@@ -3762,9 +3876,9 @@ async function runBoundedRefund(tasks, opts) {
         }
       });
       var rn2 = REGION_INFO[task.rid] || task.rid;
-      if (r.kind === 'skipped') { total.skipped++; markRefundedFrontend(r.id); log('⚪ [' + rn2 + '] ' + r.id + ': 已退订/不存在，跳过', 'info'); }
+      if (r.kind === 'skipped') { total.skipped++; markSkip(r.id); log('⚪ [' + rn2 + '] ' + r.id + ': 已退订/不存在，跳过', 'info'); }
       else if (r.kind === 'locked') { total.locked++; log('🔒 [' + rn2 + '] ' + r.id + ': ' + r.err + ' (跳过，不再重试)', 'warn'); }
-      else if (r.ok) { total.success++; markRefundedFrontend(r.id); log('   ✅ [' + rn2 + '] ' + r.id + ' 退订成功', 'success'); }
+      else if (r.ok) { total.success++; markSkip(r.id); log('   ✅ [' + rn2 + '] ' + r.id + ' 退订成功', 'success'); }
       else {
         total.fail++; log('❌ [' + rn2 + '] ' + r.id + ': ' + r.err, 'error');
         if (opts.recordFailures) {
@@ -3774,6 +3888,7 @@ async function runBoundedRefund(tasks, opts) {
       }
       done++;
       if (done % 10 === 0 || done === tasks.length) {
+        savePersistedRefundSkips(persistedSkips);
         log('   📊 进度 ' + done + '/' + tasks.length +
           ' (累计 成功' + total.success + ' 跳过' + total.skipped + ' 锁定' + total.locked + ' 失败' + total.fail + ')', 'info');
       }
@@ -3783,6 +3898,166 @@ async function runBoundedRefund(tasks, opts) {
   var n = Math.min(CONCURRENCY, tasks.length);
   for (var w = 0; w < n; w++) pool.push(worker());
   await Promise.all(pool);
+  savePersistedRefundSkips(persistedSkips);
+  return total;
+}
+
+// 按地区分批并行退订（用户定制版）：每个地区独立并发，每地区每批 batchSize 台同时发请求；
+// 批间间隔 interBatchMs 毫秒；地区之间并行、互不干扰（无全局信号量/全局 QPS）。
+// 若触发阿里云限流，单请求自动指数退避重试（refundOneBounded 内）。
+// 仅处理 REGION_INFO 内的地区；单实例带超时（safeApiCall）防卡壳。
+// 每个地区独立循环分批（每批 batchSize 台并发退款），地区之间并行、互不干扰（无全局信号量/全局 QPS）。
+// opts: { batchSize, interBatchMs, recordFailures, skipProbe }
+async function refundByRegionBatched(byRegion, opts) {
+  opts = opts || {};
+  var batchSize = opts.batchSize || REFUND_BATCH_SIZE;
+  var interBatchMs = opts.interBatchMs || REFUND_INTER_BATCH_MS;
+  var skipProbe = opts.skipProbe === true;
+  var total = { success: 0, skipped: 0, locked: 0, fail: 0 };
+  if (!byRegion || !Object.keys(byRegion).length) return total;
+
+  // 只退当前 9 个地区（REGION_INFO 内的）
+  var regionIds = Object.keys(byRegion).filter(function (rid) { return REGION_INFO[rid]; });
+  if (!regionIds.length) {
+    log('   ⚠️ 没有命中的地区（仅处理 ' + Object.keys(REGION_INFO).join('/') + '），跳过', 'warn');
+    return total;
+  }
+
+  // 加载持久化的「已退订 / 不可退」实例集合，避免跨轮次重复尝试
+  var persistedSkips = loadPersistedRefundSkips();
+  var persistedCount = persistedSkips.size;
+  // 本次运行已成功退订的实例集合，避免同一运行内重复调用
+  var refundedThisRun = new Set();
+
+  function markSkip(iid) {
+    refundedThisRun.add(iid);
+    persistedSkips.add(iid);
+  }
+
+  // 单实例退订：互不干扰——不跨地区加锁、不限全局 QPS；仅本实例命中限流时短退避重试，不阻塞同地区其他实例
+  async function doRefund(rid, iid) {
+    try {
+      return await safeApiCall(function () {
+        return refundOneBounded(rid, iid, null, {
+          onThrottle: function (rn, i, a, bk) {
+            if (a <= 2) log('   ⏳ [' + rn + '] ' + i + ' 触发限流，第 ' + a + ' 次退避重试 (' + bk + 'ms)', 'warn');
+          }
+        });
+      }, REFUND_PER_INSTANCE_TIMEOUT);
+    } catch (e) {
+      return { ok: false, id: iid, kind: 'fail', err: (e && e.message) ? e.message : String(e) };
+    }
+  }
+
+  async function regionWorker(rid) {
+    var arr = (byRegion[rid] || []).slice();
+    if (!arr.length) return;
+    var regionName = REGION_INFO[rid] || rid;
+    var batchNo = 0;
+    while (arr.length) {
+      batchNo++;
+      var batch = arr.splice(0, batchSize);
+
+      var toRefund = [];
+      if (skipProbe) {
+        // 直接全退：跳过 InquiryPriceRefundInstance 探测，把所有实例加入退订队列
+        batch.forEach(function (it) {
+          var iid = it.InstanceId || it.instanceId;
+          if (refundedThisRun.has(iid) || persistedSkips.has(iid)) {
+            total.skipped++;
+            log('⚪ [' + regionName + '] ' + iid + '：已记录为退订/不可退，跳过', 'info');
+          } else {
+            toRefund.push({ iid: iid, item: it });
+          }
+        });
+        log('   🌏 [' + regionName + '] 第 ' + batchNo + ' 批：直接退订 ' + toRefund.length + ' 台（每地区 ' + batchSize + ' 台并发，地区间互不干扰）...', 'info');
+      } else {
+        // 先探测再退订：默认路径，避免对不可退订实例发请求
+        log('   🌏 [' + regionName + '] 第 ' + batchNo + ' 批：探测 ' + batch.length + ' 台...', 'info');
+        var probeResults = await Promise.all(batch.map(function (it) {
+          var iid = it.InstanceId || it.instanceId;
+          if (refundedThisRun.has(iid) || persistedSkips.has(iid)) {
+            return { iid: iid, item: it, refundable: false, amount: null, err: '已记录为退订/不可退' };
+          }
+          return safeApiCall(function () {
+            return AliyunClient.probeRefundable(iid);
+          }, 60000).then(function (resp) {
+            var d = (resp && resp.data) ? resp.data : {};
+            var isGone = d.Code === 'ResourceNotExists';
+            var dataObj = d.Data || {};
+            var amount = dataObj.RefundAmount !== undefined && dataObj.RefundAmount !== '' ? dataObj.RefundAmount :
+                         dataObj.ExpectedRefundAmount !== undefined && dataObj.ExpectedRefundAmount !== '' ? dataObj.ExpectedRefundAmount :
+                         dataObj.RefundFee !== undefined && dataObj.RefundFee !== '' ? dataObj.RefundFee : null;
+            return { iid: iid, item: it, refundable: !isGone && amount !== null, amount: amount, err: null };
+          }).catch(function (e) {
+            return { iid: iid, item: it, refundable: false, amount: null, err: (e && e.message) ? e.message : String(e) };
+          });
+        }));
+
+        probeResults.forEach(function (pr) {
+          if (refundedThisRun.has(pr.iid) || persistedSkips.has(pr.iid)) {
+            total.skipped++;
+            markSkip(pr.iid);
+            log('⚪ [' + regionName + '] ' + pr.iid + '：已记录为退订/不可退，跳过', 'info');
+            return;
+          }
+          if (!pr.refundable) {
+            var kind = classifyRefundErr(pr.err);
+            if (kind === 'locked') {
+              total.locked++;
+              markSkip(pr.iid);
+              log('🔒 [' + regionName + '] ' + pr.iid + '：' + pr.err + ' (跳过)', 'warn');
+            } else if (kind === 'skipped' || (pr.err && pr.err.indexOf('ResourceNotExists') !== -1)) {
+              total.skipped++;
+              markSkip(pr.iid);
+              log('⚪ [' + regionName + '] ' + pr.iid + '：' + (pr.err || '已不存在/已退订') + ' (跳过)', 'info');
+            } else {
+              total.skipped++;
+              markSkip(pr.iid);
+              log('⚪ [' + regionName + '] ' + pr.iid + '：探测不可退订 (' + (pr.err || '无退款金额') + '，跳过)', 'info');
+            }
+            return;
+          }
+          toRefund.push(pr);
+        });
+
+        if (!toRefund.length) {
+          log('   🌏 [' + regionName + '] 第 ' + batchNo + ' 批无可退订实例', 'info');
+          savePersistedRefundSkips(persistedSkips);
+          if (arr.length) {
+            log('   🌏 [' + regionName + '] 本批完成，' + (interBatchMs / 1000) + ' 秒后继续下一批（剩余 ' + arr.length + ' 台）', 'info');
+            await new Promise(function (res) { setTimeout(res, interBatchMs); });
+          }
+          continue;
+        }
+        log('   🌏 [' + regionName + '] 第 ' + batchNo + ' 批：实际退订 ' + toRefund.length + ' 台（每地区 ' + batchSize + ' 台并发，地区间互不干扰）...', 'info');
+      }
+
+      // 并发退订（受全局信号量限制）
+      var results = await Promise.all(toRefund.map(function (pr) {
+        return doRefund(rid, pr.iid);
+      }));
+
+      results.forEach(function (r) {
+        if (r.kind === 'skipped') { total.skipped++; markSkip(r.id); log('⚪ [' + regionName + '] ' + r.id + ': 已退订/不存在，跳过', 'info'); }
+        else if (r.kind === 'locked') { total.locked++; markSkip(r.id); log('🔒 [' + regionName + '] ' + r.id + ': ' + r.err + ' (跳过)', 'warn'); }
+        else if (r.ok) { total.success++; markSkip(r.id); log('   ✅ [' + regionName + '] ' + r.id + ' 退订成功', 'success'); }
+        else { total.fail++; log('❌ [' + regionName + '] ' + r.id + ': ' + r.err, 'error'); }
+      });
+
+      savePersistedRefundSkips(persistedSkips);
+
+      if (arr.length) {
+        log('   🌏 [' + regionName + '] 本批完成，' + (interBatchMs / 1000) + ' 秒后继续下一批（剩余 ' + arr.length + ' 台）', 'info');
+        await new Promise(function (res) { setTimeout(res, interBatchMs); });
+      }
+    }
+    log('✅ [' + regionName + '] 该地区退订完成', 'success');
+  }
+
+  log('🔄 按地区分批并行退订（互不干扰）：' + regionIds.length + ' 个地区并行，每地区每批 ' + batchSize + ' 台并发、批间 ' + (interBatchMs / 1000) + ' 秒' + (skipProbe ? '；已跳过退款金额探测，直接对所有实例执行 RefundInstance' : '；先探测 InquiryPriceRefundInstance，再执行 RefundInstance') + (persistedCount > 0 ? '；本地已记录 ' + persistedCount + ' 个已退/不可退实例，将自动跳过' : ''), 'warn');
+  await Promise.all(regionIds.map(regionWorker));
+  savePersistedRefundSkips(persistedSkips);
   return total;
 }
 
@@ -3790,35 +4065,51 @@ async function runBoundedRefund(tasks, opts) {
 // opts: { recordFailures, concurrency, qps }
 async function refundByRegionParallel(byRegion, opts) {
   opts = opts || {};
+  // 加载本地持久化的「已退订/不可退」实例，避免跨轮次重复尝试
+  var persistedSkips = loadPersistedRefundSkips();
+  var persistedCount = persistedSkips.size;
+  var skippedFromPersist = 0;
   var tasks = [];
   Object.keys(byRegion).forEach(function (rid) {
     var arr = byRegion[rid] || [];
     if (!arr.length) { log('   🌏 [' + (REGION_INFO[rid] || rid) + '] 无实例，跳过', 'info'); return; }
+    var regionName = REGION_INFO[rid] || rid;
+    var regionTasks = 0;
     for (var i = 0; i < arr.length; i++) {
       var it = arr[i];
-      var id = it.InstanceId || it.instanceId;
-      if (__refundedIds.has(id)) continue; // 会话内已退订 → 跳过（对标参考站 lastTriggered 去重）
-      tasks.push({ rid: rid, iid: id });
+      var iid = it.InstanceId || it.instanceId;
+      if (persistedSkips.has(iid)) {
+        skippedFromPersist++;
+        continue;
+      }
+      tasks.push({ rid: rid, iid: iid });
+      regionTasks++;
     }
-    log('   🌏 [' + (REGION_INFO[rid] || rid) + '] 共 ' + arr.length + ' 台待退订', 'info');
+    log('   🌏 [' + regionName + '] 共 ' + arr.length + ' 台' + (regionTasks < arr.length ? '，过滤掉 ' + (arr.length - regionTasks) + ' 台已记录' : '') + '待退订', 'info');
   });
-  if (!tasks.length) return { success: 0, skipped: 0, locked: 0, fail: 0 };
+  if (skippedFromPersist > 0) {
+    log('   🧹 本地已记录 ' + persistedCount + ' 台已退订/不可退，其中 ' + skippedFromPersist + ' 台在本轮直接跳过（不调用 API）', 'info');
+  }
+  if (!tasks.length) {
+    if (skippedFromPersist > 0) log('✅ 本轮无新增实例需退订（剩余均已被本地记录为已退/不可退）', 'success');
+    return { success: 0, skipped: skippedFromPersist, locked: 0, fail: 0 };
+  }
   log('🔄 有界并发退订 ' + tasks.length + ' 台（并发≤' + (opts.concurrency || REFUND_CONCURRENCY) +
     '，速率≤' + (opts.qps || REFUND_QPS) + '/秒，限流自动退避重试）...', 'warn');
   return await runBoundedRefund(tasks, opts);
 }
 
-// 通用释放执行器（按地域并行、有界并发，复用 runBoundedRefund 同一套限速/幂等/重试逻辑）
+// 通用释放执行器：有界并发 worker-pool + 令牌桶限速 + 单实例退避重试
 async function runRefund(groups) {
   var tasks = [];
   groups.forEach(function (g) {
-    tasks.push({ rid: g.regionId, iid: g.instance.InstanceId });
+    tasks.push({ rid: g.regionId, iid: g.instance.InstanceId || g.instance.instanceId });
   });
-  log('🗑️ 批量退订：' + tasks.length + ' 台（有界并发）', 'warn');
+  log('🗑️ ' + tasks.length + ' 台（有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流单实例退避，已退订自动跳过）', 'warn');
   var total = await runBoundedRefund(tasks, { recordFailures: true });
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-  log('🏁 退订（退款）完成: 成功 ' + total.success + ' 台, 跳过 ' + total.skipped + ' 台, 失败 ' + total.fail + ' 台',
+  log('🏁 退订（退款）完成: 成功 ' + total.success + ' 台, 跳过 ' + total.skipped + ' 台, 锁定 ' + total.locked + ' 台, 失败 ' + total.fail + ' 台',
     total.fail === 0 ? 'success' : 'warn');
   if (total.fail > 0) {
     log('⚠️ 失败常见原因：', 'warn');
@@ -3852,10 +4143,39 @@ async function batchUnsubscribeSelectedRegions() {
     btn = event && event.target;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 退订中...'; }
 
-    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-    log('🗑️ 开始批量退订：' + groups.length + ' 台（' + regionCount + ' 个地域）', 'warn');
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
+    log('🗑️ 开始批量退订（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避，循环至所选地域无实例为止）', 'warn');
 
-    await runRefund(groups);
+    var loopRound = 0;
+    while (true) {
+      loopRound++;
+      if (loopRound > 60) { log('⚠️ 已达最大轮次(60)，停止退订以避免死循环', 'warn'); break; }
+      // 强制重新拉取所选地域实例（清空旧缓存，确保下一轮能拿到最新剩余实例）
+      state.selectedRegions.forEach(function (rid) {
+        if (state.regionData[rid]) state.regionData[rid].instances = [];
+      });
+      var groups;
+      try { groups = await collectInstancesFromSelectedRegions(); }
+      catch (err) { log('⚠️ ' + err.message, 'warn'); break; }
+      if (groups.length === 0) {
+        log('✅ 所选地域已无云主机（非全额退订设备已清空），退订完成', 'success');
+        break;
+      }
+      var byRegion = {};
+      groups.forEach(function (g) {
+        if (!byRegion[g.regionId]) byRegion[g.regionId] = [];
+        byRegion[g.regionId].push({ InstanceId: g.instance.InstanceId, instanceId: g.instance.InstanceId });
+      });
+      var regionCount2 = Object.keys(byRegion).length;
+      var total = await refundByRegionParallel(byRegion, { recordFailures: true });
+      log('📊 第 ' + loopRound + ' 轮：' + groups.length + ' 台（' + regionCount2 + ' 个地域）→ 成功 ' + total.success + '、跳过 ' + total.skipped + '、锁定 ' + total.locked + '、失败 ' + total.fail,
+        total.fail === 0 ? 'success' : 'warn');
+      // 单轮无任何成功/跳过（实例可能全部锁定或 API 异常）则停止，避免空转
+      if (total.success === 0 && total.skipped === 0 && groups.length > 0) {
+        log('⚠️ 本轮无成功/跳过（实例可能全部锁定或 API 异常），停止以避免死循环', 'warn');
+        break;
+      }
+    }
 
     await refreshAllRegions();
     deselectAllRegions();
@@ -3885,8 +4205,13 @@ async function unsubscribeSingleInstance(regionId, instanceId) {
 
   log('🗑️ 退订实例 ' + name + ' (' + instanceId + ')...', 'warn');
   try {
-    await AliyunClient.refundInstance(regionId, instanceId, { clientToken: await stableClientToken(regionId, instanceId) });
-    log('   ✅ ' + name + ' (' + instanceId + ') 退订成功', 'success');
+    var _r = await refundOneBounded(regionId, instanceId, null, {
+      onThrottle: function (rn, i, a, bk) { log('   ⏳ [' + rn + '] ' + i + ' 触发限流，第 ' + a + ' 次退避重试 (' + bk + 'ms)', 'warn'); }
+    });
+    if (_r.kind === 'skipped') log('⚪ ' + name + ': 已退订/不存在，跳过', 'info');
+    else if (_r.kind === 'locked') log('🔒 ' + name + ': ' + _r.err + ' (跳过，不可退订)', 'warn');
+    else if (_r.ok) log('   ✅ ' + name + ' (' + instanceId + ') 退订成功', 'success');
+    else log('❌ ' + name + ' 退订失败: ' + _r.err, 'error');
   } catch (err) {
     var msg = (err && err.message) || String(err);
     if (unsubIsSkipped(msg)) log('⚪ ' + name + ': 已退订/不存在，跳过', 'info');
@@ -4062,63 +4387,17 @@ async function zyDiagProxy() {
     tryMode('C. 多 header + Cookie', { 'Authorization': token, 'X-Token': token, 'x-token': token, 'Token': token, 'Cookie': 'token=' + token })
   ]);
 
-  function parseAdmin(r) {
-    // 把 admin.zhouyi.top 的真实回包拆出来：wrapper.ok / wrapper.status / 内层 data.code / data.msg
-    var out = { ok: r.ok, status: r.status, aok: null, acode: null, amsg: null, araw: r.raw };
-    try {
-      var o = JSON.parse(r.raw);
-      out.aok = (o && o.ok);
-      out.status = (o && o.status != null) ? o.status : r.status;
-      var inner = (o && o.data != null) ? o.data : null;
-      if (inner != null) {
-        if (typeof inner === 'string') { try { inner = JSON.parse(inner); } catch (e) {} }
-        if (inner && typeof inner === 'object') {
-          out.acode = (inner.code != null) ? inner.code : (inner.Code != null ? inner.Code : null);
-          out.amsg = (inner.msg != null) ? inner.msg : (inner.message != null ? inner.message : (inner.Msg != null ? inner.Msg : null));
-        }
-      }
-      if (out.acode == null && out.amsg == null && o && typeof o === 'object') {
-        if (o.error) out.amsg = String(o.error);
-        if (o.msg) out.amsg = o.msg;
-        if (o.code != null) out.acode = o.code;
-      }
-    } catch (e) {}
-    return out;
-  }
-  function interpret(a) {
-    if (a.aok === true) return { c: '#52c41a', t: '✅ 此传法 admin 接受（ok:true）' };
-    var m = (a.amsg || '') + ' ' + (a.acode != null ? String(a.acode) : '');
-    if (/时间|非工作|休息|维护|下班|off[\s_-]?hours|22[:：]|23[:：]|0[0-9][:：]|凌晨|夜间|节假日/i.test(m))
-      return { c: '#fa8c16', t: '⏰ 疑似「工作时间门禁」—— admin 在非工作时间拒绝此接口（与“5点后报错”高度吻合）' };
-    if (/登录|未授权|未登录|token|expire|过期|失效|auth|unauthor|forbidden|无权限|denied/i.test(m))
-      return { c: '#ff4d4f', t: '🔑 疑似「鉴权失效」—— token 无效/过期/无权限' };
-    if (a.status >= 500)
-      return { c: '#ff4d4f', t: '🔧 上游 5xx —— 接口路径可能不对，或后端该时段异常' };
-    if (a.status >= 400)
-      return { c: '#fa8c16', t: '⚠️ 上游 ' + a.status + ' —— admin 明确拒绝' };
-    return { c: '#666', t: '❓ 未识别，请看原始包' };
-  }
-
-  var html = '🔬 <b>诊断结果（三种 token 传法对比 + admin 真实反馈）</b><br><small style="color:#666;">出现 <b>ok:true</b> 或「admin 真实反馈」不是报错，就说明该传法可用。</small><br>';
+  var html = '🔬 <b>诊断结果（三种 token 传法对比）</b><br><small style="color:#666;">哪一种返回 200 / ok:true，就说明 admin 接受那种传法。</small><br>';
   results.forEach(function (r) {
-    var a = parseAdmin(r);
-    var inter = interpret(a);
-    var color = (a.aok === true) ? '#52c41a' : (a.status >= 400 ? '#ff4d4f' : '#fa8c16');
-    var adminLine = '';
-    if (a.acode != null || a.amsg) {
-      adminLine = '<div style="padding:6px 10px;background:#fffbe6;border-top:1px solid #ffe58f;font-size:12px;">' +
-        '📨 <b>admin 真实反馈</b>：code=<b>' + esc(a.acode) + '</b> · msg=<b>' + esc(a.amsg) + '</b></div>';
-    }
+    var color = (r.status === 200 && r.ok) ? '#52c41a' : (r.status >= 400 ? '#ff4d4f' : '#fa8c16');
     html += '<div style="margin:10px 0;border:1px solid #eee;border-radius:6px;overflow:hidden;">' +
-      '<div style="background:#f6f8fa;padding:8px 10px;font-weight:600;color:' + color + ';">' + esc(r.name) + ' → HTTP ' + r.status + (a.status !== r.status ? ' (上游 ' + a.status + ')' : '') + '</div>' +
-      adminLine +
-      '<div style="padding:6px 10px;font-size:12px;color:' + inter.c + ';">' + inter.t + '</div>' +
-      '<pre style="white-space:pre-wrap;word-break:break-all;font-size:11px;background:#fff;padding:8px 10px;margin:0;color:#444;">' + esc(truncate(r.raw)) + '</pre>' +
+      '<div style="background:#f6f8fa;padding:8px 10px;font-weight:600;color:' + color + ';">' + esc(r.name) + ' → HTTP ' + r.status + '</div>' +
+      '<pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;background:#fff;padding:8px 10px;margin:0;">' + esc(truncate(r.raw)) + '</pre>' +
       '</div>';
   });
-  html += '<small style="color:#666;">📌 使用建议：<br>' +
-    '· <b>现在（5点前）跑一次、5点后再跑一次</b>，对比「admin 真实反馈」是否从正常变成限时错误，即可确认是不是网页的<b>工作时间限制</b>。<br>' +
-    '· 若是工作时间门禁：只能在 9:00–17:00 之间抓；可先把节点ID抓出来存好，过 5 点后用已抓的列表，无需再调接口。</small>';
+  html += '<small style="color:#666;">解读：<br>' +
+    '· 若 A/B/C 全是 500 body error → 转发器能通但 admin 接口路径不对，需要去 F12 抓真实「资源池列表」URL。<br>' +
+    '· 若某一种返回 200/ok:true → 抓取按钮本身还是失败的话，说明锁定函数里传 token 的方式需要调整（目前改不了 node-extract.js），但至少我们知道正确方式，可以想别的办法。</small>';
   if (st) st.innerHTML = html;
 }
 
@@ -4131,113 +4410,124 @@ function zyClearTokenCache() {
   if (ta) { ta.focus(); ta.style.borderColor = '#1890ff'; }
 }
 
-
-/* ---------- 根据节点ID导出公网IP（优先后台节点详情接口，fallback 阿里云） ---------- */
-
-// 从 admin.zhouyi.top 节点详情接口查公网IP（自动探测常见路径）
-async function queryAdminNodeDetail(nodeId) {
-  var token = '';
-  try { token = localStorage.getItem('zy_admin_token') || ''; } catch (e) {}
-  if (!token) return { ok: false, error: '未填写 admin.zhouyi.top 登录凭证（token）' };
-
-  // 真实后台是统一网关：POST 到根路径，body 区分业务
-  var OCD_SUPABASE_FN = 'https://vgddxxgjcogxcpiycsej.supabase.co/functions/v1/one-click-deploy';
-  var upstreamHeaders = { Authorization: token, 'X-Token': token, 'x-token': token, Token: token };
-  var userId = ((document.getElementById('zyUserId') || {}).value || '').trim();
-  if (userId) upstreamHeaders['X-User-Id'] = userId;
-
-  // 待尝试的 payload：优先用用户高级框填的真实 payload（含 {nodeId} 占位）
-  var payloads = [];
-  var advRaw = ((document.getElementById('zyDetailPayload') || {}).value || '').trim();
-  if (advRaw) {
-    var filled = advRaw.replace(/\{nodeId\}/g, nodeId);
-    try { payloads.push(JSON.parse(filled)); } catch (e2) { payloads.push(filled); }
-  }
-  // 默认猜测（统一网关业务名）
-  var guesses = [
-    { type: 'getEdgeNodeDetail', nodeId: nodeId },
-    { type: 'getNodeDetail', nodeId: nodeId },
-    { type: 'getNodeInfo', nodeId: nodeId },
-    { action: 'getEdgeNodeDetail', nodeId: nodeId },
-    { type: 'getEdgeNodeDetail', id: nodeId },
-    { type: 'getNodeDetail', id: nodeId }
-  ];
-  guesses.forEach(function (g) { payloads.push(g); });
-
-  function tryOne(payload) {
-    var bodyStr = (typeof payload === 'string') ? payload : JSON.stringify(payload);
-    return fetch(OCD_SUPABASE_FN, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token, headers: upstreamHeaders, method: 'POST', path: '/', query: '', body: bodyStr })
-    }).then(function (r) { return r.json().catch(function () { return null; }).then(function (j) { return { status: r.status, json: j }; }); });
-  }
-
-  var lastProbe = null;
-  for (var i = 0; i < payloads.length; i++) {
-    var sig = (typeof payloads[i] === 'string') ? payloads[i].slice(0, 80) : JSON.stringify(payloads[i]).slice(0, 80);
-    var resp = await tryOne(payloads[i]);
-    lastProbe = { method: 'POST', path: '/', status: resp.status, json: resp.json, payload: sig };
-    if (resp.status >= 200 && resp.status < 300 && resp.json) {
-      var ipInfo = extractIpFromAdminDetail(resp.json);
-      if (ipInfo.publicIp || ipInfo.innerIp) return { ok: true, path: '/ (POST ' + sig + ')', info: ipInfo, probe: lastProbe };
-    }
-  }
-  var summary = lastProbe && lastProbe.json ? JSON.stringify(lastProbe.json).slice(0, 300) : '无响应';
-  return { ok: false, error: '自动探测了 ' + payloads.length + ' 种网关业务 payload，均未返回该节点IP。最后尝试 ' + (lastProbe ? lastProbe.payload + ' -> HTTP ' + lastProbe.status : '无') + '。请在节点详情页 F12 抓取返回 IP 的请求的负载，填到上方输入框（把 nodeId 换成 {nodeId}）。', probe: lastProbe };
+/* ===== 从旧版（本地 webroot）合并回来的函数 ===== */
+function _djb2hex(s) {
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return ('00000000' + h.toString(16)).slice(-8);
 }
 
+function copyExportIp(kind) {
+  var id = kind === 'ip' ? 'zyExportIpOnly' : 'zyExportIpPairs';
+  var ta = document.getElementById(id);
+  if (!ta) return;
+  copyTextToClipboardImpl(ta.value);
+}
 
-// 递归从 admin 响应中提取 IP 字段（更激进：收集所有 IP 后按上下文分类）
-function extractIpFromAdminDetail(data) {
-  if (!data || typeof data !== 'object') return {};
-  var publicHints = ['public','公网','wan','external','eip','elastic','公网ip','公网ip','ip'];
-  var innerHints = ['inner','private','lan','内网','intranet','vpc'];
+function copyTextToClipboard(btn, text) {
+  copyTextToClipboardImpl(text).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = '✅ 已复制';
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  }).catch(function(e) {
+    alert('复制失败：' + e.message);
+  });
+}
 
-  var regionKeys = ['region','regionname','noderegion','area','zone','regionid','dc','datacenter'];
-  var statusKeys = ['status','nodestatus','networkstatus','state','devicestatus','onlinestatus'];
-
-  var publicIps = [], innerIps = [], unknownIps = [];
-  var found = {};
-
-  function isPublicIpKey(k) {
-    var kl = k.toLowerCase();
-    return publicHints.some(function(h){ return kl.indexOf(h) !== -1; });
+function copyTextToClipboardImpl(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
   }
-  function isInnerIpKey(k) {
-    var kl = k.toLowerCase();
-    return innerHints.some(function(h){ return kl.indexOf(h) !== -1; });
+  return new Promise(function(resolve, reject) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); resolve(); }
+    catch (e) { reject(e); }
+    finally { document.body.removeChild(ta); }
+  });
+}
+
+async function deleteAllCommands() {
+  // 如果尚未加载命令，先同步一次
+  var hasLoaded = state.regionCommands && Object.keys(state.regionCommands).length > 0;
+  var regionIds = Object.keys(REGION_INFO);
+  if (!hasLoaded) {
+    log('🔄 尚未加载命令列表，先同步阿里云命令...', 'info');
+    await loadAllRegionCommands();
   }
 
-  function walk(o) {
-    if (!o || typeof o !== 'object') return;
-    if (Array.isArray(o)) { o.forEach(walk); return; }
-    for (var k in o) {
-      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
-      var v = o[k];
-      if (typeof v === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(v)) {
-        if (isPublicIpKey(k)) publicIps.push(v);
-        else if (isInnerIpKey(k)) innerIps.push(v);
-        else unknownIps.push({ key: k, ip: v });
-      }
-      if (typeof v === 'string') {
-        var kl = k.toLowerCase();
-        if (!found.region && regionKeys.some(function(pk){ return kl === pk.toLowerCase(); })) found.region = v;
-        if (!found.status && statusKeys.some(function(pk){ return kl === pk.toLowerCase(); })) found.status = v;
-      }
-      if (typeof v === 'object') walk(v);
+  var allCommands = [];
+  for (var i = 0; i < regionIds.length; i++) {
+    var rid = regionIds[i];
+    var cmds = (state.regionCommands && state.regionCommands[rid]) || [];
+    for (var j = 0; j < cmds.length; j++) {
+      allCommands.push({ regionId: rid, commandId: cmds[j].commandId, name: cmds[j].name });
     }
   }
-  walk(data);
 
-  if (publicIps.length) found.publicIp = publicIps[0];
-  if (innerIps.length) found.innerIp = innerIps[0];
-  if (!found.publicIp && !found.innerIp && unknownIps.length) {
-    // 未知字段名的 IP：通常第一个是公网（后台详情页优先展示公网）
-    found.publicIp = unknownIps[0].ip;
-    found._ipSource = unknownIps[0].key;
+  if (allCommands.length === 0) {
+    log('❌ 当前没有任何可删除的命令模板', 'error');
+    return;
   }
-  return found;
+
+  if (!confirm('⚠️ 危险操作！\n\n确定要一键删除所有地域共 ' + allCommands.length + ' 条命令模板吗？\n此操作不可恢复！')) {
+    return;
+  }
+
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+  log('🗑️ 一键删除所有命令: 共 ' + allCommands.length + ' 条', 'info');
+
+  var totalSuccess = 0, totalFail = 0;
+  for (var k = 0; k < allCommands.length; k++) {
+    var item = allCommands[k];
+    try {
+      await AliyunClient.deleteCommand(item.regionId, item.commandId);
+      totalSuccess++;
+      log('  ✅ [' + REGION_INFO[item.regionId] + '] 已删除: ' + (item.name || item.commandId), 'success');
+    } catch (err) {
+      totalFail++;
+      log('  ❌ [' + REGION_INFO[item.regionId] + '] 删除失败: ' + (item.name || item.commandId) + ' - ' + (err.message || err), 'error');
+    }
+    if (k < allCommands.length - 1) await new Promise(function(r) { setTimeout(r, 100); });
+  }
+
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+  log('📊 一键删除完成: 成功 ' + totalSuccess + ', 失败 ' + totalFail, totalFail === 0 ? 'success' : 'warn');
+
+  // 刷新本地命令列表与UI
+  state.regionCommands = {};
+  updateCmdRegionGrid();
+  log('💡 已清空本地命令缓存，如需更新请重新点击「同步阿里云命令」', 'info');
+}
+
+function downloadCsv(filename, content) {
+  downloadCsvImpl(filename, content);
+}
+
+function downloadCsvImpl(filename, content) {
+  var blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 100);
+}
+
+function downloadExportCsv() {
+  var ta = document.getElementById('zyExportCsv');
+  if (!ta) return;
+  downloadCsvImpl('node-ips.csv', ta.value);
+}
+
+function escapeCsv(v) {
+  v = String(v == null ? '' : v);
+  if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
+  return v;
 }
 
 async function exportPublicIpsFromPaste() {
@@ -4407,79 +4697,124 @@ async function exportPublicIpsFromPaste() {
 
   st.innerHTML = html;
 }
-window.exportPublicIpsFromPaste = exportPublicIpsFromPaste;
 
-function copyExportIp(kind) {
-  var id = kind === 'ip' ? 'zyExportIpOnly' : 'zyExportIpPairs';
-  var ta = document.getElementById(id);
-  if (!ta) return;
-  copyTextToClipboardImpl(ta.value);
-}
-window.copyExportIp = copyExportIp;
+function extractIpFromAdminDetail(data) {
+  if (!data || typeof data !== 'object') return {};
+  var publicHints = ['public','公网','wan','external','eip','elastic','公网ip','公网ip','ip'];
+  var innerHints = ['inner','private','lan','内网','intranet','vpc'];
 
-function downloadExportCsv() {
-  var ta = document.getElementById('zyExportCsv');
-  if (!ta) return;
-  downloadCsvImpl('node-ips.csv', ta.value);
-}
-window.downloadExportCsv = downloadExportCsv;
+  var regionKeys = ['region','regionname','noderegion','area','zone','regionid','dc','datacenter'];
+  var statusKeys = ['status','nodestatus','networkstatus','state','devicestatus','onlinestatus'];
 
-// 导出公网IP结果区按钮事件委托（避免 innerHTML 中内联 onclick 引号问题）
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.zy-export-btn');
-  if (!btn) return;
-  var action = btn.getAttribute('data-action');
-  if (action === 'copy-ip') copyExportIp('ip');
-  else if (action === 'copy-pair') copyExportIp('pair');
-  else if (action === 'download-csv') downloadExportCsv();
-});
+  var publicIps = [], innerIps = [], unknownIps = [];
+  var found = {};
 
-function escapeCsv(v) {
-  v = String(v == null ? '' : v);
-  if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
-  return v;
-}
-
-function copyTextToClipboardImpl(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
+  function isPublicIpKey(k) {
+    var kl = k.toLowerCase();
+    return publicHints.some(function(h){ return kl.indexOf(h) !== -1; });
   }
-  return new Promise(function(resolve, reject) {
-    var ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); resolve(); }
-    catch (e) { reject(e); }
-    finally { document.body.removeChild(ta); }
-  });
+  function isInnerIpKey(k) {
+    var kl = k.toLowerCase();
+    return innerHints.some(function(h){ return kl.indexOf(h) !== -1; });
+  }
+
+  function walk(o) {
+    if (!o || typeof o !== 'object') return;
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    for (var k in o) {
+      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+      var v = o[k];
+      if (typeof v === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(v)) {
+        if (isPublicIpKey(k)) publicIps.push(v);
+        else if (isInnerIpKey(k)) innerIps.push(v);
+        else unknownIps.push({ key: k, ip: v });
+      }
+      if (typeof v === 'string') {
+        var kl = k.toLowerCase();
+        if (!found.region && regionKeys.some(function(pk){ return kl === pk.toLowerCase(); })) found.region = v;
+        if (!found.status && statusKeys.some(function(pk){ return kl === pk.toLowerCase(); })) found.status = v;
+      }
+      if (typeof v === 'object') walk(v);
+    }
+  }
+  walk(data);
+
+  if (publicIps.length) found.publicIp = publicIps[0];
+  if (innerIps.length) found.innerIp = innerIps[0];
+  if (!found.publicIp && !found.innerIp && unknownIps.length) {
+    // 未知字段名的 IP：通常第一个是公网（后台详情页优先展示公网）
+    found.publicIp = unknownIps[0].ip;
+    found._ipSource = unknownIps[0].key;
+  }
+  return found;
 }
 
-function downloadCsvImpl(filename, content) {
-  var blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8;' });
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 100);
+function markRefundedFrontend(iid) { if (iid) __refundedIds.add(iid); }
+
+
+async function queryAdminNodeDetail(nodeId) {
+  var token = '';
+  try { token = localStorage.getItem('zy_admin_token') || ''; } catch (e) {}
+  if (!token) return { ok: false, error: '未填写 admin.zhouyi.top 登录凭证（token）' };
+
+  // 真实后台是统一网关：POST 到根路径，body 区分业务
+  var OCD_SUPABASE_FN = 'https://vgddxxgjcogxcpiycsej.supabase.co/functions/v1/one-click-deploy';
+  var upstreamHeaders = { Authorization: token, 'X-Token': token, 'x-token': token, Token: token };
+  var userId = ((document.getElementById('zyUserId') || {}).value || '').trim();
+  if (userId) upstreamHeaders['X-User-Id'] = userId;
+
+  // 待尝试的 payload：优先用用户高级框填的真实 payload（含 {nodeId} 占位）
+  var payloads = [];
+  var advRaw = ((document.getElementById('zyDetailPayload') || {}).value || '').trim();
+  if (advRaw) {
+    var filled = advRaw.replace(/\{nodeId\}/g, nodeId);
+    try { payloads.push(JSON.parse(filled)); } catch (e2) { payloads.push(filled); }
+  }
+  // 默认猜测（统一网关业务名）
+  var guesses = [
+    { type: 'getEdgeNodeDetail', nodeId: nodeId },
+    { type: 'getNodeDetail', nodeId: nodeId },
+    { type: 'getNodeInfo', nodeId: nodeId },
+    { action: 'getEdgeNodeDetail', nodeId: nodeId },
+    { type: 'getEdgeNodeDetail', id: nodeId },
+    { type: 'getNodeDetail', id: nodeId }
+  ];
+  guesses.forEach(function (g) { payloads.push(g); });
+
+  function tryOne(payload) {
+    var bodyStr = (typeof payload === 'string') ? payload : JSON.stringify(payload);
+    return fetch(OCD_SUPABASE_FN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, headers: upstreamHeaders, method: 'POST', path: '/', query: '', body: bodyStr })
+    }).then(function (r) { return r.json().catch(function () { return null; }).then(function (j) { return { status: r.status, json: j }; }); });
+  }
+
+  var lastProbe = null;
+  for (var i = 0; i < payloads.length; i++) {
+    var sig = (typeof payloads[i] === 'string') ? payloads[i].slice(0, 80) : JSON.stringify(payloads[i]).slice(0, 80);
+    var resp = await tryOne(payloads[i]);
+    lastProbe = { method: 'POST', path: '/', status: resp.status, json: resp.json, payload: sig };
+    if (resp.status >= 200 && resp.status < 300 && resp.json) {
+      var ipInfo = extractIpFromAdminDetail(resp.json);
+      if (ipInfo.publicIp || ipInfo.innerIp) return { ok: true, path: '/ (POST ' + sig + ')', info: ipInfo, probe: lastProbe };
+    }
+  }
+  var summary = lastProbe && lastProbe.json ? JSON.stringify(lastProbe.json).slice(0, 300) : '无响应';
+  return { ok: false, error: '自动探测了 ' + payloads.length + ' 种网关业务 payload，均未返回该节点IP。最后尝试 ' + (lastProbe ? lastProbe.payload + ' -> HTTP ' + lastProbe.status : '无') + '。请在节点详情页 F12 抓取返回 IP 的请求的负载，填到上方输入框（把 nodeId 换成 {nodeId}）。', probe: lastProbe };
 }
 
-// 保留旧的全局函数名，供其他地方可能用到
-function copyTextToClipboard(btn, text) {
-  copyTextToClipboardImpl(text).then(function() {
-    var orig = btn.textContent;
-    btn.textContent = '✅ 已复制';
-    setTimeout(function() { btn.textContent = orig; }, 1500);
-  }).catch(function(e) {
-    alert('复制失败：' + e.message);
-  });
+async function stableClientToken(rid, iid) {
+  var key = rid + ':' + iid;
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    try {
+      var buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(key));
+      var arr = new Uint8Array(buf), hex = '';
+      for (var i = 0; i < arr.length; i++) hex += ('0' + arr[i].toString(16)).slice(-2);
+      return 'wb-' + hex.slice(0, 16);
+    } catch (e) { /* 落到兜底哈希 */ }
+  }
+  // 兜底（非安全上下文）：稳定确定性哈希，同样保证幂等
+  return 'wb-' + _djb2hex(key) + _djb2hex(key.split('').reverse().join(''));
 }
-window.copyTextToClipboard = copyTextToClipboard;
 
-function downloadCsv(filename, content) {
-  downloadCsvImpl(filename, content);
-}
-window.downloadCsv = downloadCsv;

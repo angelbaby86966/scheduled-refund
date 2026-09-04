@@ -112,7 +112,7 @@
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')">⏰ 定时退订</button>
             <button class="tab" data-tab="order" onclick="switchTab('order')">🛒 批量下单</button>
             <button class="tab" data-tab="quota" onclick="switchTab('quota')">📈 批量提额</button>
-            <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')">镜像克隆</button>
+            <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')">🖼️ 镜像克隆</button>
           </div>
 
           <!-- 节点ID提取面板 -->
@@ -143,6 +143,7 @@
 
                 <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                   <button class="btn btn-primary" id="zySearchBtn" onclick="zySearchNodes()">🔍 自动抓取节点ID</button>
+                  <button class="btn btn-primary" id="zySearchIpBtn" onclick="zySearchAndQueryIps()" style="background:#722ed1;color:#fff;">🌐 抓取并查公网IP</button>
                   <button class="btn btn-sm" onclick="zyTestConnection()" title="不抓取，只测 token/接口是否通">🔌 测试连接</button>
                   <button class="btn btn-sm" onclick="zyDiagProxy()" title="直接打转发器看原始响应，定位是 token 还是后台接口问题">🔬 诊断转发</button>
                   <button class="btn btn-sm" onclick="zyClearTokenCache()" title="清掉本机缓存的旧 token，强制用输入框新 token">🧹 清token缓存</button>
@@ -180,8 +181,8 @@
                 <div style="margin:16px 0; text-align:center; color:#999; font-size:13px;">或</div>
 
                 <div class="form-group">
-                  <label style="font-weight:600;">粘贴实例ID（阿里云实例ID，查询对应云主机公网IP）</label>
-                  <textarea id="zyPaste" rows="4" placeholder="可粘贴多行 / 逗号 / 空格分隔的阿里云实例ID，自动去重，查询后导出公网IP" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
+                  <label style="font-weight:600;">粘贴节点ID（舟翼云节点ID，查询对应云主机公网IP）</label>
+                  <textarea id="zyPaste" rows="4" placeholder="可粘贴多行 / 逗号 / 空格分隔的舟翼云节点ID，自动去重，查询后导出公网IP" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
                   <div style="margin-top:8px;">
                     <button class="btn btn-sm btn-primary" onclick="zyImportPaste()">🔍 查询公网IP</button>
                     <button class="btn btn-sm" onclick="zyClearResults()" style="background:#999; color:white; margin-left:8px;">清空</button>
@@ -270,8 +271,8 @@
                       <input type="number" id="ocdBwNum" value="1" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
                     </div>
                     <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">期望业务ID</label>
-                      <input type="number" id="ocdBusinessId" value="41" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+                      <label style="font-size:12px;">业务ID <span style="color:#999;font-weight:400;">（留空则部署时自动生成；克隆机流转到服务中后与本批每台设备ID一一对应）</span></label>
+                      <input type="text" id="ocdBusinessId" value="" placeholder="留空自动生成，如 BIZ20260830K7Q2 / 41" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
                     </div>
                     <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">每批台数（自动分批）</label>
@@ -304,6 +305,7 @@
                 </div>
 
                 <div id="ocdStatus" style="margin-top:14px;"></div>
+                <div id="ocdBizMap" style="margin-top:14px;"></div>
 
                 <div style="margin-top:20px;">
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -321,7 +323,7 @@
             <div class="card">
               <div class="card-header">
                 <h3>🛡️ 批量应用防火墙模板</h3>
-                <p class="card-desc">直接读取阿里云中已有的防火墙模板，6个地域各自选择模板后一键应用到该地域所有云主机。</p>
+                <p class="card-desc">直接读取阿里云中已有的防火墙模板，9个地域各自选择模板后一键应用到该地域所有云主机。</p>
               </div>
               <div class="card-body">
                 <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap;">
@@ -338,7 +340,7 @@
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;">
-                  自动加载6个地域的全部实例 → 按各地域所选模板分别执行
+                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行
                 </p>
               </div>
             </div>
@@ -350,7 +352,7 @@
               <div class="card-header" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                 <div>
                   <h3>💻 批量执行命令</h3>
-                  <p class="card-desc">直接读取阿里云中已有的命令，6个地域各自选择命令后一键执行到该地域所有云主机。</p>
+                  <p class="card-desc">直接读取阿里云中已有的命令，9个地域各自选择命令后一键执行到该地域所有云主机。</p>
                 </div>
                 <button class="btn btn-warning" style="font-size:14px; padding:8px 16px;" onclick="openCustomCommandModal()" title="输入一段自定义命令，立即对所有地域的全部云主机执行（不保存命令，每次都是新命令）">
                   ✏️ 自定义命令
@@ -361,8 +363,18 @@
                   <button class="btn btn-primary" onclick="loadAllRegionCommands()">🔄 同步阿里云命令</button>
                   <button class="btn btn-success" style="font-size:13px; padding:8px 14px;" onclick="openCreateCommandModal()" title="在阿里云批量创建命令模板">➕ 创建命令</button>
                   <button class="btn btn-danger" style="font-size:13px; padding:8px 14px;" onclick="openDeleteCommandModal()" title="批量删除阿里云命令模板">🗑️ 删除命令</button>
-                  <button class="btn btn-danger" style="font-size:13px; padding:8px 14px; background:#c0392b;" onclick="deleteAllCommands()" title="一键删除所有地域的全部命令模板（危险操作）">⚠️ 一键删除所有命令</button>
                 </div>
+
+                <!-- 批量选择模板 -->
+                <div class="cmd-batch-template-bar" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 12px; background:#f6f7fa; border:1px dashed #d0d5e0; border-radius:8px; margin-bottom:12px;">
+                  <label style="font-weight:600; font-size:13px; color:#333; margin:0;">📋 批量选择模板：</label>
+                  <select id="cmdBatchTemplateSelect" class="select" style="min-width:200px; flex:1; max-width:360px;" disabled onchange="applyBatchCommandTemplate()">
+                    <option value="">请先同步阿里云命令</option>
+                  </select>
+                  <span id="cmdBatchTemplateHint" style="font-size:12px; color:#888;">一键应用到9个地域（已有选择的地域会被覆盖）</span>
+                  <button class="btn btn-danger" style="font-size:13px; padding:8px 14px; background:#c0392b;" onclick="deleteAllCommands()" title="一键删除所有地域的全部命令模板（危险操作，不可恢复）">⚠️ 一键删除所有命令</button>
+                </div>
+
                 <div class="fw-region-grid" id="cmdRegionGrid">
                   <p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;">点击「同步阿里云命令」加载已有命令</p>
                 </div>
@@ -372,7 +384,7 @@
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;">
-                  自动加载6个地域的全部实例（无数量限制）→ 按各地域所选命令分别执行，阿里云 InvokeCommand 上限 100 台/次，超出自动分批（如 500 台会跑 5 次），每批间隔 400ms
+                  自动加载9个地域的全部实例（无数量限制）→ 按各地域所选命令分别执行，阿里云 InvokeCommand 上限 100 台/次，超出自动分批（如 500 台会跑 5 次），每批间隔 400ms
                 </p>
               </div>
             </div>
@@ -413,12 +425,8 @@
                   </div>
                   <small style="color:#888">定时退订时间限定在每晚 23:35–23:59，到点自动退订所有地区云主机（关浏览器由服务端执行）</small>
                 </div>
-                <div class="form-group" id="confirmGroup">
-                  <label>确认操作（输入 "确认退订"）</label>
-                  <input type="text" id="confirmInput" class="input" placeholder="输入 确认退订" oninput="checkConfirm()" />
-                </div>
                 <div class="action-bar">
-                  <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" disabled>⚠️ 退订所有实例</button>
+                  <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()">🗑️ 立即退订</button>
                   <button class="btn btn-outline" onclick="renderScheduledTasks()">📋 定时任务</button>
                 </div>
 
@@ -450,6 +458,7 @@
                     <div class="action-bar" style="padding:12px 0;">
                       <button class="btn btn-primary" id="searchRefundBtn" onclick="searchRefundableInstances()">🔍 搜索非全额退订设备</button>
                       <button class="btn btn-outline" onclick="clearRefundSearch()">清空</button>
+                      <button class="btn btn-outline" onclick="clearRefundSkipRecords()" title="清除本地记录的「已退订/不可退」实例，下一轮将重新尝试全部实例（若之前因误判被跳过，用此重置）">🧹 清除退订记录</button>
                     </div>
                     <div id="refundSearchStatus" style="color:#666; font-size:13px; margin-bottom:8px;"></div>
                     <div id="refundSearchResult" style="display:none;">
@@ -542,11 +551,12 @@
             </div>
           </div>
 
+
           <!-- 黄金镜像克隆部署面板（管理员专属） -->
           <div class="tab-content admin-only-panel" id="tab-imageclone">
             <div class="card">
               <div class="card-header">
-                <h3>黄金镜像克隆部署（PCDN 缓存节点）</h3>
+                <h3>🖼️ 黄金镜像克隆部署（PCDN 缓存节点）</h3>
                 <p class="card-desc">把一台已配好 PCDN 缓存的机器打成<b>自定义镜像</b>，再基于镜像批量开通新云主机，开机即缓存节点。仅管理员 zhangruiyao 可用。</p>
               </div>
               <div class="card-body">
@@ -560,14 +570,14 @@
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">① 从实例创建黄金镜像（CreateCustomImage）</legend>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
                     <div class="form-group" style="margin:0;flex:1;min-width:200px;">
-                      <label style="font-size:12px;">源实例ID (已装好 PCDN 缓存的机器)</label>
+                      <label style="font-size:12px;">源实例ID（已装好 PCDN 缓存的机器）</label>
                       <input type="text" id="icSrcInstance" class="input" placeholder="例如 swas-abc123" />
                     </div>
                     <div class="form-group" style="margin:0;flex:1;min-width:200px;">
                       <label style="font-size:12px;">镜像名称</label>
                       <input type="text" id="icImageName" class="input" placeholder="例如 pcdn-golden-20260818" />
                     </div>
-                    <button class="btn btn-primary" onclick="icCreateImage()">创建镜像</button>
+                    <button class="btn btn-primary" onclick="icCreateImage()">📸 创建镜像</button>
                   </div>
                   <div id="icCreateImgStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
@@ -576,39 +586,38 @@
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;">② 选择自定义镜像（ListImages）</legend>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-                    <button class="btn btn-sm" onclick="icLoadImages()">加载我的自定义镜像</button>
+                    <button class="btn btn-sm" onclick="icLoadImages()">🔄 加载我的自定义镜像</button>
                     <select id="icImageSelect" class="input" style="flex:1;min-width:240px;"></select>
-                    <button class="btn btn-sm btn-danger" onclick="icDeleteImage()">删除选中镜像</button>
+                    <button class="btn btn-sm btn-danger" onclick="icDeleteSelectedImage()">🗑️ 删除选中镜像</button>
                   </div>
                   <div id="icImagesList" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
 
                 <!-- ③ 开通 -->
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;">
-                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;">③ 基于镜像开通新云主机（CreateInstances）</legend>
-                  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
-                    <div class="form-group" style="margin:0;flex:1;min-width:160px;">
+                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;">③ 基于镜像开通新云主机（不勾选自动支付 → CreateOrder 待支付订单，不扣费）</legend>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">套餐 PlanId</label>
                       <input type="text" id="icPlanId" class="input" placeholder="默认锁定套餐" />
                     </div>
-                    <div class="form-group" style="margin:0;flex:1;min-width:140px;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">开通数量（1~100）</label>
                       <input type="number" id="icAmount" class="input" value="1" min="1" max="100" />
                     </div>
-                    <div class="form-group" style="margin:0;flex:1;min-width:140px;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">购买时长（月）</label>
                       <input type="number" id="icPeriod" class="input" value="1" min="1" max="60" />
                     </div>
+                    <div class="form-group" style="margin:0;display:flex;align-items:center;gap:6px;padding-bottom:8px;">
+                      <input type="checkbox" id="icAutoPay" />
+                      <label style="font-size:12px;margin:0;cursor:pointer;">自动支付（勾选则立即扣费；不勾选默认生成待支付订单，不扣费）</label>
+                    </div>
+                    <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icLaunchFromImage()">🚀 开通</button>
                   </div>
-                  <div style="margin-top:10px;padding:10px;border:1px solid #ffa940;border-radius:6px;background:#fff7e6;display:flex;align-items:center;gap:8px;">
-                    <input type="checkbox" id="icLaunchAutoPay" style="width:16px;height:16px;cursor:pointer;" />
-                    <label style="font-size:13px;margin:0;cursor:pointer;font-weight:500;color:#d46b08;">
-                      自动支付（勾选则立即扣费；<b>不勾选默认生成待支付订单，不扣费</b>）
-                    </label>
-                  </div>
-                  <button class="btn btn-primary" style="background:#52c41a;border:none;margin-top:12px;width:100%;" onclick="icLaunchFromImage()">开通</button>
                   <div id="icLaunchStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                   <div id="icLaunchResult" style="margin-top:8px;font-size:13px;"></div>
+                  <div id="icBizMap" style="margin-top:10px;"></div>
                 </fieldset>
 
                 <!-- ④ 标准化脚本 -->
@@ -617,50 +626,70 @@
                   <p style="font-size:12px;color:#555;margin:0 0 10px;">先在黄金主机上按此顺序操作，再执行上方「① 创建镜像」：<br>
                   1) 把首启自举脚本部署到黄金主机并 <code>enable</code> → 2) 跑去个性化脚本 → 3) 打自定义镜像。新机基于镜像开机即自动首启。</p>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('prep')">下载 去个性化脚本</button>
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-sh')">下载 首启脚本 .sh</button>
-                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-svc')">下载 首启服务 .service</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('prep')">📥 下载 去个性化脚本</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-sh')">📥 下载 首启脚本 .sh</button>
+                    <button class="btn btn-sm" style="background:#389e0d;border:none;color:#fff;" onclick="icDownloadTpl('firstboot-svc')">📥 下载 首启服务 .service</button>
                   </div>
-                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-                    <button class="btn btn-sm" style="background:#13c2c2;border:none;color:#fff;" onclick="icRunStandardizationOnSource()">一键执行标准化（在上方源实例ID上运行）</button>
-                    <button class="btn btn-sm" style="background:#fa8c16;border:none;color:#fff;" onclick="icRunFullAutoFlow()">一键全流程（标准化→打镜像→开通，全自动）</button>
+                  <div style="border-top:1px dashed #b7eb8f;padding-top:10px;">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+                      <button class="btn btn-primary" style="background:#f59e0b;border:none;" onclick="icOneKeyStandardize()">⚡ 一键执行标准化（在上方源实例ID上运行）</button>
+                      <button class="btn btn-primary" style="background:#cf1322;border:none;" onclick="icFullCloneFlow()">🚀 一键全流程（标准化→打镜像→开通，全自动）</button>
+                    </div>
+                    <div id="icStdStatus" style="font-size:13px;color:#666;"></div>
                   </div>
-                  <div id="icStdStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
                 </fieldset>
 
-                <!-- ⑤ 绑定舟翼云 -->
-                <fieldset style="border:1px solid #fa8c16;border-radius:8px;padding:14px;margin-bottom:16px;background:#fff7e6;">
-                  <legend style="font-weight:600;color:#fa8c16;padding:0 6px;">⑤ 绑定舟翼云（开通后执行，注册节点到小程序）</legend>
-                  <p style="font-size:12px;color:#555;margin:0 0 10px;">自定义镜像只含 IPES 缓存，不含舟翼云绑定。开完机器后在这里填平台的 appKey / secretKey / 运营商，选实例点「绑定」即可把节点注册到小程序。<br>
-                  建议先选 1 台点绑定验证：登录该机看 <code>/var/log/zycloud_agent_setup.log</code> 末尾「注册成功」、小程序出现新设备，再批量绑其余。凭证不下发到镜像，只在本会话运行时使用。</p>
-                  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
-                    <div class="form-group" style="margin:0;flex:1;min-width:180px;">
+                <!-- ⑤ 绑定舟翼云（开通后执行，把节点注册到小程序） -->
+                <fieldset style="border:1px solid #91d5ff;border-radius:8px;padding:14px;margin-bottom:16px;background:#e6f7ff;">
+                  <legend style="font-weight:600;color:#0958d9;padding:0 6px;">⑤ 绑定舟翼云（开通后执行，注册节点到小程序）</legend>
+                  <p style="font-size:12px;color:#555;margin:0 0 10px;">
+                    自定义镜像只含 IPES 缓存，不含舟翼云绑定。开完机器后在这里填平台的 <b>appKey / secretKey / 运营商</b>，选实例点「绑定」即可把节点注册到小程序。<br>
+                    <b style="color:#cf1322;">⚠️ 建议先选 1 台点绑定验证</b>：登录该机看 <code>/var/log/zycloud_agent_setup.log</code> 末尾「注册成功」、小程序出现新设备，再批量绑其余。凭证不下发到镜像，只在本会话运行时使用。
+                  </p>
+                  <div class="form-group" style="margin-bottom:10px;">
+                    <label style="font-size:12px;">🔑 admin.zhouyi.top Token <span style="color:#999;">（一键流转到服务中必需；已保存可回显）</span></label>
+                    <div style="display:flex;gap:8px;">
+                      <input type="text" id="icBindToken" class="input" placeholder="从浏览器 F12 请求头复制 x-token" style="flex:1;" />
+                      <button type="button" class="btn btn-sm" onclick="icBindSaveToken()" style="white-space:nowrap;">💾 保存凭证</button>
+                    </div>
+                    <span id="icBindTokenStatus" style="font-size:12px;color:#999;"></span>
+                  </div>
+                  <div class="form-group" style="margin-bottom:12px;">
+                    <label style="font-size:12px;">属主 ID (ownerId) <span style="color:#999;">（可选；填则只匹配该属主节点，提高「待配置→服务中」匹配准确度；留空=全量）</span></label>
+                    <input type="text" id="icBindOwnerId" class="input" placeholder="如 7546（留空则匹配全部在线节点）" style="width:100%;" />
+                  </div>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end;margin-bottom:12px;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">舟翼云 appKey (--ak)</label>
                       <input type="text" id="icBindAk" class="input" placeholder="例如 06d78b19bd0d9fc0aa300c6d" />
                     </div>
-                    <div class="form-group" style="margin:0;flex:1;min-width:180px;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">舟翼云 secretKey (--sk)</label>
                       <input type="text" id="icBindSk" class="input" placeholder="secretKey" />
                     </div>
-                    <div class="form-group" style="margin:0;min-width:120px;">
+                    <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">运营商 (--isp)</label>
                       <select id="icBindIsp" class="input">
-                        <option value="电信" selected>电信</option>
+                        <option value="电信">电信</option>
                         <option value="联通">联通</option>
                         <option value="移动">移动</option>
                       </select>
                     </div>
                   </div>
-                  <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-                    <button class="btn btn-sm" style="background:#1677ff;border:none;color:#fff;" onclick="icLoadInstancesForBind()">加载「当前地域」实例</button>
-                    <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;">
-                      <input type="checkbox" id="icBindClearMac" checked />
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+                    <button class="btn btn-sm" onclick="icBindLoadInstances()">🔄 加载「<span id="icBindRegionName">当前地域</span>」实例</button>
+                    <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                      <input type="checkbox" id="icBindCleanMac" checked />
                       绑定前清除 /etc/.mac（镜像若带旧设备身份，先清掉让每台重新生成唯一ID，防重复）
                     </label>
                   </div>
-                  <div id="icBindInstanceList" style="margin-top:10px;font-size:13px;"></div>
-                  <button class="btn btn-primary" style="background:#fa8c16;border:none;margin-top:12px;width:100%;" onclick="icBindSelectedToZhouyi()">绑定选中实例到舟翼云</button>
-                  <div id="icBindStatus" style="margin-top:10px;font-size:13px;color:#666;"></div>
+                  <div id="icBindList" style="max-height:220px;overflow-y:auto;border:1px solid #d6e4ff;border-radius:6px;padding:8px;font-size:13px;background:#fff;margin-bottom:10px;color:#666;">点「加载实例」后在此勾选要绑定的机器（默认全选运行中的实例）</div>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                    <button class="btn btn-primary" style="background:#0958d9;border:none;" onclick="icBindZhouyi()">🔗 绑定选中实例到舟翼云</button>
+                    <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icBindAndDeploy()" title="绑定舟翼云 → 等待设备上线 → 把新设备SN填入业务ID → 自动状态流转到服务中">🚀 一键绑定并流转到服务中</button>
+                    <span id="icBindProgress" style="font-size:12px;color:#555;"></span>
+                  </div>
+                  <div id="icBindStatus" style="margin-top:10px;font-size:13px;"></div>
                 </fieldset>
 
                 <div class="warning-box" style="background:#fff7e6;border:1px solid #ffe58f;color:#664d03;">
@@ -670,7 +699,6 @@
               </div>
             </div>
           </div>
-
           <!-- 日志区 -->
           <div class="card" style="margin-top:16px">
             <div class="card-header">
@@ -867,17 +895,17 @@
     </div>
   </div>
 
-  <script src="cloud-store.js?v=2"></script>
+  <script src="cloud-store.js?v=3"></script>
   <script>
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
   </script>
-  <script src="aliyun-client-v2.js?v=12"></script>
+  <script src="aliyun-client-v2.js?v=9"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=73"></script>
-  <script src="node-extract.js?v=7"></script>
-  <script src="one-click-deploy.js?v=4"></script>
-  <script src="image-clone.js?v=8"></script>
+  <script src="app.js?v=95"></script>
+  <script src="node-extract.js?v=13"></script>
+  <script src="one-click-deploy.js?v=9"></script>
+  <script src="image-clone.js?v=11"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」「一键部署」标签页
     (function() {
@@ -966,7 +994,7 @@
         </div>
 
         <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;">
-          ⚠️ 点击「执行」后，<b>会对全部 6 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b>全自动分批执行</b>。命令<b>不会保存</b>，下次输入就是新命令。
+          ⚠️ 点击「执行」后，<b>会对全部 9 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b>全自动分批执行</b>。命令<b>不会保存</b>，下次输入就是新命令。
         </div>
       </div>
       <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;">

@@ -2,13 +2,188 @@
  * 黄金镜像克隆部署（PCDN 缓存节点）
  * 仅管理员 zhangruiyao 可用：UI 通过 admin-only-tab / admin-only-panel 隐藏，
  * 这里再做一次函数级权限兜底。
- * 依赖：AliyunClient.callCentralApi(action, params)（走 aliyun-proxy 代理，避免浏览器 CORS）
- *       AliyunClient.runCommandOnInstance(region, instanceIds, opts)（Cloud Assistant）
- *       AliyunClient.listInstances(region, options)
+ * 依赖：AliyunClient.callCentralApi(action, params) / listImages(region)（均走 aliyun-proxy 代理，避免浏览器 CORS）
  *       REGION_INFO / LOCKED_PLAN_ID（app.js 全局）
  * ========================================================================= */
 (function () {
   'use strict';
+
+  // ====== 克隆批次业务ID映射（与 one-click-deploy 共享云端 ocd_biz_map 行，kind='clone'）======
+  var IC_BIZ_MAP_KEY = 'wb_clone_biz_map';
+  function icGenBusinessId() {
+    var d = new Date();
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    var ymd = '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
+    var rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+    return 'BIZ' + ymd + rand;
+  }
+  function icLoadCloneBizMap() {
+    try { return JSON.parse(localStorage.getItem(IC_BIZ_MAP_KEY) || '{}'); } catch (e) { return {}; }
+  }
+  function icRenderCloneBizMap() {
+    var el = document.getElementById('icBizMap');
+    if (!el) return;
+    var map = icLoadCloneBizMap();
+    var ids = Object.keys(map).filter(function (id) { return map[id] && map[id].kind === 'clone'; });
+    if (!ids.length) { el.innerHTML = ''; return; }
+    var rows = ids.map(function (id) {
+      var b = map[id];
+      var dev = b.deviceId ? ('<span style="color:#389e0d;">' + b.deviceId + '</span>') : '<span style="color:#bbb;">—</span>';
+      return '<tr>' +
+        '<td style="padding:4px 8px;font-family:monospace;border-top:1px solid #eee;">' + id + '</td>' +
+        '<td style="padding:4px 8px;font-weight:600;color:#0050b3;border-top:1px solid #eee;">' + b.businessId + '</td>' +
+        '<td style="padding:4px 8px;font-family:monospace;color:#666;font-size:12px;border-top:1px solid #eee;">' + (b.publicIp || '—') + '</td>' +
+        '<td style="padding:4px 8px;border-top:1px solid #eee;">' + dev + '</td>' +
+        '<td style="padding:4px 8px;color:#888;font-size:12px;border-top:1px solid #eee;">' + (b.region || '') + '</td>' +
+        '<td style="padding:4px 8px;color:#999;font-size:12px;border-top:1px solid #eee;">' + (b.updatedAt || '') + '</td>' +
+        '</tr>';
+    }).join('');
+    el.innerHTML = '<div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:10px;margin-top:10px;">' +
+      '<div style="font-weight:600;font-size:13px;margin-bottom:8px;">🔗 克隆实例ID ↔ 业务ID 一一对应（共 ' + ids.length + ' 台）</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+      '<thead><tr style="background:#e6f7ff;">' +
+      '<th style="padding:4px 8px;text-align:left;">实例ID (swas)</th>' +
+      '<th style="padding:4px 8px;text-align:left;">业务ID</th>' +
+      '<th style="padding:4px 8px;text-align:left;">公网IP</th>' +
+      '<th style="padding:4px 8px;text-align:left;">设备ID(舟翼云)</th>' +
+      '<th style="padding:4px 8px;text-align:left;">地域</th>' +
+      '<th style="padding:4px 8px;text-align:left;">更新时间</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>' +
+      '<div style="font-size:11px;color:#999;margin-top:6px;">绑定舟翼云后，按公网IP 自动回填「设备ID(舟翼云)」并写入克隆机 /usr/local/edge/business_id；同一业务ID 也会在「🚀 一键部署」标签以 kind=deploy 对应节点设备ID。</div></div>';
+  }
+  // entries: [{instanceId, publicIp?, deviceId?}]  或退化为 string[]（旧调用兼容）
+  async function icSaveCloneBizMap(entries, businessId, region, imageId) {
+    if (!entries || !entries.length) return;
+    var ts = new Date().toLocaleString('zh-CN', { hour12: false });
+    var norm = entries.map(function (e) {
+      if (typeof e === 'string') return { instanceId: e };
+      return e || {};
+    }).filter(function (e) { return e && e.instanceId; });
+    if (!norm.length) return;
+    var local = icLoadCloneBizMap();
+    var cloud = (window.OcdBizCloud) ? (await window.OcdBizCloud.load() || {}) : {};
+    norm.forEach(function (e) {
+      var id = e.instanceId;
+      // 原值优先：仅当本次提供才覆盖，避免回填 deviceId 时清掉业务ID
+      var cur = local[id] || {};
+      local[id] = Object.assign({}, cur, {
+        businessId: (businessId != null ? businessId : (cur.businessId || '')),
+        updatedAt: ts, kind: 'clone',
+        region: (region || cur.region || ''), imageId: (imageId || cur.imageId || ''),
+        publicIp: e.publicIp || cur.publicIp || '',
+        deviceId: e.deviceId || cur.deviceId || ''
+      });
+      var cc = cloud[id] || {};
+      cloud[id] = Object.assign({}, cc, {
+        businessId: (businessId != null ? businessId : (cc.businessId || '')),
+        updatedAt: ts, kind: 'clone',
+        region: (region || cc.region || ''), imageId: (imageId || cc.imageId || ''),
+        publicIp: e.publicIp || cc.publicIp || '',
+        deviceId: e.deviceId || cc.deviceId || ''
+      });
+      // 若已拿到设备ID，额外以 deviceId 为键建一条（便于按设备维度查业务）
+      if (e.deviceId) {
+        cloud[e.deviceId] = { businessId: (businessId != null ? businessId : (cc.businessId || '')), updatedAt: ts, kind: 'clone', deviceId: e.deviceId, instanceId: id, region: region || cc.region || '' };
+      }
+    });
+    try { localStorage.setItem(IC_BIZ_MAP_KEY, JSON.stringify(local)); } catch (e) {}
+    icRenderCloneBizMap();
+    if (window.OcdBizCloud) {
+      try { await window.OcdBizCloud.upsertMerge(cloud); } catch (e) {}
+    }
+  }
+
+  // Bug C：轮询直到目标实例全部进入 Running（服务中）才允许生成业务ID；返回 {ids, publicIpMap}
+  async function icWaitInstancesRunning(targetIds, region, timeoutMs) {
+    if (!targetIds || !targetIds.length) return { ids: [], publicIpMap: {} };
+    var deadline = Date.now() + (timeoutMs || 180000);
+    var remaining = targetIds.slice();
+    var publicIpMap = {};
+    while (remaining.length && Date.now() < deadline) {
+      try {
+        var r = await AliyunClient.listInstances(region, { pageSize: 100 });
+        var insts = r.Instances || r.instances || [];
+        var page = 2;
+        while (insts.length < (r.TotalCount || insts.length) && insts.length >= 100) {
+          var nr = await AliyunClient.listInstances(region, { pageSize: 100, pageNumber: page });
+          var more = nr.Instances || nr.instances || [];
+          if (!more.length) break;
+          insts = insts.concat(more); page++;
+        }
+        var still = [];
+        remaining.forEach(function (tid) {
+          var m = insts.filter(function (x) { return (x.InstanceId || x.instanceId) === tid; })[0];
+          if (m) {
+            var st = m.Status || m.status || '';
+            if (st === 'Running') {
+              var ip = (m.PublicIpAddress || m.publicIpAddress || m.IpAddress || m.ipAddress || '');
+              if (typeof ip === 'object') ip = (ip.IpAddress || ip.ipAddress || (ip[0] || ''));
+              publicIpMap[tid] = (typeof ip === 'string') ? ip : ((ip && ip[0]) || '');
+            } else { still.push(tid); }
+          } else { still.push(tid); }
+        });
+        remaining = still;
+      } catch (e) {}
+      if (remaining.length) await icSleep(10000);
+    }
+    return { ids: targetIds.filter(function (id) { return remaining.indexOf(id) < 0; }), publicIpMap: publicIpMap };
+  }
+
+  // Bug B：进入页面时把云端 clone 映射合并进本地（跨端/清缓存不丢），不覆盖本地已修改项
+  async function icSyncCloudBizMap() {
+    if (!window.OcdBizCloud) return;
+    try {
+      var cloud = await window.OcdBizCloud.load() || {};
+      var local = icLoadCloneBizMap();
+      Object.keys(cloud).forEach(function (id) {
+        var c = cloud[id];
+        if (c && c.kind === 'clone' && !local[id]) local[id] = c;
+      });
+      try { localStorage.setItem(IC_BIZ_MAP_KEY, JSON.stringify(local)); } catch (e) {}
+      icRenderCloneBizMap();
+    } catch (e) {}
+  }
+
+  // 调 admin.zhouyi.top 后端（经 Supabase 函数代理），列出舟翼云设备 {id, ip} 供按公网IP 回填空设备ID
+  var IC_SUPABASE_FN = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/one-click-deploy';
+  var IC_ANON_KEY = 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
+  async function icQueryZyDevices(ownerId) {
+    var token = icGetAdminToken();
+    if (!token) return null;
+    try {
+      // ownerId 过滤：缩小匹配范围，提高「待配置→服务中」按公网IP 对应的准确度；留空=全量在线节点
+      var query = (ownerId ? ('ownerId=' + encodeURIComponent(ownerId) + '&isOnline=1') : '');
+      var resp = await fetch(IC_SUPABASE_FN, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
+        body: JSON.stringify({ token: token, method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: query, body: null })
+      });
+      if (!resp.ok) {
+        // token 失效/无效：立刻抛错让上层终止，避免白等 5 分钟轮询
+        try {
+          var ej = await resp.json();
+          if (ej && (ej.status === 401 || (ej.data && (ej.data.code === 7 || (ej.data.msg || '').indexOf('token') >= 0)))) {
+            throw new Error('TOKEN_INVALID');
+          }
+        } catch (e2) { if (e2 && e2.message === 'TOKEN_INVALID') throw e2; }
+        return null;
+      }
+      var j = await resp.json();
+      var inner = j && j.data ? j.data : j;
+      var arr = inner;
+      if (inner && Array.isArray(inner)) arr = inner;
+      else if (inner && inner.data && Array.isArray(inner.data)) arr = inner.data;
+      else if (inner && inner.list && Array.isArray(inner.list)) arr = inner.list;
+      else if (inner && inner.nodes && Array.isArray(inner.nodes)) arr = inner.nodes;
+      if (!Array.isArray(arr)) return null;
+      return arr.map(function (n) {
+        var id = n.id || n.nodeId || n.deviceId || n.device_id || '';
+        var ip = n.ip || n.publicIp || n.ipAddress || n.wanIp || n.publicIpAddress || (n.IpAddress || '');
+        if (typeof ip === 'object') ip = ip.IpAddress || ip.ipAddress || '';
+        return { id: id, ip: (typeof ip === 'string') ? ip : '' };
+      }).filter(function (n) { return n.id || n.ip; });
+    } catch (e) { return null; }
+  }
 
   function icLog(msg, type) {
     if (typeof window.log === 'function') { window.log(msg, type || 'info'); return; }
@@ -49,6 +224,62 @@
     }
     var period = document.getElementById('icPeriod');
     if (period && !period.value) period.value = '1';
+
+    // ⑤ 绑定舟翼云：自动记忆上次输入的 ak/sk/isp，刷新页面自动回填
+    [
+      { id: 'icBindAk', key: 'wb_zyy_ak', ev: 'input' },
+      { id: 'icBindSk', key: 'wb_zyy_sk', ev: 'input' },
+      { id: 'icBindIsp', key: 'wb_zyy_isp', ev: 'change' },
+      { id: 'icBindOwnerId', key: 'wb_zyy_owner', ev: 'input' }
+    ].forEach(function (f) {
+      var el = document.getElementById(f.id);
+      if (!el) return;
+      try {
+        var saved = localStorage.getItem(f.key);
+        if (saved !== null) el.value = saved;
+      } catch (e) {}
+      el.addEventListener(f.ev, function () {
+        try { localStorage.setItem(f.key, el.value); } catch (e) {}
+      });
+    });
+    // token：从 localStorage 回显到本页输入框（也兼容一键部署面板的 ocdToken）
+    var tokenEl = document.getElementById('icBindToken');
+    if (tokenEl) {
+      try {
+        var savedToken = localStorage.getItem('zy_admin_token');
+        if (savedToken) tokenEl.value = savedToken;
+      } catch (e) {}
+    }
+    // 进入页面：先合并云端 clone 映射（Bug B 修复：清缓存/换浏览器不丢），再渲染
+    icSyncCloudBizMap();
+  }
+
+  // 保存 admin.zhouyi.top Token（本页专用）
+  window.icBindSaveToken = function () {
+    var tokenEl = document.getElementById('icBindToken');
+    var token = (tokenEl ? tokenEl.value : '').trim();
+    var st = document.getElementById('icBindTokenStatus');
+    if (!token) { if (st) st.textContent = '❌ 请先粘贴 token'; return; }
+    try {
+      localStorage.setItem('zy_admin_token', token);
+      // 同时写入一键部署面板的 ocdToken，两边保持一致
+      var ocdToken = document.getElementById('ocdToken');
+      if (ocdToken) ocdToken.value = token;
+      if (st) st.textContent = '✅ 已保存';
+    } catch (e) { if (st) st.textContent = '❌ 保存失败: ' + e.message; }
+  };
+
+  // 读取 token 的优先级：本页输入框 > 一键部署面板 > localStorage
+  function icGetAdminToken() {
+    var token = '';
+    var el = document.getElementById('icBindToken');
+    if (el && (el.value || '').trim()) token = el.value.trim();
+    if (!token) {
+      el = document.getElementById('ocdToken');
+      if (el && (el.value || '').trim()) token = el.value.trim();
+    }
+    if (!token) { try { token = localStorage.getItem('zy_admin_token') || ''; } catch (e) {} }
+    return token;
   }
 
   // ① 从实例创建自定义镜像
@@ -73,43 +304,7 @@
     }
   }
 
-  // 统一解析 ListImages 返回结构
-  function icParseImages(r) {
-    var imgs = [];
-    if (r.Images && r.Images.Image) imgs = r.Images.Image;
-    else if (Array.isArray(r.Images)) imgs = r.Images;
-    else if (r.Image) imgs = r.Image;
-    else if (Array.isArray(r.image)) imgs = r.image;
-    return imgs;
-  }
-
-  // 统一解析 CreateInstances 返回的实例ID
-  function icParseInstanceIds(r) {
-    var ids = [];
-    if (r.InstanceIdSets && r.InstanceIdSets.InstanceId) ids = r.InstanceIdSets.InstanceId;
-    else if (r.InstanceIds) ids = r.InstanceIds;
-    else if (Array.isArray(r.instanceIds)) ids = r.instanceIds;
-    return ids;
-  }
-
-  function icSleep(ms) {
-    return new Promise(function (resolve) { setTimeout(resolve, ms); });
-  }
-
-  // 过滤出本账号自定义镜像（前端过滤，因为 SWAS ListImages 不支持 ImageType 请求参数）
-  function icFilterCustomImages(imgs) {
-    return imgs.filter(function (im) {
-      var t = String(im.ImageType || '').toLowerCase();
-      if (t === 'custom') return true;
-      if (t === 'system') return false;
-      if (im.IsSelf === true || im.IsSelf === 'true' || im.Self === true || im.Self === 'true') return true;
-      var n = String(im.ImageName || '');
-      if (n.indexOf('golden-') === 0) return true;
-      return false;
-    });
-  }
-
-  // ② 列出本账号自定义镜像（仅自定义，不含官方系统镜像）
+  // ② 列出本账号自定义镜像
   async function icLoadImages() {
     if (!icGuard()) return;
     var region = icGetRegion();
@@ -117,21 +312,34 @@
     var sel = document.getElementById('icImageSelect');
     box.innerHTML = '⏳ 加载中...';
     try {
-      var r = await AliyunClient.callCentralApi('ListImages', {
-        RegionId: region,
-        PageSize: 100
-      });
-      var imgs = icFilterCustomImages(icParseImages(r));
-      if (!imgs.length) {
-        box.innerHTML = '⚠️ 该地域暂无自定义镜像。请确认「① 创建镜像」已成功生成（状态需为 Available，Creating 期间不显示）。';
-        return;
+      var r = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+      var imgs = [];
+      if (r.Images && r.Images.Image) imgs = r.Images.Image;
+      else if (Array.isArray(r.Images)) imgs = r.Images;
+      else if (r.Image) imgs = r.Image;
+      else if (Array.isArray(r.image)) imgs = r.image;
+      // 后端若未按 ImageType 过滤，前端再兜底一次：只保留自定义镜像
+      if (Array.isArray(imgs) && imgs.length) {
+        imgs = imgs.filter(function(im) {
+          return !im.ImageType || im.ImageType === 'custom' || im.ImageType === 'Custom' || im.ImageType === 'CUSTOM';
+        });
       }
+      if (!imgs.length) { box.innerHTML = '该地域暂无自定义镜像，请先「① 创建镜像」'; return; }
       sel.innerHTML = imgs.map(function (im) {
-        var st = im.Status ? ' [' + im.Status + ']' : '';
         return '<option value="' + (im.ImageId || '') + '">' +
-          (im.ImageName || im.ImageId) + ' (' + (im.ImageId || '') + ')' + st + '</option>';
+          (im.ImageName || im.ImageId) + ' (' + (im.ImageId || '') + ')</option>';
       }).join('');
-      box.innerHTML = '✅ 找到 ' + imgs.length + ' 个自定义镜像（仅你账号创建）';
+      // 同时渲染可删除列表
+      box.innerHTML = '<div style="margin-bottom:8px;">✅ 找到 ' + imgs.length + ' 个自定义镜像（可删除旧镜像释放配额）：</div>' +
+        '<ul style="list-style:none;padding:0;margin:0;font-size:13px;">' +
+        imgs.map(function (im) {
+          var name = (im.ImageName || im.ImageId);
+          var iid = (im.ImageId || '');
+          return '<li style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-bottom:1px solid #eee;">' +
+            '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%;">' + name + ' <code>' + iid + '</code></span>' +
+            '<button class="btn btn-danger btn-sm" onclick="icDeleteImage(\'' + iid + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="flex-shrink:0;">🗑️ 删除</button>' +
+            '</li>';
+        }).join('') + '</ul>';
       icLog('[镜像克隆] 列出 ' + imgs.length + ' 个自定义镜像', 'info');
     } catch (e) {
       box.innerHTML = '❌ 加载失败: ' + e.message;
@@ -139,38 +347,29 @@
     }
   }
 
-  // 删除选中的自定义镜像
-  async function icDeleteImage() {
+  // 删除指定自定义镜像（释放配额）
+  async function icDeleteImage(imageId, imageName) {
     if (!icGuard()) return;
+    if (!imageId) { alert('缺少 ImageId，无法删除'); return; }
+    if (!confirm('确定删除自定义镜像「' + (imageName || imageId) + '」(' + imageId + ')？\n删除后无法恢复，但已用该镜像开通的实例不受影响。')) return;
     var region = icGetRegion();
-    var sel = document.getElementById('icImageSelect');
-    var imageId = sel ? sel.value : '';
-    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像'); return; }
-    var imageText = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : imageId;
-    if (!confirm('确定删除自定义镜像？\n\n' + imageText + '\n\n此操作不可恢复，请确认该镜像未用于运行中的实例。')) return;
-
     var box = document.getElementById('icImagesList');
-    box.innerHTML = '⏳ 正在删除 ' + imageId + ' ...';
+    box.innerHTML = '⏳ 正在删除 ' + imageId + '...';
     try {
-      await AliyunClient.callCentralApi('DeleteCustomImage', {
-        RegionId: region,
-        ImageId: imageId
-      });
-      box.innerHTML = '✅ 已删除镜像 ' + imageId;
+      await AliyunClient.callCentralApi('DeleteCustomImage', { RegionId: region, ImageId: imageId });
       icLog('[镜像克隆] 删除镜像成功: ' + imageId, 'success');
-      sel.innerHTML = '';
-      setTimeout(icLoadImages, 1000);
+      alert('✅ 镜像 ' + imageId + ' 已删除');
+      await icLoadImages();
     } catch (e) {
       box.innerHTML = '❌ 删除失败: ' + e.message;
       icLog('[镜像克隆] 删除镜像失败: ' + e.message, 'error');
+      alert('删除失败: ' + e.message);
     }
   }
 
-  // 只下单不扣费：调 SWAS CreateOrder
-  // 兼容两种 Edge Function 版本：
-  //   - 线上已部署的小写 createOrder（V3 签名，服务端透传 params，Commodity 需嵌套传）
-  //   - 新版大写 CreateOrder（服务端拼 Commodity，扁平参数即可）
-  // 先试小写；若 Edge Function 走到 default（返回 hint=aliyun-proxy alive）说明该 case 不存在，再试大写。
+  // ====== [合并自本地旧版] 只下单不扣费：调 SWAS CreateOrder ======
+  // 阿里云 SWAS CreateInstances 不支持 AutoPay 参数，调用即扣费；
+  // 想"只生成待支付订单不扣费"必须走 CreateOrder（Commodity.AutoPay=false）。
   function icIsAliveProbe(e) {
     var r = e && e.response;
     return !!(r && r.hint === 'aliyun-proxy alive');
@@ -226,6 +425,16 @@
     throw lastErr || new Error('CreateOrder 调用失败');
   }
 
+  /** [合并自本地旧版] 删除当前选中的自定义镜像（无参包装，供按钮直接调用） */
+  async function icDeleteSelectedImage() {
+    var sel = document.getElementById('icImageSelect');
+    var imageId = sel ? sel.value : '';
+    if (!imageId) { alert('请先在上方「加载并选择」一个自定义镜像'); return; }
+    var opt = sel.options[sel.selectedIndex];
+    var label = opt ? (opt.textContent || '').trim() : imageId;
+    return icDeleteImage(imageId, label);
+  }
+
   // ③ 基于镜像开通新云主机
   async function icLaunchFromImage() {
     if (!icGuard()) return;
@@ -236,37 +445,55 @@
     var planId = (document.getElementById('icPlanId').value || '').trim();
     var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
     var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
-    var autoPay = document.getElementById('icLaunchAutoPay').checked;
+    var autoPay = document.getElementById('icAutoPay').checked;
     if (!planId) { alert('请填写套餐 PlanId（默认已填锁定套餐，如被清空请补回）'); return; }
     if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
 
     var st = document.getElementById('icLaunchStatus');
     var res = document.getElementById('icLaunchResult');
-    st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...<br><span style="color:#d46b08;font-size:12px;">支付模式：' + (autoPay ? '自动支付（立即扣费）' : '生成待支付订单（不扣费）') + '</span>';
+    st.innerHTML = '⏳ 基于镜像 ' + imageId + ' 开通 ' + amount + ' 台（' + region + '）...';
     res.innerHTML = '';
     try {
-      var r;
+      var ids = [];
       if (autoPay) {
-        r = await AliyunClient.callCentralApi('CreateInstances', {
+        // 立即扣费路径：SWAS CreateInstances（该接口无 AutoPay 参数，调用即扣费）
+        var r = await AliyunClient.callCentralApi('CreateInstances', {
           RegionId: region,
           ImageId: imageId,
           PlanId: planId,
           Amount: amount,
           Period: period,
           PeriodUnit: 'Month',
-          ClientToken: 'wb-ic-' + region + '-' + imageId + '-' + amount
+          ClientToken: 'wb-ic-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
         });
-        var ids = icParseInstanceIds(r);
-        st.innerHTML = '✅ 开通请求已提交（自动支付）';
+        if (r.InstanceIdSets && r.InstanceIdSets.InstanceId) ids = r.InstanceIdSets.InstanceId;
+        else if (r.InstanceIds) ids = r.InstanceIds;
+        else if (Array.isArray(r.instanceIds)) ids = r.instanceIds;
+        st.innerHTML = '✅ 开通请求已提交（<b style="color:#cf1322;">自动支付，已扣费</b>）';
         res.innerHTML = (ids.length ? ('🚀 新实例ID：<br><code>' + ids.join('</code><br><code>') + '</code>')
                                     : '下单已提交，请到阿里云控制台查看实例');
-        icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + ' 自动支付', 'success');
       } else {
+        // 不扣费路径：SWAS CreateOrder，只生成待支付订单
         var ord = await icCreateOrder(region, imageId, planId, amount, period);
-        st.innerHTML = '✅ 已生成待支付订单（不扣费）';
-        res.innerHTML = '📋 订单号：<code>' + ord.OrderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
+        st.innerHTML = '✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）';
+        res.innerHTML = '📋 订单号：<code>' + ord.OrderId + '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。';
         icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + ord.OrderId, 'success');
+        return;
       }
+      if (!ids.length) return;
+      // Bug C：待配置→服务中（Running）才生成业务ID并对应，避免误标待配置机
+      st.innerHTML += '<div style="color:#1890ff;font-size:12px;margin-top:4px;">⏳ 等待实例进入「服务中」(Running)...</div>';
+      var wait = await icWaitInstancesRunning(ids, region, 180000);
+      if (!wait.ids.length) {
+        st.innerHTML += '<div style="color:#fa8c16;font-size:12px;margin-top:4px;">⚠️ 3 分钟内未全部进入服务中，暂不为本批生成业务ID（避免误标待配置机）。请实例就绪后重新「加载并选择」或手动关联。</div>';
+        icLog('[镜像克隆] 开通 ' + ids.length + ' 台，但超时未全 Running，未生成业务ID', 'warn');
+        return;
+      }
+      var biz = icGenBusinessId();
+      var entries = wait.ids.map(function (id) { return { instanceId: id, publicIp: wait.publicIpMap[id] || '' }; });
+      await icSaveCloneBizMap(entries, biz, region, imageId);
+      st.innerHTML += '<div style="color:#389e0d;font-size:12px;margin-top:4px;">🔗 本批业务ID：<b>' + biz + '</b>（' + entries.length + ' 台已到服务中，已对应并云端持久化' + (wait.ids.length < ids.length ? '；' + (ids.length - wait.ids.length) + ' 台未就绪未计入' : '') + '）</div>';
+      icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + (autoPay ? ' 自动支付' : ' 待支付'), 'success');
     } catch (e) {
       st.innerHTML = '❌ 开通失败: ' + e.message;
       icLog('[镜像克隆] 开通失败: ' + e.message, 'error');
@@ -343,26 +570,12 @@
 'echo "$NEW_HOST" > /etc/hostname',
 'hostname "$NEW_HOST"',
 '',
-'# ============ 黄金镜像防御：清掉镜像里继承的旧身份 ============',
-'# 防止黄金镜像去个性化不彻底导致多台克隆机共用同一个设备ID或IPES SN',
-'rm -f /etc/.mac 2>/dev/null && echo "[$(date "+%F %T")] 已清 /etc/.mac" || true',
-'rm -f /etc/edge_firstboot_done 2>/dev/null || true',
-'rm -f /etc/ssh/ssh_host_* 2>/dev/null && ssh-keygen -A >/dev/null 2>&1 || true',
-'if [ -f /etc/machine-id ]; then rm -f /etc/machine-id && systemd-machine-id-setup >/dev/null 2>&1 || true; fi',
-'',
-'# 清 IPES 数据目录，让容器启动后重新生成 SN',
+'# 双保险：再清一次节点身份',
 'rm -rf "$IPES_DATA_DIR"/* 2>/dev/null || true',
 '',
-'# 重启 IPES 容器（如有）',
-'if command -v docker >/dev/null 2>&1; then',
-'  ipes_cid=$(docker ps -aq --filter "name=ipes" 2>/dev/null | head -1)',
-'  [ -z "$ipes_cid" ] && ipes_cid=$(docker ps -aq 2>/dev/null | head -1)',
-'  [ -n "$ipes_cid" ] && docker restart "$ipes_cid" >/dev/null 2>&1 || true',
-'fi',
-'',
 '# 启动缓存服务',
-'systemctl enable "$IPES_SERVICE" 2>/dev/null || true',
-'systemctl start "$IPES_SERVICE" 2>/dev/null || true',
+'systemctl enable "$IPES_SERVICE"',
+'systemctl start "$IPES_SERVICE"',
 '',
 '# 首启只跑一次',
 'systemctl disable ipes-firstboot',
@@ -414,282 +627,581 @@
     if (t) icDownload(t.name, t.body);
   }
 
-  // ④ 一键执行标准化：在源实例ID上运行去个性化脚本
-  async function icRunStandardizationOnSource() {
-    if (!icGuard()) return;
-    var region = icGetRegion();
-    var srcInstance = (document.getElementById('icSrcInstance').value || '').trim();
-    if (!srcInstance) { alert('请先在「① 源实例ID」中填写要打镜像的实例'); return; }
-    if (!confirm('确定在实例 ' + srcInstance + ' 上执行去个性化标准化？\n\n会停止 IPES、清理节点身份/缓存、重生成 SSH host key、重置 machine-id/hostname。')) return;
+  // Base64 编码（支持中文）
+  function icB64(str) {
+    return btoa(unescape(encodeURIComponent(str)));
+  }
 
-    var st = document.getElementById('icStdStatus');
-    st.innerHTML = '⏳ 正在对 ' + srcInstance + ' 执行标准化...';
-    icLog('[标准化] 在 ' + srcInstance + ' 执行去个性化脚本', 'info');
+  function icSleep(ms) {
+    return new Promise(function (res) { setTimeout(res, ms); });
+  }
 
-    var script = [
+  // 从 ListImages 返回里解析自定义镜像数组
+  function icParseImgs(r) {
+    var imgs = [];
+    if (r.Images && r.Images.Image) imgs = r.Images.Image;
+    else if (Array.isArray(r.Images)) imgs = r.Images;
+    else if (r.Image) imgs = r.Image;
+    else if (Array.isArray(r.image)) imgs = r.image;
+    if (Array.isArray(imgs) && imgs.length) {
+      imgs = imgs.filter(function (im) {
+        return !im.ImageType || im.ImageType === 'custom' || im.ImageType === 'Custom' || im.ImageType === 'CUSTOM';
+      });
+    }
+    return imgs;
+  }
+
+  // 生成黄金主机标准化 bash 脚本
+  function icBuildStandardizeScript() {
+    // 读取已记住的舟翼云凭证，固化进首启脚本实现克隆机开机自动绑定
+    var zAk = (typeof localStorage !== 'undefined') ? (localStorage.getItem('wb_zyy_ak') || '') : '';
+    var zSk = (typeof localStorage !== 'undefined') ? (localStorage.getItem('wb_zyy_sk') || '') : '';
+    var zIsp = (typeof localStorage !== 'undefined') ? (localStorage.getItem('wb_zyy_isp') || '电信') : '电信';
+    return [
       '#!/bin/bash',
+      '# IPES / PCDN 黄金主机一键标准化脚本',
       'set -e',
-      'exec > /var/log/ipes_golden_prep.log 2>&1',
-      'echo "[$(date "+%F %T")] 开始去个性化标准化"',
       '',
-      '# 停止 IPES 服务/容器',
-      'if command -v docker >/dev/null 2>&1; then',
-      '  docker stop ipes 2>/dev/null || true',
-      '  docker rm ipes 2>/dev/null || true',
-      'fi',
-      'systemctl stop ipes-agent 2>/dev/null || true',
-      'systemctl stop ipes 2>/dev/null || true',
+      'LOG=/var/log/ipes-golden-prep.log',
+      'mkdir -p /var/log',
+      'exec > >(tee -a $LOG) 2>&1',
       '',
-      '# 清理 PCDN 节点身份与缓存数据',
-      'for d in /data/happ /data/happ.* /var/lib/ipescache /var/lib/ipes /var/cache/ipes /etc/ipes /var/lib/zycloud /opt/zyy_install; do',
-      '  [ -d "$d" ] && rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null || true',
-      'done',
+      'echo "==== $(date) IPES 黄金主机一键标准化开始 ===="',
       '',
-      '# 清理旧设备ID与首启标记',
-      'rm -f /etc/.mac /etc/edge_firstboot_done /etc/edge_firstboot.conf',
+      '# 1. 自动探测 IPES 服务名',
+      'IPES_SERVICE=$(systemctl list-unit-files --type=service 2>/dev/null | grep -iE \'ipes|pcdn\' | grep -v firstboot | head -1 | awk \'{print $1}\' || true)',
+      'if [ -z "$IPES_SERVICE" ]; then IPES_SERVICE="ipes-agent.service"; fi',
+      'IPES_SERVICE_NAME=${IPES_SERVICE%.service}',
+      'echo "[1/8] 探测到 IPES 服务: $IPES_SERVICE_NAME"',
       '',
-      '# 重生成 SSH host key',
+      '# 2. 停止 IPES 服务',
+      'echo "[2/8] 停止 $IPES_SERVICE_NAME ..."',
+      'systemctl stop "$IPES_SERVICE_NAME" 2>/dev/null || systemctl stop "$IPES_SERVICE" 2>/dev/null || true',
+      '',
+      '# 3. 自动探测数据目录',
+      'IPES_DATA_DIR=$(find / -type d -iname "*ipescache*" 2>/dev/null | head -1)',
+      'if [ -z "$IPES_DATA_DIR" ]; then IPES_DATA_DIR="/var/lib/ipescache"; mkdir -p "$IPES_DATA_DIR"; fi',
+      'echo "[3/8] 探测到数据目录: $IPES_DATA_DIR"',
+      '',
+      '# 4. 清理 PCDN 节点身份与缓存数据',
+      'echo "[4/8] 清理 PCDN 节点身份/缓存数据 ..."',
+      'rm -rf "$IPES_DATA_DIR"/* 2>/dev/null || true',
+      'rm -rf "$IPES_DATA_DIR"/[!.]* 2>/dev/null || true',
+      'find /etc -maxdepth 3 -iname "*ipes*node*" -delete 2>/dev/null || true',
+      'find /etc -maxdepth 3 -iname "*ipes*.token" -delete 2>/dev/null || true',
+      'find /var/log -maxdepth 2 -iname "*ipes*" -type f -delete 2>/dev/null || true',
+      '',
+      '# 5. 重生成 SSH host key',
+      'echo "[5/8] 重生成 SSH host key ..."',
       'rm -f /etc/ssh/ssh_host_*',
       'ssh-keygen -A',
       '',
-      '# 重置 machine-id 与日志',
-      'rm -f /etc/machine-id && systemd-machine-id-setup',
-      'rm -f /var/log/ipes*.log /var/log/zycloud*.log /var/log/batch_preheat*.log 2>/dev/null || true',
+      '# 6. 重置 machine-id / zyy 身份 / hostname',
+      'echo "[6/8] 重置 machine-id 与 hostname ..."',
+      'rm -f /etc/machine-id /etc/.mac',
+      'head -c 16 /dev/urandom | xxd -p > /etc/machine-id',
+      'head -c 16 /dev/urandom | xxd -p > /etc/.mac',
+      'chmod 644 /etc/machine-id /etc/.mac',
       ': > /etc/hostname',
       '',
-      'echo "[$(date "+%F %T")] 去个性化完成，请确认 IPES 配置绑定的是 0.0.0.0 / 动态IP，然后即可打自定义镜像。"'
+      '# 7. 写入首启自举脚本',
+      'echo "[7/8] 部署首启自举脚本 /usr/local/bin/ipes-firstboot.sh ..."',
+      'cat > /usr/local/bin/ipes-firstboot.sh <<\'IPESSCRIPT\'',
+      '#!/bin/bash',
+      'set -e',
+      '# 克隆机首启强制重生设备身份（machine-id + zyy /etc/.mac），避免与源机/兄弟机共用身份导致注册碰撞',
+      'rm -f /etc/machine-id /etc/.mac',
+      'head -c 16 /dev/urandom | xxd -p > /etc/machine-id',
+      'head -c 16 /dev/urandom | xxd -p > /etc/.mac',
+      'chmod 644 /etc/machine-id /etc/.mac',
+      'NEW_HOST="ipes-$(head -c4 /dev/urandom | xxd -p 2>/dev/null || echo $(date +%s%N | cut -c1-8))"',
+      'echo "$NEW_HOST" > /etc/hostname',
+      'hostname "$NEW_HOST"',
+      'IPES_DATA_DIR=$(find / -type d -iname "*ipescache*" 2>/dev/null | head -1)',
+      '[ -z "$IPES_DATA_DIR" ] && IPES_DATA_DIR="/var/lib/ipescache"',
+      'rm -rf "$IPES_DATA_DIR"/* 2>/dev/null || true',
+      'rm -rf "$IPES_DATA_DIR"/[!.]* 2>/dev/null || true',
+      'IPES_SERVICE_NAME=$(systemctl list-unit-files --type=service 2>/dev/null | grep -iE \'ipes|pcdn\' | grep -v firstboot | head -1 | awk \'{print $1}\' || true)',
+      '[ -z "$IPES_SERVICE_NAME" ] && IPES_SERVICE_NAME="ipes-agent.service"',
+      'IPES_SERVICE_NAME=${IPES_SERVICE_NAME%.service}',
+      'systemctl enable "$IPES_SERVICE_NAME"',
+      'systemctl start "$IPES_SERVICE_NAME"',
+      'systemctl disable ipes-firstboot',
+      '# 自动绑定舟翼云（换设备身份后自动注册，克隆机开机即上线，无需手动点按钮）',
+      (zAk && zSk ? 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + zAk + ' --sk ' + zSk + ' --isp ' + (zIsp || '电信') + ' || true' : 'echo "未配置舟翼云 ak/sk，跳过自动绑定"'),
+      'echo "首启完成: $NEW_HOST"',
+      'IPESSCRIPT',
+      'chmod +x /usr/local/bin/ipes-firstboot.sh',
+      '',
+      '# 8. 写入并启用首启 systemd 服务',
+      'echo "[8/8] 部署并启用首启服务 ..."',
+      'cat > /etc/systemd/system/ipes-firstboot.service <<\'IPESSVC\'',
+      '[Unit]',
+      'Description=IPES PCDN first-boot setup',
+      'After=network-online.target',
+      'Wants=network-online.target',
+      '',
+      '[Service]',
+      'Type=oneshot',
+      'ExecStart=/usr/local/bin/ipes-firstboot.sh',
+      'RemainAfterExit=yes',
+      '',
+      '[Install]',
+      'WantedBy=multi-user.target',
+      'IPESSVC',
+      'systemctl daemon-reload',
+      'systemctl enable ipes-firstboot',
+      '',
+      'echo "==== $(date) 标准化完成 ===="',
+      'echo "提示：请将 IPES 配置中 bind/listen 改为 0.0.0.0，上报IP改为自动获取，然后即可创建自定义镜像。"'
     ].join('\n');
+  }
+
+  // 一键在源实例上执行黄金主机标准化（打镜像前必做）
+  async function icOneKeyStandardize() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var instId = (document.getElementById('icSrcInstance').value || '').trim();
+    if (!instId) { alert('请先在「① 源实例ID」中填写已装好 PCDN 缓存的黄金主机实例ID'); return; }
+    if (!confirm('确定在实例 ' + instId + '（' + region + '）上执行「黄金主机标准化」？\n\n这会：\n1) 停止 IPES 服务\n2) 清理 PCDN 节点身份/缓存数据\n3) 重生成 SSH host key\n4) 重置 machine-id\n5) 部署首启脚本并 enable\n\n执行后请重新打镜像。')) return;
+
+    var st = document.getElementById('icStdStatus');
+    st.innerHTML = '⏳ 正在向 ' + instId + ' 下发标准化命令...';
 
     try {
-      await AliyunClient.runCommandOnInstance(region, [srcInstance], {
-        name: 'ipes-golden-prep-' + Date.now(),
-        content: script,
-        type: 'RunShellScript',
-        timeout: 300
+      var r = await AliyunClient.callCentralApi('RunCommand', {
+        RegionId: region,
+        InstanceId: instId,
+        CommandContent: icB64(icBuildStandardizeScript()),
+        Type: 'RunShellScript',
+        Timeout: 600,
+        Name: 'ipes-golden-prep'
       });
-      st.innerHTML = '✅ 标准化命令已提交到 ' + srcInstance + '，请查看 /var/log/ipes_golden_prep.log';
-      icLog('[标准化] 命令已提交: ' + srcInstance, 'success');
+      var cmdId = r.CommandId || r.commandId || '';
+      st.innerHTML = '✅ 标准化命令已下发到 ' + instId + '<br>CommandId: <code>' + (cmdId || '下发成功') + '</code><br>' +
+        '请等待 1~2 分钟，登录实例确认 <code>/var/log/ipes-golden-prep.log</code> 末尾显示「标准化完成」后再重新打镜像。';
+      icLog('[镜像克隆] 标准化命令已下发: ' + instId + ' CommandId=' + cmdId, 'success');
     } catch (e) {
-      st.innerHTML = '❌ 标准化失败: ' + e.message;
-      icLog('[标准化] 失败: ' + e.message, 'error');
+      st.innerHTML = '❌ 标准化命令下发失败: ' + e.message;
+      icLog('[镜像克隆] 标准化命令下发失败: ' + e.message, 'error');
     }
   }
 
-  // ④ 一键全流程：标准化 → 打镜像 → 等 Available → 开通
-  async function icRunFullAutoFlow() {
+  // 一键全流程：标准化 → 创建镜像 → 轮询就绪 → 开通（用户只需填实例ID/镜像名/数量）
+  async function icFullCloneFlow() {
     if (!icGuard()) return;
     var region = icGetRegion();
-    var srcInstance = (document.getElementById('icSrcInstance').value || '').trim();
+    var instId = (document.getElementById('icSrcInstance').value || '').trim();
+    var imageName = (document.getElementById('icImageName').value || '').trim();
     var planId = (document.getElementById('icPlanId').value || '').trim();
     var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
     var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
-    var autoPay = document.getElementById('icLaunchAutoPay').checked;
-    if (!srcInstance) { alert('请填写「① 源实例ID」'); return; }
-    if (!planId) { alert('请填写「③ 套餐 PlanId」'); return; }
+    var autoPay = document.getElementById('icAutoPay').checked;
+
+    if (!instId || !imageName || !planId) { alert('请填写：① 源实例ID、镜像名称、套餐PlanId'); return; }
     if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }
-    if (!confirm('一键全流程将：\n1) 在 ' + srcInstance + ' 执行标准化\n2) 创建自定义镜像\n3) 等待镜像 Available\n4) 基于镜像开通 ' + amount + ' 台\n\n确定继续？')) return;
+    if (!confirm('🚀 一键全流程：将在实例 ' + instId + ' 上自动标准化 → 创建镜像「' + imageName + '」→ 开通 ' + amount +
+      ' 台（' + region + '）。\n\n全程约 3~5 分钟，期间不要关闭页面。\n\n' +
+      (autoPay
+        ? '⚠️ 已勾选【自动支付】：将调用 CreateInstances 立即扣费！'
+        : '✅ 未勾选自动支付：将调用 CreateOrder，只生成待支付订单，不会扣费。') +
+      '\n\n确认执行？')) return;
 
     var st = document.getElementById('icStdStatus');
-    st.innerHTML = '⏳ 一键全流程开始...';
+    function step(msg) { st.innerHTML += '<div style="margin:2px 0;">' + msg + '</div>'; }
+    st.innerHTML = '';
+
     try {
-      st.innerHTML = '第 1/4 步：在 ' + srcInstance + ' 执行标准化...';
-      await icRunStandardizationOnSource();
-      icLog('[全流程] 标准化完成，等待 15 秒让实例状态稳定...', 'info');
-      await icSleep(15000);
-
-      var today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      var imageName = 'golden-' + region + '-' + today + '-' + Math.random().toString(36).substring(2, 6);
-      st.innerHTML = '第 2/4 步：创建镜像 ' + imageName + '...';
-      var createRes = await AliyunClient.callCentralApi('CreateCustomImage', {
-        RegionId: region, InstanceId: srcInstance, ImageName: imageName
+      // ① 标准化
+      step('① 下发标准化命令到 ' + instId + ' ...');
+      await AliyunClient.callCentralApi('RunCommand', {
+        RegionId: region, InstanceId: instId,
+        CommandContent: icB64(icBuildStandardizeScript()), Type: 'RunShellScript', Timeout: 600, Name: 'ipes-golden-prep'
       });
-      var imageId = createRes.ImageId || createRes.imageId;
-      if (!imageId) throw new Error('创建镜像未返回 ImageId，响应：' + JSON.stringify(createRes));
-      icLog('[全流程] 镜像已提交: ' + imageId, 'success');
+      step('✅ 标准化命令已下发，等待 120 秒执行完成...');
+      await icSleep(120000);
 
-      st.innerHTML = '第 3/4 步：等待镜像 ' + imageId + ' 变为 Available...';
-      var foundImage = null, imageAvailable = false;
-      for (var i = 0; i < 60; i++) {
+      // ② 创建镜像
+      step('② 创建镜像「' + imageName + '」...');
+      var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
+      var newImageId = cr.ImageId || cr.imageId || '';
+      step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+
+      // ③ 轮询镜像就绪（最多 5 分钟）
+      var ready = false;
+      for (var i = 0; i < 30; i++) {
         await icSleep(10000);
-        var listRes = await AliyunClient.callCentralApi('ListImages', { RegionId: region, PageSize: 100 });
-        var imgs = icFilterCustomImages(icParseImages(listRes));
-        for (var k = 0; k < imgs.length; k++) {
-          if (imgs[k].ImageId === imageId) { foundImage = imgs[k]; break; }
-        }
-        if (foundImage) {
-          var st2 = foundImage.Status || '未知';
-          icLog('[全流程] 第 ' + (i + 1) + ' 次检查，镜像状态=' + st2, 'info');
-          if (st2 === 'Available') { imageAvailable = true; break; }
+        var lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+        var imgs = icParseImgs(lr);
+        var found = imgs.filter(function (im) {
+          return (newImageId && im.ImageId === newImageId) || im.ImageName === imageName;
+        })[0];
+        if (found) {
+          var s = (found.Status || found.status || '').toLowerCase();
+          if (s === 'available') { newImageId = found.ImageId; ready = true; break; }
+          if (s === 'failed' || s === 'error') break;
         }
       }
-      if (!imageAvailable) throw new Error('等待镜像 Available 超时（10分钟）。当前镜像：' + (foundImage ? foundImage.Status : '未找到'));
+      if (!ready) { step('⚠️ 镜像未在 5 分钟内就绪，请到控制台确认后手动开通。'); return; }
+      step('✅ 镜像就绪: ' + newImageId);
 
-      st.innerHTML = '第 4/4 步：基于镜像 ' + imageId + ' 开通 ' + amount + ' 台...<br><span style="color:#d46b08;font-size:12px;">支付模式：' + (autoPay ? '自动支付（立即扣费）' : '生成待支付订单（不扣费）') + '</span>';
-      var launchRes;
+      // ④ 开通
+      step('④ 基于镜像开通 ' + amount + ' 台...');
+      var ids = [];
       if (autoPay) {
-        launchRes = await AliyunClient.callCentralApi('CreateInstances', {
-          RegionId: region, ImageId: imageId, PlanId: planId,
-          Amount: amount, Period: period, PeriodUnit: 'Month',
-          ClientToken: 'wb-ic-flow-' + region + '-' + imageId + '-' + amount
+        // 立即扣费路径：SWAS CreateInstances（无 AutoPay 参数，调用即扣费）
+        var kr = await AliyunClient.callCentralApi('CreateInstances', {
+          RegionId: region, ImageId: newImageId, PlanId: planId, Amount: amount,
+          Period: period, PeriodUnit: 'Month',
+          ClientToken: 'wb-ic-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8)
         });
-        var ids = icParseInstanceIds(launchRes);
-        st.innerHTML = '✅ 一键全流程完成，新实例：' + (ids.length ? ids.join(' / ') : '（未返回，请去控制台查看）');
-        icLog('[全流程] 完成，新实例: ' + (ids.length ? ids.join(', ') : '未返回'), 'success');
+        if (kr.InstanceIdSets && kr.InstanceIdSets.InstanceId) ids = kr.InstanceIdSets.InstanceId;
+        else if (kr.InstanceIds) ids = kr.InstanceIds;
+        else if (Array.isArray(kr.instanceIds)) ids = kr.instanceIds;
+        step('🚀 开通完成（<b style="color:#cf1322;">自动支付，已扣费</b>）：' +
+          (ids.length ? ('<br><code>' + ids.join('</code><br><code>') + '</code>') : '，请到阿里云控制台查看实例'));
       } else {
-        var ord2 = await icCreateOrder(region, imageId, planId, amount, period);
-        st.innerHTML = '✅ 一键全流程完成，已生成待支付订单：<code>' + ord2.OrderId + '</code><br>请前往阿里云控制台「费用中心 - 订单管理」支付。';
-        icLog('[全流程] 完成，待支付订单: ' + ord2.OrderId, 'success');
-      }
-      if (typeof renderAll === 'function') renderAll();
-    } catch (e) {
-      st.innerHTML = '❌ 一键全流程失败: ' + e.message;
-      icLog('[全流程] 失败: ' + e.message, 'error');
-    }
-  }
-
-  // ====== ⑤ 绑定舟翼云 ======
-  var __icBindInstances = [];
-
-  function icBuildBindScript(ak, sk, isp, clearMac) {
-    var clearPart = clearMac ? (
-      'echo "[$(date "+%F %T")] 清除旧 /etc/.mac"\n' +
-      'rm -f /etc/.mac /etc/edge_firstboot_done /etc/edge_firstboot.conf\n'
-    ) : '';
-    return [
-      '#!/bin/bash',
-      'set -e',
-      'exec > /var/log/zycloud_agent_setup.log 2>&1',
-      'echo "[$(date "+%F %T")] 开始绑定舟翼云"',
-      '',
-      clearPart,
-      '# 写入注册/绑定凭据',
-      'cat > /etc/edge_firstboot.conf <<\'EOF\'',
-      'APP_KEY="' + ak + '"',
-      'SECRET_KEY="' + sk + '"',
-      'ISP="' + isp + '"',
-      '',
-      '# 如需自动流转 待配置→服务中，请取消下面注释并填入 admin.zhouyi.top 状态流转接口',
-      '# APPID=""',
-      '# APPAK=""',
-      '# APPSK=""',
-      '# STATUS_API_URL="https://admin.zhouyi.top/api/edgeNode/updateEdgeStatus"',
-      'EOF',
-      '',
-      '# 下载并执行首启注册绑定脚本',
-      'echo "[$(date "+%F %T")] 下载 edge_firstboot_register.sh..."',
-      'curl -fsSL https://angelbaby86966.github.io/scheduled-refund/edge_firstboot_register.sh -o /tmp/edge_firstboot_register.sh',
-      'chmod +x /tmp/edge_firstboot_register.sh',
-      'bash /tmp/edge_firstboot_register.sh',
-      'echo "[$(date "+%F %T")] 绑定流程结束"'
-    ].join('\n');
-  }
-
-  async function icLoadInstancesForBind() {
-    if (!icGuard()) return;
-    var region = icGetRegion();
-    var box = document.getElementById('icBindInstanceList');
-    box.innerHTML = '⏳ 加载中...';
-    try {
-      var r = await AliyunClient.listInstances(region, { pageSize: 100 });
-      var all = r.Instances || [];
-      __icBindInstances = all.filter(function (it) {
-        var st = String(it.Status || '').toLowerCase();
-        return st === 'running';
-      });
-      if (!__icBindInstances.length) {
-        box.innerHTML = '⚠️ 当前地域暂无运行中的实例';
+        // 不扣费路径：SWAS CreateOrder，只生成待支付订单
+        var ord = await icCreateOrder(region, newImageId, planId, amount, period);
+        step('✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）：<code>' + ord.OrderId +
+          '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。');
+        icLog('[镜像克隆] 全流程已生成待支付订单，镜像=' + newImageId + ' 订单=' + ord.OrderId, 'success');
         return;
       }
-      var html = '<div style="display:flex;flex-direction:column;gap:6px;">' +
-        '<label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600;">' +
-          '<input type="checkbox" id="icBindSelectAll" checked onchange="icToggleBindSelectAll(this.checked)" /> 全选/取消全选' +
-        '</label>';
-      __icBindInstances.forEach(function (it, idx) {
-        var ip = it.PublicIpAddress || it.InnerIpAddress || '-';
-        html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">' +
-          '<input type="checkbox" class="ic-bind-chk" data-idx="' + idx + '" checked /> ' +
-          '<span>' + (it.InstanceName || '') + ' <code>' + it.InstanceId + '</code> (' + ip + ')</span>' +
-          '</label>';
-      });
-      html += '</div>';
-      box.innerHTML = html;
-      icLog('[绑定] 已加载 ' + __icBindInstances.length + ' 个运行中实例', 'info');
+      if (!ids.length) return;
+      // Bug C：待配置→服务中（Running）才生成业务ID并对应，避免误标待配置机
+      step('⏳ 等待实例进入「服务中」(Running) 后再生成业务ID...');
+      var wait2 = await icWaitInstancesRunning(ids, region, 180000);
+      if (!wait2.ids.length) {
+        step('⚠️ 3 分钟内未全部进入服务中，暂不为本批生成业务ID（避免误标待配置机）。');
+        icLog('[镜像克隆] 全流程开通超时未全 Running，未生成业务ID', 'warn');
+        return;
+      }
+      var biz = icGenBusinessId();
+      var entries2 = wait2.ids.map(function (id) { return { instanceId: id, publicIp: wait2.publicIpMap[id] || '' }; });
+      await icSaveCloneBizMap(entries2, biz, region, newImageId);
+      step('🔗 本批业务ID：<b>' + biz + '</b>（' + entries2.length + ' 台已到服务中，已对应并云端持久化' + (wait2.ids.length < ids.length ? '；' + (ids.length - wait2.ids.length) + ' 台未就绪未计入' : '') + '）');
+      icLog('[镜像克隆] 全流程完成: ' + instId + ' → 镜像 ' + newImageId + ' → 开通 ' + amount + ' 台', 'success');
     } catch (e) {
-      box.innerHTML = '❌ 加载失败: ' + e.message;
-      icLog('[绑定] 加载失败: ' + e.message, 'error');
+      step('❌ 流程中断: ' + e.message);
+      icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
     }
   }
 
-  function icToggleBindSelectAll(checked) {
-    document.querySelectorAll('.ic-bind-chk').forEach(function (chk) { chk.checked = checked; });
+  // ====== ⑤ 绑定舟翼云（开通后注册节点到小程序）======
+  var icBindInstances = [];   // 当前加载的实例列表 { InstanceId, Status }
+
+  async function icBindLoadInstances() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var rn = document.getElementById('icBindRegionName');
+    if (rn) rn.textContent = (REGION_INFO[region] || region);
+    var box = document.getElementById('icBindList');
+    box.innerHTML = '⏳ 加载 ' + (REGION_INFO[region] || region) + ' 实例中...';
+    try {
+      var r = await AliyunClient.listInstances(region, { pageSize: 100 });
+      var insts = r.Instances || r.instances || [];
+      // 翻页补齐（简单循环到无更多）
+      var page = 2;
+      while (insts.length < (r.TotalCount || insts.length) && insts.length >= 100) {
+        var nr = await AliyunClient.listInstances(region, { pageSize: 100, pageNumber: page });
+        var more = nr.Instances || nr.instances || [];
+        if (!more.length) break;
+        insts = insts.concat(more);
+        page++;
+      }
+      icBindInstances = insts;
+      if (!insts.length) { box.innerHTML = '该地域暂无实例'; return; }
+      var running = insts.filter(function (x) { return (x.Status || x.status || '') === 'Running'; });
+      box.innerHTML = '<label style="display:block;font-weight:600;margin-bottom:6px;cursor:pointer;">' +
+        '<input type="checkbox" id="icBindAll" checked onchange="icBindToggleAll(this)"> 全选（共 ' + insts.length + ' 台，其中运行中 ' + running.length + ' 台）</label>' +
+        '<div style="border-top:1px solid #eee;padding-top:6px;">' +
+        insts.map(function (x, i) {
+          var id = x.InstanceId || x.instanceId;
+          var st = x.Status || x.status || '';
+          var col = st === 'Running' ? '#389e0d' : '#999';
+          return '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;">' +
+            '<input type="checkbox" class="icBindChk" value="' + id + '" ' + (st === 'Running' ? 'checked' : '') + '> ' +
+            '<code>' + id + '</code> <span style="color:' + col + '">(' + st + ')</span></label>';
+        }).join('') + '</div>';
+      icLog('[绑定舟翼云] 加载 ' + insts.length + ' 台实例（' + region + '）', 'info');
+    } catch (e) {
+      box.innerHTML = '❌ 加载失败: ' + e.message;
+      icLog('[绑定舟翼云] 加载实例失败: ' + e.message, 'error');
+    }
   }
 
-  async function icBindSelectedToZhouyi() {
+  function icBindToggleAll(master) {
+    var chks = document.querySelectorAll('.icBindChk');
+    chks.forEach(function (c) { c.checked = master.checked; });
+  }
+
+  async function icBindZhouyi() {
     if (!icGuard()) return;
     var region = icGetRegion();
     var ak = (document.getElementById('icBindAk').value || '').trim();
     var sk = (document.getElementById('icBindSk').value || '').trim();
-    var isp = document.getElementById('icBindIsp').value;
-    var clearMac = document.getElementById('icBindClearMac').checked;
-    if (!ak || !sk) { alert('请填写舟翼云 appKey 和 secretKey'); return; }
+    var isp = (document.getElementById('icBindIsp').value || '').trim();
+    var ownerId = (document.getElementById('icBindOwnerId').value || '').trim() || (function () { var e = document.getElementById('ocdOwnerId'); return e ? (e.value || '').trim() : ''; })();
+    if (!ak || !sk || !isp) { alert('请填写 appKey / secretKey / 运营商'); return; }
+    var chks = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:checked'));
+    if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
+    var ids = chks.map(function (c) { return c.value; });
+    if (!confirm('🔗 将向 ' + ids.length + ' 台实例（' + (REGION_INFO[region] || region) + '）下发舟翼云绑定命令。\n\n这是真实注册操作，确认执行？')) return;
 
-    var checked = [];
-    document.querySelectorAll('.ic-bind-chk:checked').forEach(function (chk) {
-      var idx = parseInt(chk.dataset.idx, 10);
-      if (__icBindInstances[idx]) checked.push(__icBindInstances[idx]);
-    });
-    if (!checked.length) { alert('请先「加载当前地域实例」并勾选要绑定的机器'); return; }
-    if (!confirm('确定绑定 ' + checked.length + ' 台实例到舟翼云？\n运营商：' + isp + '\n' + (clearMac ? '会先清除 /etc/.mac 让每台重新生成设备ID。' : '不清除 /etc/.mac，若镜像带旧ID可能导致重复。'))) return;
+    // Bug A：绑定前同步云端克隆映射，按实例ID 取业务ID（让克隆机注册时也带上业务标识）
+    var bizByInst = {};
+    try {
+      await icSyncCloudBizMap();
+      var cm = icLoadCloneBizMap();
+      ids.forEach(function (id) { if (cm[id] && cm[id].businessId) bizByInst[id] = cm[id].businessId; });
+    } catch (e) {}
+    var bizList = Object.keys(bizByInst);
+
+    var cleanMac = document.getElementById('icBindCleanMac').checked;
+    var pre = cleanMac
+      ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
+      : '';
+    // 基础绑定命令（不含业务ID）；业务ID 在 worker 里按实例单独追加写入克隆机本地
+    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
 
     var st = document.getElementById('icBindStatus');
-    st.innerHTML = '⏳ 开始绑定 ' + checked.length + ' 台实例...';
-    var success = 0, fail = 0;
-    for (var i = 0; i < checked.length; i++) {
-      var inst = checked[i];
-      var iid = inst.InstanceId;
-      st.innerHTML = '⏳ 绑定第 ' + (i + 1) + '/' + checked.length + ' 台: ' + iid + '...';
-      try {
-        var script = icBuildBindScript(ak, sk, isp, clearMac);
-        await AliyunClient.runCommandOnInstance(region, [iid], {
-          name: 'zycloud-bind-' + iid + '-' + Date.now(),
-          content: script,
-          type: 'RunShellScript',
-          timeout: 600
-        });
-        success++;
-        icLog('[绑定] ' + iid + ' 命令已提交', 'success');
-      } catch (e) {
-        fail++;
-        icLog('[绑定] ' + iid + ' 失败: ' + e.message, 'error');
+    var prog = document.getElementById('icBindProgress');
+    st.innerHTML = '';
+    var done = 0, ok = 0, fail = 0;
+    function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
+
+    // 有界并发（最多 20 台同时下发）
+    var CONC = 20, idx = 0;
+    async function worker() {
+      while (idx < ids.length) {
+        var iid = ids[idx++];
+        var bid = bizByInst[iid] || '';
+        // 该实例专属命令：绑定 + 把业务ID 写克隆机本地，使「设备ID ↔ 业务ID」在设备侧物理闭环
+        var instCmd = cmd + (bid ? ('; mkdir -p /usr/local/edge && echo "' + bid + '" > /usr/local/edge/business_id') : '');
+        try {
+          await AliyunClient.callCentralApi('RunCommand', {
+            RegionId: region, InstanceId: iid,
+            CommandContent: icB64(instCmd), Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
+          });
+          ok++;
+          st.innerHTML += '<div style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发' + (bid ? '（标记业务ID ' + bid + '）' : '') + '</div>';
+          icLog('[绑定舟翼云] ' + iid + ' 命令已下发' + (bid ? ' 业务ID=' + bid : ''), 'success');
+        } catch (e) {
+          fail++;
+          st.innerHTML += '<div style="color:#cf1322;">❌ ' + iid + ' 失败: ' + e.message + '</div>';
+          icLog('[绑定舟翼云] ' + iid + ' 失败: ' + e.message, 'error');
+        }
+        tick();
       }
     }
-    st.innerHTML = '✅ 绑定完成：成功 ' + success + ' 台，失败 ' + fail + ' 台。请登录实例查看 /var/log/zycloud_agent_setup.log';
+    var pool = [];
+    for (var w = 0; w < Math.min(CONC, ids.length); w++) pool.push(worker());
+    await Promise.all(pool);
+    st.innerHTML += '<div style="margin-top:8px;font-weight:600;">🏁 完成：成功 ' + ok + ' / 失败 ' + fail + ' / 共 ' + ids.length + '</div>' +
+      '<div style="font-size:12px;color:#666;margin-top:4px;">每台机器约 1~2 分钟安装注册完成。登录任一台看 <code>/var/log/zycloud_agent_setup.log</code> 末尾「注册成功」，并去小程序确认出现对应新设备。</div>';
+    icLog('[绑定舟翼云] 批量下发完成 成功' + ok + ' 失败' + fail, ok === ids.length ? 'success' : 'warn');
+    // Bug A：绑定完成后，按实例公网IP 从舟翼云后端查设备ID 并回写云端映射（完成设备ID↔业务ID 对应）
+    if (bizList.length) {
+      try {
+        var devs = await icQueryZyDevices(ownerId);
+        if (devs && devs.length) {
+          var cm2 = icLoadCloneBizMap();
+          var updated = [];
+          ids.forEach(function (id) {
+            var b = cm2[id];
+            if (b && b.publicIp) {
+              var hit = devs.filter(function (d) { return d.ip && (d.ip === b.publicIp || (b.publicIp && d.ip.indexOf(b.publicIp) >= 0)); })[0];
+              if (hit && hit.id) updated.push({ instanceId: id, deviceId: hit.id, publicIp: b.publicIp });
+            }
+          });
+          if (updated.length) {
+            await icSaveCloneBizMap(updated, null, null, null);
+            st.innerHTML += '<div style="color:#389e0d;font-size:12px;margin-top:4px;">🔗 已按公网IP 回填 ' + updated.length + ' 台设备ID(舟翼云)，设备ID↔业务ID 对应完成</div>';
+          } else {
+            st.innerHTML += '<div style="font-size:12px;color:#999;margin-top:4px;">克隆机已写入 /usr/local/edge/business_id；设备ID 需到舟翼云后台按公网IP 核对（或稍后重跑绑定自动回填）。</div>';
+          }
+        }
+      } catch (e) {}
+    }
   }
 
-  function icFallbackCopy(text) {
-    var ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try { document.execCommand('copy'); alert('✅ 已复制到剪贴板'); }
-    catch (e) { alert('复制失败，请手动选中复制'); }
-    document.body.removeChild(ta);
-  }
+  // ====== 一键绑定并流转到服务中（绑定舟翼云 → 等上线 → 新设备SN填入业务ID → 状态流转）======
+  async function icBindAndDeploy() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var ak = (document.getElementById('icBindAk').value || '').trim();
+    var sk = (document.getElementById('icBindSk').value || '').trim();
+    var isp = (document.getElementById('icBindIsp').value || '').trim();
+    if (!ak || !sk || !isp) { alert('请填写 appKey / secretKey / 运营商'); return; }
+    var chks = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:checked'));
+    if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
+    var ids = chks.map(function (c) { return c.value; });
 
-  function icCopyText(id) {
-    var el = document.getElementById(id);
-    if (!el) return;
-    var text = el.textContent || el.innerText || '';
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(
-        function () { alert('✅ 已复制到剪贴板'); },
-        function () { icFallbackCopy(text); }
-      );
-    } else {
-      icFallbackCopy(text);
+    // 读取 admin.zhouyi.top Token（本页输入框 > 一键部署面板 > localStorage）
+    var token = icGetAdminToken();
+    if (!token) { alert('请先在本页「🔑 admin.zhouyi.top Token」处粘贴并保存 token'); return; }
+    // 读取 one-click-deploy 面板配置
+    function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
+    function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
+    var vendor = ocdVal('ocdVendorSuggestCustomers');
+    var transMode = ocdVal('ocdTransMode');
+    if (!vendor || !transMode) { alert('请先在一键部署面板填写「供应商建议客户」和「传输模式」'); return; }
+    // 属主过滤（提高按公网IP 匹配准确度）；本页输入框 > 一键部署面板 ocdOwnerId
+    var ownerId = (document.getElementById('icBindOwnerId').value || '').trim() || ocdVal('ocdOwnerId');
+    var cfg = {
+      vendorSuggestCustomers: vendor,
+      transMode: transMode,
+      isCrossNetwork: ocdChk('ocdIsCrossNetwork'),
+      crossNetworkIsp: ocdVal('ocdCrossNetworkIsp'),
+      isTransProv: ocdChk('ocdTransProv'),
+      usbw: parseInt(ocdVal('ocdUsbw') || '200', 10) || 200,
+      bwNum: parseInt(ocdVal('ocdBwNum') || '1', 10) || 1,
+    };
+
+    if (!confirm('🚀 一键绑定并流转：\n1) 向 ' + ids.length + ' 台实例下发舟翼云绑定命令\n2) 等待设备在 admin.zhouyi.top 上线\n3) 把新设备SN填入业务ID\n4) 自动状态流转到服务中\n\n确认执行？')) return;
+
+    var st = document.getElementById('icBindStatus');
+    var prog = document.getElementById('icBindProgress');
+    st.innerHTML = '';
+    function log(html) { st.innerHTML += '<div style="margin:2px 0;">' + html + '</div>'; }
+
+    // 1) 绑定舟翼云（并发下发）
+    var cleanMac = document.getElementById('icBindCleanMac').checked;
+    var pre = cleanMac
+      ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
+      : '';
+    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
+    var done = 0, ok = 0, fail = 0, idx = 0;
+    function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
+    async function worker() {
+      while (idx < ids.length) {
+        var iid = ids[idx++];
+        try {
+          await AliyunClient.callCentralApi('RunCommand', {
+            RegionId: region, InstanceId: iid,
+            CommandContent: icB64(cmd), Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
+          });
+          ok++;
+          log('<span style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发</span>');
+        } catch (e) {
+          fail++;
+          log('<span style="color:#cf1322;">❌ ' + iid + ' 失败: ' + e.message + '</span>');
+        }
+        tick();
+      }
+    }
+    var pool = [];
+    for (var w = 0; w < Math.min(20, ids.length); w++) pool.push(worker());
+    await Promise.all(pool);
+    log('<b>🏁 绑定下发完成：成功 ' + ok + ' / 失败 ' + fail + ' / 共 ' + ids.length + '</b>');
+    if (ok === 0) { log('没有成功下发绑定的实例，停止后续流转'); return; }
+
+    // 2) 查询实例公网IP
+    log('⏳ 查询实例公网IP，用于匹配舟翼云设备...');
+    var ipMap = {};
+    try {
+      var r = await AliyunClient.listInstances(region, { pageSize: 100 });
+      var insts = r.Instances || r.instances || [];
+      insts.forEach(function (x) {
+        var id = x.InstanceId || x.instanceId;
+        if (ids.indexOf(id) >= 0) {
+          var ip = x.PublicIpAddress || x.publicIpAddress || x.IpAddress || x.ipAddress || '';
+          if (typeof ip === 'object') ip = ip.IpAddress || ip.ipAddress || (ip[0] || '');
+          ipMap[id] = (typeof ip === 'string') ? ip : ((ip && ip[0]) || '');
+        }
+      });
+    } catch (e) { log('⚠️ 查询公网IP失败: ' + e.message); }
+
+    // 3) 等待设备在舟翼云后台上线（轮询 getEdgeNodeList，按IP匹配）
+    log('⏳ 等待设备在 admin.zhouyi.top 上线（最多 5 分钟）...');
+    var matched = [];
+    var tokenInvalid = false;
+    var deadline = Date.now() + 300000;
+    while (Date.now() < deadline && matched.length < ok) {
+      try {
+        var devs = await icQueryZyDevices(ownerId);
+        if (devs && devs.length) {
+          ids.forEach(function (iid) {
+            if (matched.some(function (m) { return m.instanceId === iid; })) return;
+            var ip = ipMap[iid];
+            if (!ip) return;
+            var hit = devs.filter(function (d) { return d.ip && (d.ip === ip || d.ip.indexOf(ip) >= 0 || ip.indexOf(d.ip) >= 0); })[0];
+            if (hit && hit.id) matched.push({ instanceId: iid, deviceId: hit.id, publicIp: ip });
+          });
+          log('已匹配 ' + matched.length + '/' + ok + ' 台设备上线');
+        }
+      } catch (e) {
+        if (e && e.message === 'TOKEN_INVALID') {
+          log('⚠️ admin.zhouyi.top Token 已失效，请到镜像克隆页「🔑 Token」重新粘贴保存后再试');
+          tokenInvalid = true;
+          break;
+        }
+      }
+      if (matched.length < ok) await icSleep(15000);
+    }
+    if (tokenInvalid) return;
+    if (!matched.length) { log('⚠️ 5 分钟内未匹配到任何上线设备，停止流转。可稍后手动补流转。'); return; }
+
+    // 4) 状态流转：把新设备SN填入业务ID，调用 updateEdgeRemark + directDeployment
+    log('🚀 开始状态流转（待配置 → 服务中），业务ID = 新设备SN...');
+    var submitOk = 0, deployOk = 0, deployFail = 0, successList = [];
+    var idx2 = 0;
+    var adminFn = (window.OcdAdmin && window.OcdAdmin.call) || async function (token, method, path, query, body) {
+      var resp = await fetch(IC_SUPABASE_FN, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
+        body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: query || '', body: (body === undefined ? null : body) })
+      });
+      var json = null;
+      try { json = await resp.json(); } catch (e) {}
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
+      return json;
+    };
+    async function flowWorker() {
+      while (idx2 < matched.length) {
+        var m = matched[idx2++];
+        try {
+          // 把新设备SN填入业务ID（同步到 one-click-deploy 面板展示）
+          var bizEl = document.getElementById('ocdBusinessId');
+          if (bizEl) bizEl.value = m.deviceId;
+          // 批量提交（updateEdgeRemark）
+          await adminFn(token, 'POST', '/api/edgeNode/updateEdgeRemark', '', {
+            nodeId: m.deviceId,
+            businessId: m.deviceId,
+            vendorSuggestCustomers: cfg.vendorSuggestCustomers,
+            transMode: cfg.transMode,
+            isCrossNetwork: cfg.isCrossNetwork,
+            crossNetworkIsp: cfg.crossNetworkIsp,
+            isTransProv: cfg.isTransProv,
+            usbw: cfg.usbw,
+            bwNum: cfg.bwNum,
+          });
+          submitOk++;
+          // 批量部署（directDeployment）
+          await adminFn(token, 'POST', '/api/bigDeployLog/directDeployment', '', { nodeId: m.deviceId });
+          deployOk++;
+          successList.push(m);
+          log('<span style="color:#389e0d;">✅ ' + m.deviceId + ' 已流转到服务中（业务ID=' + m.deviceId + '）</span>');
+          icLog('[镜像克隆] 状态流转成功 ' + m.deviceId, 'success');
+        } catch (e) {
+          deployFail++;
+          log('<span style="color:#cf1322;">❌ ' + m.deviceId + ' 流转失败: ' + e.message + '</span>');
+          icLog('[镜像克隆] 状态流转失败 ' + m.deviceId + ': ' + e.message, 'error');
+        }
+      }
+    }
+    var pool2 = [];
+    for (var w2 = 0; w2 < Math.min(10, matched.length); w2++) pool2.push(flowWorker());
+    await Promise.all(pool2);
+    log('<b>🏁 状态流转完成：提交成功 ' + submitOk + ' / 部署成功 ' + deployOk + ' / 失败 ' + deployFail + '</b>');
+
+    // 5) 保存 deviceId ↔ businessId（业务ID = 设备SN）映射
+    if (successList.length) {
+      var bizBatch = icGenBusinessId();
+      var entries = successList.map(function (m) { return { instanceId: m.instanceId, deviceId: m.deviceId, publicIp: m.publicIp }; });
+      await icSaveCloneBizMap(entries, bizBatch, region, '');
+      log('🔗 已保存业务ID映射：批次 ' + bizBatch + '，共 ' + entries.length + ' 台（业务ID/设备SN 一一对应）');
     }
   }
 
@@ -700,12 +1212,12 @@
   window.icLoadImages = icLoadImages;
   window.icDeleteImage = icDeleteImage;
   window.icLaunchFromImage = icLaunchFromImage;
-  window.icRunStandardizationOnSource = icRunStandardizationOnSource;
-  window.icRunFullAutoFlow = icRunFullAutoFlow;
-  window.icLoadInstancesForBind = icLoadInstancesForBind;
-  window.icToggleBindSelectAll = icToggleBindSelectAll;
-  window.icBindSelectedToZhouyi = icBindSelectedToZhouyi;
-  window.icCopyText = icCopyText;
+  window.icOneKeyStandardize = icOneKeyStandardize;
+  window.icFullCloneFlow = icFullCloneFlow;
+  window.icBindLoadInstances = icBindLoadInstances;
+  window.icBindZhouyi = icBindZhouyi;
+  window.icBindAndDeploy = icBindAndDeploy;
+  window.icBindToggleAll = icBindToggleAll;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', icInit);

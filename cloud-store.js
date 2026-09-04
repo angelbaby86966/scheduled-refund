@@ -8,8 +8,8 @@
   'use strict';
 
   // ====== Supabase 配置 ======
-  var SUPABASE_URL = 'https://vgddxxgjcogxcpiycsej.supabase.co';
-  var SUPABASE_ANON_KEY = 'sb_publishable_AqRbhxlzaDzPNR1nZTw-4A_c1VQ1Nch';
+  var SUPABASE_URL = 'https://opauwtkivhjxlijfqaix.supabase.co';
+  var SUPABASE_ANON_KEY = 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
   var REST_BASE = SUPABASE_URL + '/rest/v1';
 
   // ====== 内存缓存 ======
@@ -47,8 +47,8 @@
   /**
    * 获取所有用户（兼容旧格式 {admin, users} ）
    */
-  function getAllUsers(forceRefresh) {
-    if (!forceRefresh && usersCache) return Promise.resolve(usersCache);
+  function getAllUsers() {
+    if (usersCache) return Promise.resolve(usersCache);
     return restRequest('GET', 'app_users', '?select=username,password,role,created_by,created_at&order=username.asc')
       .then(function(rows) {
         var result = { admin: 'zhangruiyao', users: {} };
@@ -232,7 +232,8 @@
 
   /**
    * 保存用户数据（写入云端 + 缓存）
-   * 先尝试 PATCH（更新已有行），失败则 POST（新建行）
+   * 先尝试 PATCH（更新已有行）；若 PATCH 命中 0 行（行不存在，Supabase 返回空数组 200），
+   * 则自动 POST 新建行。这样首次保存也能正确落库（修复「云端未确认到完整配置」）。
    */
   function setUserData(username, data) {
     // 先更新缓存
@@ -246,19 +247,7 @@
       updated_at: Date.now()
     });
 
-    // 先尝试 PATCH（行已存在的情况）
-    return fetch(url + '?username=eq.' + encodeURIComponent(username), {
-      method: 'PATCH',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      },
-      body: body
-    }).then(function(resp) {
-      if (resp.ok) return resp.json();
-      // PATCH 失败（可能行不存在），尝试 POST 新建
+    function doPost() {
       return fetch(url, {
         method: 'POST',
         headers: {
@@ -271,10 +260,32 @@
       }).then(function(resp2) {
         if (!resp2.ok) {
           return resp2.text().then(function(txt) {
-            throw new Error('Supabase setUserData ' + resp2.status + ': ' + txt.substring(0, 200));
+            throw new Error('Supabase setUserData POST ' + resp2.status + ': ' + txt.substring(0, 200));
           });
         }
         return resp2.json();
+      });
+    }
+
+    // 先尝试 PATCH（行已存在的情况）
+    return fetch(url + '?username=eq.' + encodeURIComponent(username), {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: body
+    }).then(function(resp) {
+      if (!resp.ok) {
+        // PATCH 非 2xx，直接 POST 新建
+        return doPost();
+      }
+      return resp.json().then(function(rows) {
+        // ⚠️ 关键修复：PATCH 命中 0 行时返回空数组（200），需改 POST 新建
+        if (rows && rows.length > 0) return rows;
+        return doPost();
       });
     });
   }

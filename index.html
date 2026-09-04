@@ -594,6 +594,7 @@
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                     <button class="btn btn-primary" style="background:#0958d9;border:none;" onclick="icBindZhouyi()">🔗 绑定选中实例到舟翼云</button>
                     <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icBindAndDeploy()" title="绑定舟翼云 → 等待设备上线 → 把新设备SN填入业务ID → 自动状态流转到服务中">🚀 一键绑定并流转到服务中</button>
+                    <button class="btn btn-sm" onclick="icQuerySelectedEdgeDetail()" title="查 admin 后端节点详情（含 businessId），用于核对/排查待配置节点">🔍 查选中节点详情</button>
                     <span id="icBindProgress" style="font-size:12px;color:#555;"></span>
                   </div>
                   <div id="icBindStatus" style="margin-top:10px;font-size:13px;"></div>

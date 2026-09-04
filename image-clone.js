@@ -175,6 +175,44 @@
     console.log('[镜像克隆]', msg);
   }
 
+  // 查询 admin 后端节点详情（含 businessId、期望业务、备注等所有字段）
+  // 用于：核对 f670e4...（d62a3d）的业务ID；或在流转前确认 device_code 已注册
+  async function icQueryEdgeDetail(nodeId) {
+    try {
+      // 先尝试 getEdgeNodeDetail，失败则用 getEdgeNodeList 过滤
+      var j;
+      try {
+        j = await icAdminCall('GET', '/api/edgeNode/getEdgeNodeDetail?nodeId=' + encodeURIComponent(nodeId), null);
+      } catch (e1) {
+        // 兼容没有 detail 接口的旧版后端——从 list 里过滤
+        j = await icAdminCall('GET', '/api/edgeNode/getEdgeNodeList', null);
+      }
+      var inner = j && j.data ? j.data : j;
+      var node = null;
+      if (inner && (inner.nodeId || inner.id) === nodeId) node = inner;
+      else if (Array.isArray(inner)) node = inner.find(function (n) { return (n.nodeId || n.id) === nodeId; });
+      else if (inner && Array.isArray(inner.data)) node = inner.data.find(function (n) { return (n.nodeId || n.id) === nodeId; });
+      else if (inner && Array.isArray(inner.list)) node = inner.list.find(function (n) { return (n.nodeId || n.id) === nodeId; });
+      else if (inner && Array.isArray(inner.nodes)) node = inner.nodes.find(function (n) { return (n.nodeId || n.id) === nodeId; });
+      if (!node) return { ok: false, error: '未找到 nodeId=' + nodeId };
+      // 提取关键字段（兼容不同命名）
+      var fields = {
+        nodeId: node.nodeId || node.id || node.deviceId || '',
+        businessId: node.businessId || node.bizId || node.business_id || '',
+        remark: node.remark || node.note || node.nodeRemark || '',
+        ownerId: node.ownerId || node.owner_id || '',
+        networkStatus: node.networkStatus || node.netStatus || node.status || '',
+        expectedBiz: node.expectedBusiness || node.expectedBiz || node.expectBiz || '',
+        vendor: node.vendor || node.vendorName || '',
+        ip: node.ip || node.publicIp || node.ipAddress || ''
+      };
+      return { ok: true, raw: node, fields: fields };
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  }
+  // 暴露：window.icQueryEdgeDetail(nodeId) → 查 admin 后端节点详情
+
   function icGuard() {
     if (typeof isAdmin === 'function' && !isAdmin()) {
       alert('⛔ 该功能仅管理员(zhangruiyao)可用');
@@ -1344,42 +1382,53 @@
     var tokenInvalid = false;
     // 读 device_code 的脚本：先 /usr/local/edge_zycloud/device_code，再 /etc/.mac，最后边缘兜底
     var readCodeCmd = 'DC=""; for f in /usr/local/edge_zycloud/device_code /etc/.mac /usr/local/edge/device_code; do if [ -f "$f" ] && [ -r "$f" ]; then DC=$(cat "$f" 2>/dev/null); [ -n "$DC" ] && break; fi; done; if [ -z "$DC" ]; then DC=$(hostname); fi; echo "$DC"';
-    var RC_DEADLINE = Date.now() + 180000;  // 3 分钟
+    var RC_DEADLINE = Date.now() + 240000;  // 4 分钟总截止
     async function readDeviceCode(iid) {
-      // 步骤 a: 发 RunCommand 读 device_code
-      // 步骤 a: 发 RunCommand 读 device_code（CommandContent 发明文，云助手不会自动 base64 -d）
-      var r = await AliyunClient.callCentralApi('RunCommand', {
-        RegionId: region, InstanceId: iid,
-        CommandContent: readCodeCmd,
-        Type: 'RunShellScript', Timeout: 30, Name: 'zyy-readcode'
-      });
-      var invId = r.InvokeId || r.invokeId || '';
-      if (!invId) throw new Error('未拿到 InvokeId');
-      // 步骤 b: 轮询 DescribeCommandInvocations（用 AliyunClient.callSwasApi 直连 SWAS，绕开 fn）
-      var dl = Date.now() + 120000;
-      while (Date.now() < dl) {
+      // ✅ 步骤 a: 发 RunCommand 读 device_code
+      // CommandContent 发明文（云助手 agent 不会自动 base64 -d）
+      // 走 callCentralApi 经 supabase aliyun-proxy 转发，避免 SWAS 直连可能的 CORS/限流
+      var r;
+      try {
+        r = await AliyunClient.callCentralApi('RunCommand', {
+          RegionId: region, InstanceId: iid,
+          CommandContent: readCodeCmd,
+          Type: 'RunShellScript', Timeout: 30, Name: 'zyy-readcode'
+        });
+      } catch (e) {
+        throw new Error('RunCommand 提交失败: ' + e.message);
+      }
+      var invId = (r && (r.InvokeId || r.invokeId)) || '';
+      if (!invId) throw new Error('未拿到 InvokeId（resp=' + JSON.stringify(r).slice(0,200) + '）');
+      // ✅ 步骤 b: 轮询 DescribeCommandInvocations（也走 callCentralApi 保持一致，避免 SWAS 直连 CORS）
+      var dl = Date.now() + 150000;  // 单台机器最多等 150s
+      var lastStatus = '';
+      while (Date.now() < dl && Date.now() < RC_DEADLINE) {
         await icSleep(3000);
         try {
-          var out = await AliyunClient.callSwasApi(region, 'DescribeCommandInvocations', { InvokeId: invId, IncludeOutput: true, PageSize: 1 });
-          var inv = (out.CommandInvocations || out.commandInvocations || [])[0];
+          var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', {
+            RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1
+          });
+          var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
           if (!inv) continue;
-          var iis = (inv.InvocationInstances || inv.invocationInstances || [])[0];
+          var iis = (inv.InvocationInstances || inv.invocationInstances || inv.InvokeInstances || [])[0];
           if (!iis) continue;
           var status = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
+          lastStatus = status;
           if (status === 'success' || status === 'failed' || status === 'stopped') {
             var output = (iis.Output || iis.output || '').trim();
             // device_code 是 32 hex，可能在 Output 末尾；提取第一个匹配
             var m = output.match(/[a-f0-9]{32}/);
             if (m) return m[0];
-            throw new Error('RunCommand 输出无 32hex device_code: ' + output.slice(0, 200));
+            throw new Error('RunCommand 输出无 32hex device_code（lastStatus=' + status + '）: ' + output.slice(0, 200));
           }
           // Running/Pending 继续等
         } catch (e) {
-          // 网络错或签名错——继续重试
-          if (e && /MissingAccessKeyId|InvalidAccessKey/i.test(e.message)) throw e;
+          // 关键错误（鉴权/参数错）不重试；网络/CORS 错误重试
+          if (e && /MissingAccessKeyId|InvalidAccessKey|InvalidParameter/i.test(e.message)) throw e;
+          // 否则继续轮询
         }
       }
-      throw new Error('DescribeCommandInvocations 超时（2 分钟）');
+      throw new Error('DescribeCommandInvocations 超时（lastStatus=' + (lastStatus || 'unknown') + '）');
     }
     var rcIdx = 0;
     async function rcPool() {
@@ -1468,6 +1517,39 @@
   window.icBindZhouyi = icBindZhouyi;
   window.icBindAndDeploy = icBindAndDeploy;
   window.icBindToggleAll = icBindToggleAll;
+  window.icQueryEdgeDetail = icQueryEdgeDetail;   // 查 admin 后端节点详情（含 businessId）
+  // 手动指定 nodeId 查详情（默认填 f670e4ea965c392ef44dca557b320a43）
+  async function icQuerySelectedEdgeDetail() {
+    var st = document.getElementById('icBindStatus');
+    if (!st) return;
+    var nodeId = prompt('输入要查的 device_code（节点ID）：', 'f670e4ea965c392ef44dca557b320a43');
+    if (!nodeId) return;
+    nodeId = nodeId.trim();
+    if (!nodeId) return;
+    st.innerHTML = '<div>🔍 查 admin 节点详情：' + nodeId + ' ...</div>';
+    var r = await icQueryEdgeDetail(nodeId);
+    if (!r.ok) {
+      st.innerHTML += '<div style="color:#cf1322;">❌ 查询失败：' + r.error + '</div>';
+      icLog('[镜像克隆] 查 admin 节点详情失败 ' + nodeId + ': ' + r.error, 'error');
+      return;
+    }
+    var f = r.fields;
+    st.innerHTML += '<div style="background:#fffbe6;border:1px solid #ffe58f;border-radius:6px;padding:10px;margin-top:8px;font-size:13px;">'
+      + '<div><b>📋 admin 后端节点详情</b></div>'
+      + '<div>节点ID (deviceCode) = <code>' + f.nodeId + '</code></div>'
+      + '<div>业务ID (businessId) = <code style="color:#cf1322;">' + (f.businessId || '⚠️ 空') + '</code></div>'
+      + '<div>节点备注 = ' + (f.remark || '—') + '</div>'
+      + '<div>节点属主ID = ' + (f.ownerId || '—') + '</div>'
+      + '<div>网络状态 = ' + (f.networkStatus || '—') + '</div>'
+      + '<div>期望业务 = ' + (f.expectedBiz || '—') + '</div>'
+      + '<div>供应商 = ' + (f.vendor || '—') + '</div>'
+      + '<div>IP = ' + (f.ip || '—') + '</div>'
+      + '<details style="margin-top:6px;"><summary style="cursor:pointer;color:#888;">原始 JSON</summary>'
+      + '<code style="font-size:11px;">' + JSON.stringify(r.raw, null, 2).slice(0, 3000) + '</code></details>'
+      + '</div>';
+    icLog('[镜像克隆] 查 admin 节点详情成功 ' + nodeId + ' → businessId=' + f.businessId, 'success');
+  }
+  window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', icInit);

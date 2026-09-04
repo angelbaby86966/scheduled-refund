@@ -106,7 +106,6 @@
         <main class="content">
           <div class="tabs">
             <button class="tab admin-only-tab active" data-tab="node" onclick="switchTab('node')">📋 节点ID提取</button>
-            <button class="tab admin-only-tab" data-tab="deploy" onclick="switchTab('deploy')">🚀 一键部署</button>
             <button class="tab" data-tab="firewall" onclick="switchTab('firewall')">🛡️ 防火墙</button>
             <button class="tab" data-tab="command" onclick="switchTab('command')">💻 命令助手</button>
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')">⏰ 定时退订</button>
@@ -210,114 +209,6 @@
           </div>
 
           <!-- 一键部署面板 -->
-          <div class="tab-content admin-only-panel" id="tab-deploy">
-            <div class="card">
-              <div class="card-header">
-                <h3>🚀 一键部署（输入属主ID → 自动抓节点 → 分批提交部署）</h3>
-                <p class="card-desc">v5 融合版：输入节点属主ID，自动从 admin.zhouyi.top 抓取在线节点，并按每批 100 台、间隔 1 秒自动提交/部署。也可在「高级」区粘贴节点ID或真实请求体。仅管理员可用。</p>
-              </div>
-              <div class="card-body">
-                <div style="background:#e6f7ff; border:1px solid #91d5ff; padding:10px 12px; border-radius:4px; margin-bottom:14px; font-size:13px; color:#0050b3;">
-                  💡 首次使用需在下方粘贴 admin.zhouyi.top 的 token 并保存；已保存过凭证可留空。
-                </div>
-
-                <div class="form-group">
-                  <label style="font-weight:600;">🔑 admin.zhouyi.top Token <span style="color:#999;font-weight:400;font-size:12px;">（已保存可留空）</span></label>
-                  <input type="text" id="ocdToken" placeholder="从浏览器 F12 请求头复制 x-token" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
-                  <div style="margin-top:6px;">
-                    <button type="button" class="btn btn-sm" onclick="ocdSaveToken()" style="padding:4px 10px;font-size:12px;">💾 保存凭证</button>
-                    <span id="ocdTokenStatus" style="font-size:12px;color:#999;margin-left:8px;"></span>
-                  </div>
-                </div>
-
-                <div class="form-group" style="margin-top:12px;">
-                  <label style="font-weight:600;">节点属主ID <span style="color:#999;font-weight:400;font-size:12px;">（输入后自动抓取并部署）</span></label>
-                  <input type="text" id="ocdOwnerId" placeholder="例如 7546、7411 等" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
-                </div>
-
-                <details style="margin-top:12px;">
-                  <summary>📋 手动粘贴节点ID（可选，留空则自动抓取）</summary>
-                  <div class="form-group" style="margin-top:10px;">
-                    <textarea id="ocdNodeIds" rows="4" placeholder="粘贴节点ID，例如：&#10;7546_abc123&#10;7546_def456" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
-                  </div>
-                </details>
-
-                <details open>
-                  <summary>⚙️ 提交配置（默认已按截图设置）</summary>
-                  <div style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:12px;">
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">供应商建议客户 (vendorSuggestCustomers)</label>
-                      <input type="text" id="ocdVendorSuggestCustomers" placeholder="必填，参考 admin 批量提交表单" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">传输模式 (transMode)</label>
-                      <input type="text" id="ocdTransMode" placeholder="必填，如 auto / 数字" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0; display:flex; align-items:center; gap:12px; padding-top:20px;">
-                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdIsCrossNetwork"> 是否跨网</label>
-                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdTransProv" checked> 跨省调度</label>
-                      <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; margin:0;"><input type="checkbox" id="ocdIsp"> 是否异网</label>
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">跨网ISP (crossNetworkIsp)</label>
-                      <input type="text" id="ocdCrossNetworkIsp" placeholder="跨网时填写，如 CT/CM/CU" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">单条上行(Mbps)</label>
-                      <input type="number" id="ocdUsbw" value="200" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">线路数量</label>
-                      <input type="number" id="ocdBwNum" value="1" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">业务ID <span style="color:#999;font-weight:400;">（留空则部署时自动生成；克隆机流转到服务中后与本批每台设备ID一一对应）</span></label>
-                      <input type="text" id="ocdBusinessId" value="" placeholder="留空自动生成，如 BIZ20260830K7Q2 / 41" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">每批台数（自动分批）</label>
-                      <input type="number" id="ocdBatchSize" value="100" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                    <div class="form-group" style="margin:0;">
-                      <label style="font-size:12px;">批间间隔(毫秒)</label>
-                      <input type="number" id="ocdBatchDelay" value="1000" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
-                    </div>
-                  </div>
-                </details>
-
-                <details style="margin-top:12px;">
-                  <summary>🛠️ 高级：粘贴 F12 真实请求体（100% 对齐手动，可选）</summary>
-                  <div style="margin-top:10px; font-size:12px; color:#666;">
-                    若默认提交/部署参数不对，在 admin.zhouyi.top 点一次手动部署 → F12 → Network 找到对应请求 → 复制 Request Body 粘贴下方（前端会原样发送，完全模拟手动）：
-                    <div class="form-group" style="margin-top:8px;">
-                      <label style="font-size:12px;">批量提交请求体 (POST /edgeNode/updateEdgeRemark)</label>
-                      <textarea id="ocdSubmitBody" rows="3" placeholder='{"nodeId":"7546_abc","vendorSuggestCustomers":"...","transMode":"...",...}' style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:11px; resize:vertical;"></textarea>
-                    </div>
-                    <div class="form-group" style="margin-top:8px;">
-                      <label style="font-size:12px;">批量部署请求体 (POST /bigDeployLog/directDeployment)</label>
-                      <textarea id="ocdDeployBody" rows="3" placeholder='{"nodeId":"7546_abc"}' style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:11px; resize:vertical;"></textarea>
-                    </div>
-                  </div>
-                </details>
-
-                <div style="margin-top:16px;">
-                  <button class="btn btn-primary" id="ocdBtn" onclick="ocdStartDeploy()">🚀 自动提取并部署</button>
-                </div>
-
-                <div id="ocdStatus" style="margin-top:14px;"></div>
-                <div id="ocdBizMap" style="margin-top:14px;"></div>
-
-                <div style="margin-top:20px;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                    <strong style="font-size:14px;">📋 操作日志</strong>
-                    <button class="btn btn-xs" onclick="ocdClearLog()" style="font-size:12px; padding:4px 10px;">清空</button>
-                  </div>
-                  <div id="ocdLogArea" style="background:#1e1e1e; color:#d4d4d4; border-radius:6px; padding:10px; max-height:300px; overflow-y:auto; font-family:monospace; font-size:12px;"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <!-- 防火墙面板 -->
           <div class="tab-content" id="tab-firewall">
             <div class="card">

@@ -1551,6 +1551,70 @@
   }
   window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
+  // 已知 deviceCode → 直接调 admin 后端：updateEdgeRemark（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
+  // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，填到 admin 业务ID 字段并流转
+  // 流程：
+  //   1) POST /api/edgeNode/updateEdgeRemark  body={nodeId, businessId, vendorSuggestCustomers, transMode, isCrossNetwork, crossNetworkIsp, isTransProv, usbw, bwNum}
+  //   2) POST /api/bigDeployLog/directDeployment  body={nodeId}
+  async function icDirectDeployByNodeId() {
+    if (!icGuard()) return;
+    var st = document.getElementById('icBindStatus');
+    if (!st) return;
+    var nodeId = prompt('输入 device_code（新设备SN），例如 94e9a95af733f202ae6c5ea74697120c：', '');
+    if (!nodeId) return;
+    nodeId = nodeId.trim();
+    if (!nodeId || !/^[a-f0-9]{32}$/i.test(nodeId)) { alert('device_code 必须是 32 位 hex 字符'); return; }
+    // 鉴权检查
+    var token = icGetAdminToken();
+    if (!token && !icHasAdminHmac()) {
+      alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
+      return;
+    }
+    if (!confirm('将使用以下参数调 admin 后端：\n\nnodeId (设备ID) = ' + nodeId + '\nbusinessId (业务ID) = ' + nodeId + ' （同时填到「业务ID」字段）\nvendorSuggestCustomers = 41\ntransMode = 1\nisCrossNetwork = false\nusbw = 200\nbwNum = 1\n\n1) updateEdgeRemark（自动 upsert 节点 + 写业务ID + 业务参数）\n2) directDeployment（流转「待配置 → 服务中」）\n\n确认执行？')) return;
+
+    st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
+    var cfg = {
+      vendorSuggestCustomers: IC_DEFAULT_VENDOR_CUSTOMERS,
+      transMode: IC_DEFAULT_TRANS_MODE,
+      isCrossNetwork: IC_DEFAULT_IS_CROSS_NETWORK,
+      crossNetworkIsp: IC_DEFAULT_CROSS_NETWORK_ISP,
+      isTransProv: IC_DEFAULT_IS_TRANS_PROV,
+      usbw: IC_DEFAULT_USBW,
+      bwNum: IC_DEFAULT_BW_NUM,
+    };
+    if (icHasAdminHmac()) st.innerHTML += '<div style="font-size:12px;color:#888;">🔐 走 appId/ak/sk HMAC 直连 admin</div>';
+    else st.innerHTML += '<div style="font-size:12px;color:#888;">🔑 走 x-token 经 supabase 转发</div>';
+
+    try {
+      // 步骤 1: updateEdgeRemark
+      st.innerHTML += '<div>📝 1/2 updateEdgeRemark（写业务ID + 业务参数）...</div>';
+      var r1 = await icAdminCall('POST', '/api/edgeNode/updateEdgeRemark', {
+        nodeId: nodeId,
+        businessId: nodeId,
+        vendorSuggestCustomers: cfg.vendorSuggestCustomers,
+        transMode: cfg.transMode,
+        isCrossNetwork: cfg.isCrossNetwork,
+        crossNetworkIsp: cfg.crossNetworkIsp,
+        isTransProv: cfg.isTransProv,
+        usbw: cfg.usbw,
+        bwNum: cfg.bwNum,
+      });
+      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
+
+      // 步骤 2: directDeployment（流转到「服务中」）
+      st.innerHTML += '<div>🔄 2/2 directDeployment（流转到服务中）...</div>';
+      var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId });
+      st.innerHTML += '<div style="color:#389e0d;">✅ directDeployment 成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
+
+      st.innerHTML += '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;color:#389e0d;font-weight:600;">🎉 ' + nodeId + ' 已流转到「服务中」！请去 admin 后台核对节点状态。</div>';
+      icLog('[镜像克隆] 已知 deviceCode 流转成功 ' + nodeId, 'success');
+    } catch (e) {
+      st.innerHTML += '<div style="color:#cf1322;">❌ 失败：' + e.message + '</div>';
+      icLog('[镜像克隆] 已知 deviceCode 流转失败 ' + nodeId + ': ' + e.message, 'error');
+    }
+  }
+  window.icDirectDeployByNodeId = icDirectDeployByNodeId;
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', icInit);
   } else {

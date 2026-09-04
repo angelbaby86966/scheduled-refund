@@ -595,6 +595,7 @@
                     <button class="btn btn-primary" style="background:#0958d9;border:none;" onclick="icBindZhouyi()">🔗 绑定选中实例到舟翼云</button>
                     <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icBindAndDeploy()" title="绑定舟翼云 → 等待设备上线 → 把新设备SN填入业务ID → 自动状态流转到服务中">🚀 一键绑定并流转到服务中</button>
                     <button class="btn btn-sm" onclick="icQuerySelectedEdgeDetail()" title="查 admin 后端节点详情（含 businessId），用于核对/排查待配置节点">🔍 查选中节点详情</button>
+                    <button class="btn btn-sm" onclick="icDirectDeployByNodeId()" title="已知 deviceCode（如克隆机清旧SN+重启容器后拿到的新SN）→ 直接调 admin updateEdgeRemark+directDeployment 流转到服务中，绕开 readDeviceCode">🎯 已知SN直接流转</button>
                     <span id="icBindProgress" style="font-size:12px;color:#555;"></span>
                   </div>
                   <div id="icBindStatus" style="margin-top:10px;font-size:13px;"></div>

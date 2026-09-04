@@ -1147,8 +1147,14 @@
     // 读取 one-click-deploy 面板配置
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
-    var vendor = ocdVal('ocdVendorSuggestCustomers');
-    var transMode = ocdVal('ocdTransMode');
+    // vendor / transMode：如果当前 DOM 还没值，从 localStorage 兜底（避免用户切走 tab 后回来读不到）
+    function ocdValWithLs(id, lsKey) {
+      var v = ocdVal(id);
+      if (v) return v;
+      try { return (localStorage.getItem(lsKey) || '').trim(); } catch (e) { return ''; }
+    }
+    var vendor = ocdValWithLs('ocdVendorSuggestCustomers', 'wb_zyy_vendor_customers');
+    var transMode = ocdValWithLs('ocdTransMode', 'wb_zyy_trans_mode');
     if (!vendor || !transMode) { alert('请先在一键部署面板填写「供应商建议客户」和「传输模式」'); return; }
     // 属主过滤（提高按公网IP 匹配准确度）；本页输入框 > 一键部署面板 ocdOwnerId
     var ownerId = (document.getElementById('icBindOwnerId').value || '').trim() || ocdVal('ocdOwnerId');

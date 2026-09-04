@@ -500,9 +500,27 @@ async function ocdStartDeploy() {
   }
 }
 
-/* ---------- 进入页面时回填已保存的 token ---------- */
+/* ---------- 进入页面时回填已保存的 token + 一键绑定相关字段 ---------- */
 document.addEventListener('DOMContentLoaded', function () {
   ocdLoadTokenForDeploy();
+  // 一键绑定并流转所需的两个必填项（image-clone.js 里 icBindAndDeploy 会校验）：
+  //   - 供应商建议客户 vendorSuggestCustomers
+  //   - 传输模式 transMode
+  // 这两个 input 在「一键部署」面板里，刷新后必须从 localStorage 回填，否则绿色按钮会一直弹 alert
+  [
+    { id: 'ocdVendorSuggestCustomers', key: 'wb_zyy_vendor_customers', type: 'text', ev: 'input' },
+    { id: 'ocdTransMode',              key: 'wb_zyy_trans_mode',       type: 'text', ev: 'input' }
+  ].forEach(function (f) {
+    var el = document.getElementById(f.id);
+    if (!el) return;
+    try {
+      var saved = localStorage.getItem(f.key);
+      if (saved !== null && !(el.value || '').trim()) el.value = saved;
+    } catch (e) {}
+    el.addEventListener(f.ev, function () {
+      try { localStorage.setItem(f.key, el.value); } catch (e) {}
+    });
+  });
   // 跨端同步：拉云端映射合并进本地（best-effort，失败不影响本地使用）
   ocdBizCloudLoad().then(function (cloud) {
     if (cloud) {

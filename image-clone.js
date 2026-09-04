@@ -218,8 +218,6 @@
       { id: 'icBindSk', key: 'wb_zyy_sk', type: 'text', ev: 'input' },
       { id: 'icBindIsp', key: 'wb_zyy_isp', type: 'select', ev: 'change' },
       { id: 'icBindOwnerId', key: 'wb_zyy_owner', type: 'text', ev: 'input' },
-      { id: 'icBindVendorCustomers', key: 'wb_zyy_vendor_customers', type: 'text', ev: 'input' },
-      { id: 'icBindTransMode', key: 'wb_zyy_trans_mode', type: 'text', ev: 'input' },
       { id: 'icBindAdminAppId', key: 'wb_zyy_admin_appid', type: 'text', ev: 'input' },
       { id: 'icBindAdminAk', key: 'wb_zyy_admin_ak', type: 'text', ev: 'input' },
       { id: 'icBindAdminSk', key: 'wb_zyy_admin_sk', type: 'text', ev: 'input' },
@@ -627,6 +625,16 @@
   function icSleep(ms) {
     return new Promise(function (res) { setTimeout(res, ms); });
   }
+
+  // ============ 舟翼云 admin 提交参数默认值（test.sh 第 1024 行硬编码）============
+  // 这些值是 admin 后端业务参数，对齐 test.sh 行为；用户在「绑定舟翼云」面板无需填写
+  var IC_DEFAULT_VENDOR_CUSTOMERS = 41;     // vendorSuggestCustomers
+  var IC_DEFAULT_TRANS_MODE = 1;            // transMode
+  var IC_DEFAULT_IS_CROSS_NETWORK = false;
+  var IC_DEFAULT_CROSS_NETWORK_ISP = null;
+  var IC_DEFAULT_IS_TRANS_PROV = false;
+  var IC_DEFAULT_USBW = 200;
+  var IC_DEFAULT_BW_NUM = 1;
 
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
@@ -1243,22 +1251,18 @@
     // 鉴权方式二选一：admin Token（x-token 走 supabase 转发）OR appId/ak/sk（HMAC 直连 admin）
     var token = icGetAdminToken();
     if (!token && !icHasAdminHmac()) { alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）'); return; }
-    // 读取 one-click-deploy 面板配置
-    function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
+    // vendor / transMode 等业务参数已写死（IC_DEFAULT_* 常量，对齐 test.sh），无需用户输入
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
-    // vendor / transMode：本面板自带输入框（已加 localStorage 自动记忆，刷新自动回填）
-    var vendor = ocdVal('icBindVendorCustomers');
-    var transMode = ocdVal('icBindTransMode');
-    if (!vendor || !transMode) { alert('请先在「绑定舟翼云」面板填写「供应商建议客户」和「传输模式」'); return; }
+    function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     var ownerId = (document.getElementById('icBindOwnerId').value || '').trim();
     var cfg = {
-      vendorSuggestCustomers: vendor,
-      transMode: transMode,
-      isCrossNetwork: ocdChk('ocdIsCrossNetwork'),
-      crossNetworkIsp: ocdVal('ocdCrossNetworkIsp'),
-      isTransProv: ocdChk('ocdTransProv'),
-      usbw: parseInt(ocdVal('ocdUsbw') || '200', 10) || 200,
-      bwNum: parseInt(ocdVal('ocdBwNum') || '1', 10) || 1,
+      vendorSuggestCustomers: IC_DEFAULT_VENDOR_CUSTOMERS,
+      transMode: IC_DEFAULT_TRANS_MODE,
+      isCrossNetwork: IC_DEFAULT_IS_CROSS_NETWORK,
+      crossNetworkIsp: IC_DEFAULT_CROSS_NETWORK_ISP,
+      isTransProv: IC_DEFAULT_IS_TRANS_PROV,
+      usbw: IC_DEFAULT_USBW,
+      bwNum: IC_DEFAULT_BW_NUM,
     };
 
     if (!confirm('🚀 一键绑定并流转：\n1) 向 ' + ids.length + ' 台实例下发舟翼云绑定命令\n2) 等待设备在 admin.zhouyi.top 上线\n3) 把新设备SN填入业务ID\n4) 自动状态流转到服务中\n\n确认执行？')) return;

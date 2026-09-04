@@ -1319,35 +1319,68 @@
       });
     } catch (e) { log('⚠️ 查询公网IP失败: ' + e.message); }
 
-    // 3) 等待设备在舟翼云后台上线（轮询 getEdgeNodeList，按IP匹配）
-    log('⏳ 等待设备在 admin.zhouyi.top 上线（最多 5 分钟）...');
+    // 3) 直接 SSH 读每台实例的 device_code（用 SWAS RunCommand + DescribeCommandInvocations）
+    //    绕开 admin 后台 5 分钟匹配——admin 后台 updateEdgeRemark 会自动 upsert 新 nodeId，
+    //    不依赖 admin 后台设备列表是否提前同步
+    log('⏳ SSH 读取每台机器的 device_code（用于后续 admin 后台注册）...');
     var matched = [];
     var tokenInvalid = false;
-    var deadline = Date.now() + 300000;
-    while (Date.now() < deadline && matched.length < ok) {
-      try {
-        var devs = await icQueryZyDevices(ownerId);
-        if (devs && devs.length) {
-          ids.forEach(function (iid) {
-            if (matched.some(function (m) { return m.instanceId === iid; })) return;
-            var ip = ipMap[iid];
-            if (!ip) return;
-            var hit = devs.filter(function (d) { return d.ip && (d.ip === ip || d.ip.indexOf(ip) >= 0 || ip.indexOf(d.ip) >= 0); })[0];
-            if (hit && hit.id) matched.push({ instanceId: iid, deviceId: hit.id, publicIp: ip });
-          });
-          log('已匹配 ' + matched.length + '/' + ok + ' 台设备上线');
-        }
-      } catch (e) {
-        if (e && e.message === 'TOKEN_INVALID') {
-          log('⚠️ admin.zhouyi.top Token 已失效，请到镜像克隆页「🔑 Token」重新粘贴保存后再试');
-          tokenInvalid = true;
-          break;
+    // 读 device_code 的脚本：先 /usr/local/edge_zycloud/device_code，再 /etc/.mac，最后边缘兜底
+    var readCodeCmd = 'DC=""; for f in /usr/local/edge_zycloud/device_code /etc/.mac /usr/local/edge/device_code; do if [ -f "$f" ] && [ -r "$f" ]; then DC=$(cat "$f" 2>/dev/null); [ -n "$DC" ] && break; fi; done; if [ -z "$DC" ]; then DC=$(hostname); fi; echo "$DC"';
+    var RC_DEADLINE = Date.now() + 180000;  // 3 分钟
+    async function readDeviceCode(iid) {
+      // 步骤 a: 发 RunCommand 读 device_code
+      var r = await AliyunClient.callCentralApi('RunCommand', {
+        RegionId: region, InstanceId: iid,
+        CommandContent: icB64(readCodeCmd),
+        Type: 'RunShellScript', Timeout: 30, Name: 'zyy-readcode'
+      });
+      var invId = r.InvokeId || r.invokeId || '';
+      if (!invId) throw new Error('未拿到 InvokeId');
+      // 步骤 b: 轮询 DescribeCommandInvocations（用 AliyunClient.callSwasApi 直连 SWAS，绕开 fn）
+      var dl = Date.now() + 120000;
+      while (Date.now() < dl) {
+        await icSleep(3000);
+        try {
+          var out = await AliyunClient.callSwasApi(region, 'DescribeCommandInvocations', { InvokeId: invId, IncludeOutput: true, PageSize: 1 });
+          var inv = (out.CommandInvocations || out.commandInvocations || [])[0];
+          if (!inv) continue;
+          var iis = (inv.InvocationInstances || inv.invocationInstances || [])[0];
+          if (!iis) continue;
+          var status = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
+          if (status === 'success' || status === 'failed' || status === 'stopped') {
+            var output = (iis.Output || iis.output || '').trim();
+            // device_code 是 32 hex，可能在 Output 末尾；提取第一个匹配
+            var m = output.match(/[a-f0-9]{32}/);
+            if (m) return m[0];
+            throw new Error('RunCommand 输出无 32hex device_code: ' + output.slice(0, 200));
+          }
+          // Running/Pending 继续等
+        } catch (e) {
+          // 网络错或签名错——继续重试
+          if (e && /MissingAccessKeyId|InvalidAccessKey/i.test(e.message)) throw e;
         }
       }
-      if (matched.length < ok) await icSleep(15000);
+      throw new Error('DescribeCommandInvocations 超时（2 分钟）');
     }
-    if (tokenInvalid) return;
-    if (!matched.length) { log('⚠️ 5 分钟内未匹配到任何上线设备，停止流转。可稍后手动补流转。'); return; }
+    var rcIdx = 0;
+    async function rcPool() {
+      while (rcIdx < ids.length && Date.now() < RC_DEADLINE) {
+        var iid = ids[rcIdx++];
+        try {
+          var dc = await readDeviceCode(iid);
+          matched.push({ instanceId: iid, deviceId: dc, publicIp: ipMap[iid] || '' });
+          log('✅ ' + iid + ' device_code = ' + dc);
+        } catch (e) {
+          log('❌ ' + iid + ' 读 device_code 失败: ' + e.message);
+        }
+      }
+    }
+    var rcPoolArr = [];
+    for (var rw = 0; rw < Math.min(10, ids.length); rw++) rcPoolArr.push(rcPool());
+    await Promise.all(rcPoolArr);
+    if (!matched.length) { log('⚠️ 没有读到任何 device_code，停止流转。请确认机器已装 zyy agent 且 /usr/local/edge_zycloud/device_code 或 /etc/.mac 存在'); return; }
+    log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 device_code，开始调 admin 后台流转</b>');
 
     // 4) 状态流转：把新设备SN填入业务ID，调用 updateEdgeRemark + directDeployment
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 新设备SN...');

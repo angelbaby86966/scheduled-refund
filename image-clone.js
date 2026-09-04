@@ -148,27 +148,12 @@
   var IC_SUPABASE_FN = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/one-click-deploy';
   var IC_ANON_KEY = 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
   async function icQueryZyDevices(ownerId) {
-    var token = icGetAdminToken();
-    if (!token) return null;
     try {
       // ownerId 过滤：缩小匹配范围，提高「待配置→服务中」按公网IP 对应的准确度；留空=全量在线节点
       var query = (ownerId ? ('ownerId=' + encodeURIComponent(ownerId) + '&isOnline=1') : '');
-      var resp = await fetch(IC_SUPABASE_FN, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
-        body: JSON.stringify({ token: token, method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: query, body: null })
-      });
-      if (!resp.ok) {
-        // token 失效/无效：立刻抛错让上层终止，避免白等 5 分钟轮询
-        try {
-          var ej = await resp.json();
-          if (ej && (ej.status === 401 || (ej.data && (ej.data.code === 7 || (ej.data.msg || '').indexOf('token') >= 0)))) {
-            throw new Error('TOKEN_INVALID');
-          }
-        } catch (e2) { if (e2 && e2.message === 'TOKEN_INVALID') throw e2; }
-        return null;
-      }
-      var j = await resp.json();
+      // 走统一入口：填了三件套走 HMAC，否则走 x-token (supabase fn 转发)
+      var j = await icAdminCall('GET', '/api/edgeNode/getEdgeNodeList' + (query ? '?' + query : ''), null);
+      // 适配三种鉴权路径下 admin 返回格式不一致
       var inner = j && j.data ? j.data : j;
       var arr = inner;
       if (inner && Array.isArray(inner)) arr = inner;
@@ -235,6 +220,9 @@
       { id: 'icBindOwnerId', key: 'wb_zyy_owner', type: 'text', ev: 'input' },
       { id: 'icBindVendorCustomers', key: 'wb_zyy_vendor_customers', type: 'text', ev: 'input' },
       { id: 'icBindTransMode', key: 'wb_zyy_trans_mode', type: 'text', ev: 'input' },
+      { id: 'icBindAdminAppId', key: 'wb_zyy_admin_appid', type: 'text', ev: 'input' },
+      { id: 'icBindAdminAk', key: 'wb_zyy_admin_ak', type: 'text', ev: 'input' },
+      { id: 'icBindAdminSk', key: 'wb_zyy_admin_sk', type: 'text', ev: 'input' },
       { id: 'icBindToken', key: 'zy_admin_token', type: 'text', ev: 'input' },
       { id: 'icBindCleanMac', key: 'wb_zyy_cleanmac', type: 'check', ev: 'change' }
     ].forEach(function (f) {
@@ -638,6 +626,78 @@
 
   function icSleep(ms) {
     return new Promise(function (res) { setTimeout(res, ms); });
+  }
+
+  // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
+  // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
+  // 前端用 Web Crypto API 实现（浏览器原生，无依赖）
+  function icAdminAppId() { var el = document.getElementById('icBindAdminAppId'); return el ? (el.value || '').trim() : ''; }
+  function icAdminAk()   { var el = document.getElementById('icBindAdminAk');   return el ? (el.value || '').trim() : ''; }
+  function icAdminSk()   { var el = document.getElementById('icBindAdminSk');   return el ? (el.value || '').trim() : ''; }
+  function icHasAdminHmac() { return !!(icAdminAppId() && icAdminAk() && icAdminSk()); }
+
+  async function icAdminHmacSign(ak, sk, timestamp) {
+    var signStr = ak + ':' + timestamp;
+    var enc = new TextEncoder();
+    var key = await crypto.subtle.importKey(
+      'raw', enc.encode(sk),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    var sigBytes = await crypto.subtle.sign('HMAC', key, enc.encode(signStr));
+    return Array.from(new Uint8Array(sigBytes)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+
+  // 直接 fetch admin（带 appId/timestamp/sign 头）；CORS 不通时抛 TypeError 或 0 status
+  // 返回 {ok, status, data}：ok=true 表示业务 code===0；data 是 admin 原始响应
+  async function icAdminCallHmac(method, path, body) {
+    var appId = icAdminAppId(), ak = icAdminAk(), sk = icAdminSk();
+    if (!appId || !ak || !sk) throw new Error('admin HMAC 凭据未填');
+    var ts = Math.floor(Date.now() / 1000);
+    var sign = await icAdminHmacSign(ak, sk, ts);
+    var url = 'https://admin.zhouyi.top' + path;
+    var resp = await fetch(url, {
+      method: method || 'POST',
+      headers: {
+        'appId': appId,
+        'timestamp': String(ts),
+        'sign': sign,
+        'Content-Type': 'application/json'
+      },
+      body: body == null ? undefined : JSON.stringify(body)
+    });
+    var json = null;
+    try { json = await resp.json(); } catch (e) {}
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + (json.msg || JSON.stringify(json)) : ''));
+    return json;
+  }
+
+  // 统一 admin 调用入口：优先用 HMAC 鉴权（三件套都填了），否则走 x-token (supabase fn 转发)
+  // 失败时抛 Error，调用方 catch；HMAC 走不通会回退到 x-token
+  async function icAdminCall(method, path, body) {
+    if (icHasAdminHmac()) {
+      try {
+        return await icAdminCallHmac(method, path, body);
+      } catch (e) {
+        // CORS 失败（admin 没开跨域）或网络错 → 抛错让上层决定是否 fallback
+        throw e;
+      }
+    }
+    // 走 x-token 鉴权（supabase fn 转发）
+    var token = icGetAdminToken();
+    if (!token) throw new Error('未填写 admin Token 也未填 appId/ak/sk 三件套，请二选一');
+    if (window.OcdAdmin && window.OcdAdmin.call) {
+      return await window.OcdAdmin.call(token, method || 'POST', path, '', body);
+    }
+    // 兜底：直接调 supabase fn（不通过 OcdAdmin 包装）
+    var resp = await fetch(IC_SUPABASE_FN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
+      body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: '', body: (body === undefined ? null : body) })
+    });
+    var json = null;
+    try { json = await resp.json(); } catch (e2) {}
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
+    return json;
   }
 
   // 从 ListImages 返回里解析自定义镜像数组
@@ -1137,9 +1197,9 @@
     if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
     var ids = chks.map(function (c) { return c.value; });
 
-    // 读取 admin.zhouyi.top Token（本页输入框 > 一键部署面板 > localStorage）
+    // 鉴权方式二选一：admin Token（x-token 走 supabase 转发）OR appId/ak/sk（HMAC 直连 admin）
     var token = icGetAdminToken();
-    if (!token) { alert('请先在本页「🔑 admin.zhouyi.top Token」处粘贴并保存 token'); return; }
+    if (!token && !icHasAdminHmac()) { alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）'); return; }
     // 读取 one-click-deploy 面板配置
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
@@ -1244,19 +1304,12 @@
 
     // 4) 状态流转：把新设备SN填入业务ID，调用 updateEdgeRemark + directDeployment
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 新设备SN...');
+    // 鉴权方式提示：填了三件套走 HMAC，否则走 x-token
+    if (icHasAdminHmac()) log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin）');
+    else log('🔑 当前使用 x-token 鉴权（经 supabase 转发）');
     var submitOk = 0, deployOk = 0, deployFail = 0, successList = [];
     var idx2 = 0;
-    var adminFn = (window.OcdAdmin && window.OcdAdmin.call) || async function (token, method, path, query, body) {
-      var resp = await fetch(IC_SUPABASE_FN, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
-        body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: query || '', body: (body === undefined ? null : body) })
-      });
-      var json = null;
-      try { json = await resp.json(); } catch (e) {}
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
-      return json;
-    };
+    var adminFn = icAdminCall;   // 统一入口：自动选 HMAC 或 x-token
     async function flowWorker() {
       while (idx2 < matched.length) {
         var m = matched[idx2++];
@@ -1265,7 +1318,7 @@
           var bizEl = document.getElementById('ocdBusinessId');
           if (bizEl) bizEl.value = m.deviceId;
           // 批量提交（updateEdgeRemark）
-          await adminFn(token, 'POST', '/api/edgeNode/updateEdgeRemark', '', {
+          await adminFn('POST', '/api/edgeNode/updateEdgeRemark', {
             nodeId: m.deviceId,
             businessId: m.deviceId,
             vendorSuggestCustomers: cfg.vendorSuggestCustomers,
@@ -1278,7 +1331,7 @@
           });
           submitOk++;
           // 批量部署（directDeployment）
-          await adminFn(token, 'POST', '/api/bigDeployLog/directDeployment', '', { nodeId: m.deviceId });
+          await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.deviceId });
           deployOk++;
           successList.push(m);
           log('<span style="color:#389e0d;">✅ ' + m.deviceId + ' 已流转到服务中（业务ID=' + m.deviceId + '）</span>');

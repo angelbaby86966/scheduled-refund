@@ -548,6 +548,23 @@
                     <label style="font-size:12px;">属主 ID (ownerId) <span style="color:#999;">（可选；填则只匹配该属主节点，提高「待配置→服务中」匹配准确度；留空=全量）</span></label>
                     <input type="text" id="icBindOwnerId" class="input" placeholder="如 7546（留空则匹配全部在线节点）" style="width:100%;" />
                   </div>
+                  <details style="margin-bottom:12px;">
+                    <summary style="font-size:12px;cursor:pointer;color:#888;">🔐 admin 后端鉴权三件套（appId / ak / sk）<span style="color:#999;font-weight:400;">（备用通道，admin 开启 CORS 后自动启用；当前仍走 x-token 鉴权）</span></summary>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end;margin-top:10px;">
+                      <div class="form-group" style="margin:0;">
+                        <label style="font-size:12px;">appId</label>
+                        <input type="text" id="icBindAdminAppId" class="input" placeholder="如 fg5c21pbzfgu6y2s2yqvanvr6uv99drq" autocomplete="off" />
+                      </div>
+                      <div class="form-group" style="margin:0;">
+                        <label style="font-size:12px;">ak</label>
+                        <input type="text" id="icBindAdminAk" class="input" placeholder="如 ja3io44nq2m7hx63fjkpio7s422aksel" autocomplete="off" />
+                      </div>
+                      <div class="form-group" style="margin:0;">
+                        <label style="font-size:12px;">sk <span style="color:#cf1322;">（只存本机 localStorage，不上传）</span></label>
+                        <input type="password" id="icBindAdminSk" class="input" placeholder="HMAC-SHA256 签名密钥" autocomplete="new-password" />
+                      </div>
+                    </div>
+                  </details>
                   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end;margin-bottom:12px;">
                     <div class="form-group" style="margin:0;">
                       <label style="font-size:12px;">供应商建议客户 (vendorSuggestCustomers) <span style="color:#cf1322;">（一键流转必填）</span></label>

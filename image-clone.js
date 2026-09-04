@@ -228,12 +228,13 @@
     // ⑤ 绑定舟翼云：自动记忆整个面板的输入，刷新页面自动回填
     //   - text/select：输入即存，load 时回填 value
     //   - check：勾选即存，load 时回填 checked
-    //   - token：额外同步到一键部署面板的 ocdToken
     [
       { id: 'icBindAk', key: 'wb_zyy_ak', type: 'text', ev: 'input' },
       { id: 'icBindSk', key: 'wb_zyy_sk', type: 'text', ev: 'input' },
       { id: 'icBindIsp', key: 'wb_zyy_isp', type: 'select', ev: 'change' },
       { id: 'icBindOwnerId', key: 'wb_zyy_owner', type: 'text', ev: 'input' },
+      { id: 'icBindVendorCustomers', key: 'wb_zyy_vendor_customers', type: 'text', ev: 'input' },
+      { id: 'icBindTransMode', key: 'wb_zyy_trans_mode', type: 'text', ev: 'input' },
       { id: 'icBindToken', key: 'zy_admin_token', type: 'text', ev: 'input' },
       { id: 'icBindCleanMac', key: 'wb_zyy_cleanmac', type: 'check', ev: 'change' }
     ].forEach(function (f) {
@@ -250,11 +251,6 @@
         try {
           var v = (f.type === 'check') ? (el.checked ? '1' : '0') : el.value;
           localStorage.setItem(f.key, v);
-          // token 输入框：同时同步到一键部署面板的 ocdToken
-          if (f.id === 'icBindToken') {
-            var ocdToken = document.getElementById('ocdToken');
-            if (ocdToken) ocdToken.value = el.value;
-          }
         } catch (e) {}
       });
     });
@@ -1147,17 +1143,11 @@
     // 读取 one-click-deploy 面板配置
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
-    // vendor / transMode：如果当前 DOM 还没值，从 localStorage 兜底（避免用户切走 tab 后回来读不到）
-    function ocdValWithLs(id, lsKey) {
-      var v = ocdVal(id);
-      if (v) return v;
-      try { return (localStorage.getItem(lsKey) || '').trim(); } catch (e) { return ''; }
-    }
-    var vendor = ocdValWithLs('ocdVendorSuggestCustomers', 'wb_zyy_vendor_customers');
-    var transMode = ocdValWithLs('ocdTransMode', 'wb_zyy_trans_mode');
-    if (!vendor || !transMode) { alert('请先在一键部署面板填写「供应商建议客户」和「传输模式」'); return; }
-    // 属主过滤（提高按公网IP 匹配准确度）；本页输入框 > 一键部署面板 ocdOwnerId
-    var ownerId = (document.getElementById('icBindOwnerId').value || '').trim() || ocdVal('ocdOwnerId');
+    // vendor / transMode：本面板自带输入框（已加 localStorage 自动记忆，刷新自动回填）
+    var vendor = ocdVal('icBindVendorCustomers');
+    var transMode = ocdVal('icBindTransMode');
+    if (!vendor || !transMode) { alert('请先在「绑定舟翼云」面板填写「供应商建议客户」和「传输模式」'); return; }
+    var ownerId = (document.getElementById('icBindOwnerId').value || '').trim();
     var cfg = {
       vendorSuggestCustomers: vendor,
       transMode: transMode,

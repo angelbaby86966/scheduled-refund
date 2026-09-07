@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v97 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过+批量操作凭证多选下拉（多账号并发执行）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v98 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过+批量操作凭证多选下拉（多账号并发执行）+ 修复 checkbox change 事件未绑定导致只跑 1 个账号的 bug', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -449,12 +449,17 @@ function renderBatchCredSelect() {
             '</label>';
   });
   dd.innerHTML = html;
-  // 点击行也能 toggle（不仅 checkbox）
+
+  // ★ 关键修复：给每个 checkbox 单独绑定 change 事件，否则浏览器原生 toggle 后 _batchCredSelected 不更新
+  Array.prototype.forEach.call(dd.querySelectorAll('input[type=checkbox][data-credname]'), function(cb) {
+    cb.addEventListener('change', function() { onBatchCredToggle(cb); });
+  });
+
+  // 点击行也能 toggle（点 label 空白处也能翻），但点 input 本体时让浏览器原生 + change 监听处理
   Array.prototype.forEach.call(dd.querySelectorAll('.cred-multi-item'), function(item) {
     item.addEventListener('click', function(e) {
-      // 阻止冒泡，避免触发外面关闭
       e.stopPropagation();
-      if (e.target.tagName === 'INPUT') return; // checkbox 自己处理
+      if (e.target.tagName === 'INPUT') return; // input 自己走 change 监听
       var cb = item.querySelector('input[type=checkbox]');
       if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
     });

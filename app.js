@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v94 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v97 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过+批量操作凭证多选下拉（多账号并发执行）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -417,42 +417,115 @@ function escHtml(s) {
   return String(s).replace(/[<>&]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; });
 }
 
-// 批量操作凭证下拉（重启 / 重置 / 退订 三按钮共用）：列出全部已保存凭证，选中项即「本次批量操作使用的阿里云账号」
+// 批量操作凭证下拉（重启 / 重置 / 退订 三按钮共用）：多选下拉，列出全部已保存凭证，
+// 用户勾选 N 个账号后，批量操作会对这 N 个账号**并发**执行（每个账号走"重列该账号地域实例 + 重启/重置/退订"）。
+var _batchCredSelected = [];  // 持久化在 window 范围内：当前勾选的凭证名数组
+
 function renderBatchCredSelect() {
-  var sel = document.getElementById('batchCredSelect');
-  if (!sel) return;
+  var btn = document.getElementById('batchCredBtn');
+  var dd = document.getElementById('batchCredDropdown');
+  if (!btn || !dd) return;
   if (!window.AliyunClient || !AliyunClient.listProfiles) {
-    sel.innerHTML = '<option value="">-- 凭证模块未加载 --</option>';
-    sel.disabled = true;
+    btn.textContent = '凭证模块未加载';
+    btn.disabled = true;
+    dd.innerHTML = '';
     return;
   }
   var profiles = AliyunClient.listProfiles();
   var active = AliyunClient.getActiveProfile();
-  var html = '<option value="">— 选择凭证（全部操作）—</option>';
+  var existingNames = new Set(profiles.map(function(p){ return p.name; }));
+  // 清理已删除的凭证
+  _batchCredSelected = (_batchCredSelected || []).filter(function(n){ return existingNames.has(n); });
+  // 首次渲染且 active 存在：默认勾上当前凭证（避免用户每次都得手动勾）
+  if (_batchCredSelected.length === 0 && active) _batchCredSelected = [active.name];
+
+  var html = '';
   profiles.forEach(function(p) {
-    var sel1 = (active && p.name === active.name) ? ' selected' : '';
-    var label = escHtml(p.name) + (p.ak_id_hint ? ' · ' + p.ak_id_hint : '') + (p.note ? ' · ' + escHtml(p.note) : '');
-    html += '<option value="' + escAttr(p.name) + '"' + sel1 + '>' + label + '</option>';
+    var checked = _batchCredSelected.indexOf(p.name) >= 0;
+    var label = escHtml(p.name) + (p.ak_id_hint ? ' · ' + escHtml(p.ak_id_hint) : '') + (p.note ? ' · ' + escHtml(p.note) : '');
+    html += '<label class="cred-multi-item' + (checked ? ' checked' : '') + '" data-name="' + escAttr(p.name) + '">' +
+              '<input type="checkbox"' + (checked ? ' checked' : '') + ' data-credname="' + escAttr(p.name) + '">' +
+              '<span class="cred-multi-name">' + label + '</span>' +
+            '</label>';
   });
-  sel.innerHTML = html;
-  sel.title = active ? ('当前批量操作凭证：' + active.name + '（重启 / 重置 / 退订将使用此账号）') : '选择本次批量操作（重启 / 重置 / 退订）使用的阿里云凭证';
-  sel.disabled = profiles.length === 0;
+  dd.innerHTML = html;
+  // 点击行也能 toggle（不仅 checkbox）
+  Array.prototype.forEach.call(dd.querySelectorAll('.cred-multi-item'), function(item) {
+    item.addEventListener('click', function(e) {
+      // 阻止冒泡，避免触发外面关闭
+      e.stopPropagation();
+      if (e.target.tagName === 'INPUT') return; // checkbox 自己处理
+      var cb = item.querySelector('input[type=checkbox]');
+      if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+    });
+  });
+
+  var n = _batchCredSelected.length;
+  btn.textContent = n === 0 ? '— 选择凭证（多选）—' : '✓ 凭证（已选 ' + n + '）';
+  btn.disabled = profiles.length === 0;
+  btn.title = n > 0
+    ? '本次批量操作将使用所选 ' + n + ' 个阿里云账号：\n' + _batchCredSelected.join('\n')
+    : '选择本次批量操作使用的阿里云凭证（可多选，多账号并发执行）';
 }
 
-// 下拉切换 → 复用已有的切凭证逻辑（切 active + 刷新凭证栏 + 重列地域实例），保证后续批量操作走所选账号
-function onBatchCredSelectChange() {
-  var sel = document.getElementById('batchCredSelect');
-  if (!sel) return;
-  var name = sel.value;
-  if (!name) return; // 占位项：保持当前凭证不变
-  try {
-    useCredentialProfile(name);
-    log('🎯 批量操作凭证已切换为「' + name + '」（重启 / 重置 / 退订 将使用此账号）', 'info');
-    renderBatchCredSelect();
-  } catch (e) {
-    alert('切换凭证失败：' + e.message);
+function toggleBatchCredDropdown() {
+  var dd = document.getElementById('batchCredDropdown');
+  if (!dd) return;
+  dd.style.display = dd.style.display === 'block' ? 'none' : 'block';
+  if (dd.style.display === 'block') {
+    // 自动调整下拉位置（避免超出右边屏幕）
+    setTimeout(function() {
+      var wrap = dd.parentElement;
+      if (!wrap) return;
+      var rect = wrap.getBoundingClientRect();
+      var ddRect = dd.getBoundingClientRect();
+      if (rect.right + ddRect.width > window.innerWidth - 8) {
+        dd.style.left = 'auto';
+        dd.style.right = '0';
+      }
+    }, 0);
   }
 }
+
+function onBatchCredToggle(cb) {
+  var name = cb.getAttribute('data-credname');
+  if (!name) return;
+  if (!_batchCredSelected) _batchCredSelected = [];
+  if (cb.checked) {
+    if (_batchCredSelected.indexOf(name) < 0) _batchCredSelected.push(name);
+  } else {
+    _batchCredSelected = _batchCredSelected.filter(function(n){ return n !== name; });
+  }
+  // 只更新按钮文字和 label 样式，避免重建 DOM 抹掉用户当前焦点
+  var btn = document.getElementById('batchCredBtn');
+  if (btn) {
+    var n = _batchCredSelected.length;
+    btn.textContent = n === 0 ? '— 选择凭证（多选）—' : '✓ 凭证（已选 ' + n + '）';
+    btn.title = n > 0 ? ('本次批量操作将使用所选 ' + n + ' 个阿里云账号：\n' + _batchCredSelected.join('\n')) : '选择本次批量操作使用的阿里云凭证';
+  }
+  var dd = document.getElementById('batchCredDropdown');
+  if (dd) {
+    var lbl = dd.querySelector('.cred-multi-item[data-name="' + cssEscape(name) + '"]');
+    if (lbl) lbl.classList.toggle('checked', cb.checked);
+  }
+}
+
+function cssEscape(s) {
+  return String(s).replace(/(["\\\\\.])/g, '\\\\$1');
+}
+
+function getSelectedBatchCreds() {
+  return (_batchCredSelected || []).slice();
+}
+
+// 点击下拉外区域关闭
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('batchCredDropdown');
+  if (!dd || dd.style.display !== 'block') return;
+  var wrap = dd.parentElement;
+  if (!wrap) return;
+  if (!wrap.contains(e.target)) dd.style.display = 'none';
+});
 
 function showCredentialDialog() {
   if (window.AliyunClient && AliyunClient.pullProfilesFromCloud) {
@@ -3603,64 +3676,96 @@ async function collectInstancesFromSelectedRegions() {
 async function batchRebootSelectedRegions() {
   var btn = null;
   try {
-    var groups;
-    try { groups = await collectInstancesFromSelectedRegions(); }
-    catch (err) { log('⚠️ ' + err.message, 'warn'); return; }
-    if (groups.length === 0) { log('⚠️ 所选地域暂无云主机', 'warn'); return; }
+    var selected = getSelectedBatchCreds();
+    if (selected.length === 0) {
+      log('⚠️ 请先在「选择凭证」下拉勾选至少一个阿里云账号', 'warn');
+      return;
+    }
+    if (state.selectedRegions.size === 0) {
+      log('⚠️ 请先在「地域概览」勾选地域（点地域卡片或「全选地域」）', 'warn');
+      return;
+    }
 
-    var regionCount = new Set(groups.map(function(g) { return g.regionId; })).size;
-    var confirmMsg = '确定要重启 ' + regionCount + ' 个地域、共 ' + groups.length + ' 台云主机吗？\n\n' +
+    // 探一下：在 active 凭证下确认是否有实例，避免对空账号弹确认窗
+    var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+    var probeName = (originalActive && selected.indexOf(originalActive) >= 0) ? originalActive : selected[0];
+    AliyunClient.useProfile(probeName);
+    var probeGroups;
+    try { probeGroups = await collectInstancesFromSelectedRegions(); }
+    catch (err) { log('⚠️ ' + err.message, 'warn'); return; }
+    if (probeGroups.length === 0) {
+      log('⚠️ 所选地域暂无云主机（凭证 ' + probeName + ' 下拉取为空，其他凭证实例数会单独统计）', 'warn');
+      // 不直接 return，继续走多账号并发：单账号空不算空
+    }
+    var probeRegionCount = new Set(probeGroups.map(function(g){return g.regionId;})).size;
+    var confirmMsg = '确定要重启「' + probeRegionCount + ' 个地域、共 ' + probeGroups.length + ' 台云主机」吗？\n\n' +
       '• 操作系统会重启，连接会短暂中断\n' +
       '• 数据不会丢失\n' +
-      '• 每批 50 台并发执行（无数量限制）';
+      '• 凭证范围（' + selected.length + ' 个账号，并发执行）：\n  ' + selected.join('\n  ') + '\n' +
+      '• 每账号每批 50 台并发执行（无数量限制）';
     if (!confirm(confirmMsg)) return;
 
     btn = event && event.target;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 重启中...'; }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('🔁 开始批量重启：' + groups.length + ' 台（' + regionCount + ' 个地域）', 'info');
+    log('🔁 开始批量重启：' + selected.length + ' 个凭证 × ' + probeRegionCount + ' 个地域（已探测凭证 ' + probeName + ' 共 ' + probeGroups.length + ' 台）', 'info');
 
     var CONCURRENCY = 50;
-    var totalSuccess = 0, totalFail = 0;
-    var byRegion = {};
-    groups.forEach(function(g) { (byRegion[g.regionId] = byRegion[g.regionId] || []).push(g); });
+    var grandTotalSuccess = 0, grandTotalFail = 0;
 
-    // 9 个地域并行
-    var regionPromises = Object.keys(byRegion).map(function(rid) {
-      var arr = byRegion[rid];
+    // 多账号并行：每个账号内部按地域并行、每地域 50 台/批
+    var profilePromises = selected.map(function(pname) {
       return (async function() {
-        log('  ▶ [' + REGION_INFO[rid] + '] 重启 ' + arr.length + ' 台...', 'info');
-        for (var i = 0; i < arr.length; i += CONCURRENCY) {
-          var slice = arr.slice(i, i + CONCURRENCY);
-          var rs = await Promise.all(slice.map(function(g) {
-            return AliyunClient.rebootInstance(g.regionId, g.instance.InstanceId).then(function() {
-              return { ok: true, id: g.instance.InstanceId };
-            }).catch(function(err) {
-              return { ok: false, id: g.instance.InstanceId, err: (err && err.message) || String(err) };
-            });
-          }));
-          rs.forEach(function(r) {
-            if (r.ok) { totalSuccess++; }
-            else { totalFail++; log('    ❌ ' + r.id + ' 失败: ' + r.err, 'error'); }
-          });
-          if (i + CONCURRENCY < arr.length) await new Promise(function(r) { setTimeout(r, 200); });
-        }
-        log('  ✅ [' + REGION_INFO[rid] + '] 完成', 'success');
+        AliyunClient.useProfile(pname);
+        var groups;
+        try { groups = await collectInstancesFromSelectedRegions(); }
+        catch (err) { log('  ⚠️ [凭证 ' + pname + '] 拉取实例失败: ' + err.message, 'error'); return; }
+        if (groups.length === 0) { log('  ⚪ [凭证 ' + pname + '] 所选地域无实例', 'info'); return; }
+        var byRegion = {};
+        groups.forEach(function(g){ (byRegion[g.regionId]=byRegion[g.regionId]||[]).push(g); });
+        var pTotalSuccess = 0, pTotalFail = 0;
+        var regionPromises = Object.keys(byRegion).map(function(rid) {
+          var arr = byRegion[rid];
+          return (async function() {
+            log('  ▶ [' + pname + ' / ' + REGION_INFO[rid] + '] 重启 ' + arr.length + ' 台...', 'info');
+            for (var i=0; i<arr.length; i+=CONCURRENCY) {
+              var slice = arr.slice(i, i+CONCURRENCY);
+              var rs = await Promise.all(slice.map(function(g) {
+                return AliyunClient.rebootInstance(g.regionId, g.instance.InstanceId).then(function() {
+                  return { ok: true, id: g.instance.InstanceId };
+                }).catch(function(err) {
+                  return { ok: false, id: g.instance.InstanceId, err: (err && err.message) || String(err) };
+                });
+              }));
+              rs.forEach(function(r) {
+                if (r.ok) pTotalSuccess++;
+                else { pTotalFail++; log('    ❌ ' + pname + ' / ' + r.id + ' 失败: ' + r.err, 'error'); }
+              });
+              if (i + CONCURRENCY < arr.length) await new Promise(function(r){ setTimeout(r, 200); });
+            }
+            log('  ✅ [' + pname + ' / ' + REGION_INFO[rid] + '] 完成', 'success');
+          })();
+        });
+        await Promise.all(regionPromises);
+        grandTotalSuccess += pTotalSuccess;
+        grandTotalFail += pTotalFail;
+        log('  📊 [凭证 ' + pname + '] 完成：成功 ' + pTotalSuccess + ' 台，失败 ' + pTotalFail + ' 台', pTotalFail === 0 ? 'success' : 'warn');
       })();
     });
-    await Promise.all(regionPromises);
+    await Promise.all(profilePromises);
+
+    // 切回原 active 凭证（多账号并发过程中 active 被覆盖）
+    if (originalActive) AliyunClient.useProfile(originalActive);
+    renderBatchCredSelect();
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('📊 批量重启完成：成功 ' + totalSuccess + ' 台，失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
+    log('📊 批量重启总完成：成功 ' + grandTotalSuccess + ' 台，失败 ' + grandTotalFail + ' 台', grandTotalFail === 0 ? 'success' : 'warn');
   } catch (err) {
     log('❌ 批量重启出错: ' + err.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔁 批量重启'; }
   }
-
-
-
 }
 
 // =====================================================================
@@ -4174,56 +4279,92 @@ async function batchUnsubscribeSelectedRegions() {
   try {
     if (state.selectedRegions.size === 0) { log('⚠️ 请先在「地域概览」勾选地域', 'warn'); return; }
     if (!state.hasCredentials) { log('⚠️ 请先设置阿里云凭证', 'warn'); return; }
+    var credList = getSelectedBatchCreds();
+    if (credList.length === 0) { log('⚠️ 请先在「选择凭证」下拉勾选至少一个阿里云账号', 'warn'); return; }
 
-    var groups;
-    try { groups = await collectInstancesFromSelectedRegions(); }
+    // 探一下：在 active 凭证下确认是否有实例要退订，给用户看一个真实数字
+    var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+    var probeName = (originalActive && credList.indexOf(originalActive) >= 0) ? originalActive : credList[0];
+    AliyunClient.useProfile(probeName);
+    var probeGroups;
+    try { probeGroups = await collectInstancesFromSelectedRegions(); }
     catch (err) { log('⚠️ ' + err.message, 'warn'); return; }
-    if (groups.length === 0) { log('⚠️ 所选地域暂无云主机', 'warn'); return; }
-
-    var regionCount = new Set(groups.map(function(g) { return g.regionId; })).size;
-    var confirmMsg = '确定要退订 ' + regionCount + ' 个地域、共 ' + groups.length + ' 台云主机吗？\n\n' +
+    if (probeGroups.length === 0 && credList.length === 1) {
+      log('⚠️ 所选地域暂无云主机', 'warn');
+      return;
+    }
+    var probeRegionCount = new Set(probeGroups.map(function(g){ return g.regionId; })).size;
+    var confirmMsg = '确定要退订「' + probeRegionCount + ' 个地域、共 ' + probeGroups.length + ' 台云主机」吗？\n\n' +
       '• 退订 = 调用阿里云 BSS RefundInstance 真正退款（需直销客户 + AliyunBSSFullAccess）\n' +
       '• 退款将退回账户/原支付渠道，实例会被释放\n' +
-      '• 操作不可逆，实例将被释放，数据不可恢复';
+      '• 操作不可逆，实例将被释放，数据不可恢复\n' +
+      '• 凭证范围（' + credList.length + ' 个账号，并发执行）：\n  ' + credList.join('\n  ') + '\n' +
+      '• 每账号全局有界并发≤' + REFUND_CONCURRENCY + '、QPS≤' + REFUND_QPS + '/s、限流自动退避';
     if (!confirm(confirmMsg)) return;
 
     btn = event && event.target;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 退订中...'; }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-    log('🗑️ 开始批量退订（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避，循环至所选地域无实例为止）', 'warn');
+    log('🗑️ 开始批量退订：' + credList.length + ' 个凭证并发（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避）', 'warn');
 
-    var loopRound = 0;
-    while (true) {
-      loopRound++;
-      if (loopRound > 60) { log('⚠️ 已达最大轮次(60)，停止退订以避免死循环', 'warn'); break; }
-      // 强制重新拉取所选地域实例（清空旧缓存，确保下一轮能拿到最新剩余实例）
-      state.selectedRegions.forEach(function (rid) {
-        if (state.regionData[rid]) state.regionData[rid].instances = [];
-      });
-      var groups;
-      try { groups = await collectInstancesFromSelectedRegions(); }
-      catch (err) { log('⚠️ ' + err.message, 'warn'); break; }
-      if (groups.length === 0) {
-        log('✅ 所选地域已无云主机（非全额退订设备已清空），退订完成', 'success');
-        break;
+    // 每个凭证独立跑循环：直到该凭证下没有可退订实例，或单轮无任何成功/跳过（避免死循环）
+    async function runUnsubscribeLoopForProfile(pname) {
+      AliyunClient.useProfile(pname);
+      log('▶ [凭证 ' + pname + '] 开始退订...', 'warn');
+      var pStats = { success: 0, skipped: 0, locked: 0, fail: 0 };
+      var loopRound = 0;
+      while (true) {
+        loopRound++;
+        if (loopRound > 60) { log('  ⚠️ [凭证 ' + pname + '] 已达最大轮次(60)，停止', 'warn'); break; }
+        state.selectedRegions.forEach(function(rid) {
+          if (state.regionData[rid]) state.regionData[rid].instances = [];
+        });
+        var groups;
+        try { groups = await collectInstancesFromSelectedRegions(); }
+        catch (err) { log('  ⚠️ [凭证 ' + pname + '] 拉取失败: ' + err.message, 'warn'); break; }
+        if (groups.length === 0) {
+          log('  ✅ [凭证 ' + pname + '] 所选地域已无云主机', 'success');
+          break;
+        }
+        var byRegion = {};
+        groups.forEach(function(g) {
+          if (!byRegion[g.regionId]) byRegion[g.regionId] = [];
+          byRegion[g.regionId].push({ InstanceId: g.instance.InstanceId, instanceId: g.instance.InstanceId });
+        });
+        var regionCount2 = Object.keys(byRegion).length;
+        var total = await refundByRegionParallel(byRegion, { recordFailures: true });
+        pStats.success += total.success;
+        pStats.skipped += total.skipped;
+        pStats.locked += total.locked;
+        pStats.fail += total.fail;
+        log('  📊 [凭证 ' + pname + ' / 第 ' + loopRound + ' 轮] ' + groups.length + ' 台（' + regionCount2 + ' 个地域）→ 成功 ' + total.success + '、跳过 ' + total.skipped + '、锁定 ' + total.locked + '、失败 ' + total.fail,
+          total.fail === 0 ? 'success' : 'warn');
+        if (total.success === 0 && total.skipped === 0 && groups.length > 0) {
+          log('  ⚠️ [凭证 ' + pname + '] 本轮无成功/跳过，停止以避免死循环', 'warn');
+          break;
+        }
       }
-      var byRegion = {};
-      groups.forEach(function (g) {
-        if (!byRegion[g.regionId]) byRegion[g.regionId] = [];
-        byRegion[g.regionId].push({ InstanceId: g.instance.InstanceId, instanceId: g.instance.InstanceId });
-      });
-      var regionCount2 = Object.keys(byRegion).length;
-      var total = await refundByRegionParallel(byRegion, { recordFailures: true });
-      log('📊 第 ' + loopRound + ' 轮：' + groups.length + ' 台（' + regionCount2 + ' 个地域）→ 成功 ' + total.success + '、跳过 ' + total.skipped + '、锁定 ' + total.locked + '、失败 ' + total.fail,
-        total.fail === 0 ? 'success' : 'warn');
-      // 单轮无任何成功/跳过（实例可能全部锁定或 API 异常）则停止，避免空转
-      if (total.success === 0 && total.skipped === 0 && groups.length > 0) {
-        log('⚠️ 本轮无成功/跳过（实例可能全部锁定或 API 异常），停止以避免死循环', 'warn');
-        break;
-      }
+      log('  🏁 [凭证 ' + pname + '] 累计：成功 ' + pStats.success + '、跳过 ' + pStats.skipped + '、锁定 ' + pStats.locked + '、失败 ' + pStats.fail, 'success');
+      return pStats;
     }
 
+    var profilePromises = credList.map(function(pname) {
+      return runUnsubscribeLoopForProfile(pname).catch(function(err) {
+        log('  ❌ [凭证 ' + pname + '] 异常: ' + (err && err.message || err), 'error');
+        return { success: 0, skipped: 0, locked: 0, fail: 0 };
+      });
+    });
+    var allStats = await Promise.all(profilePromises);
+    var grand = allStats.reduce(function(a, s) {
+      return { success: a.success + s.success, skipped: a.skipped + s.skipped, locked: a.locked + s.locked, fail: a.fail + s.fail };
+    }, { success: 0, skipped: 0, locked: 0, fail: 0 });
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
+    log('🏆 批量退订总完成：成功 ' + grand.success + '、跳过 ' + grand.skipped + '、锁定 ' + grand.locked + '、失败 ' + grand.fail, grand.fail === 0 ? 'success' : 'warn');
+
+    // 切回原 active 凭证
+    if (originalActive) AliyunClient.useProfile(originalActive);
+    renderBatchCredSelect();
     await refreshAllRegions();
     deselectAllRegions();
     updateBatchUnsubBtn();
@@ -4281,6 +4422,8 @@ function openResetSystemModal() {
     return;
   }
   if (!state.hasCredentials) { log('⚠️ 请先设置凭证', 'warn'); return; }
+  var credList = getSelectedBatchCreds();
+  if (credList.length === 0) { log('⚠️ 请先在「选择凭证」下拉勾选至少一个阿里云账号', 'warn'); return; }
   var html =
     '<div class="modal-mask" id="resetSystemMask" onclick="if(event.target===this)closeResetSystemModal()">' +
       '<div class="modal-dialog" style="max-width:560px;">' +
@@ -4295,7 +4438,8 @@ function openResetSystemModal() {
           '</div>' +
           '<div style="background:#f0f8ff;padding:10px 14px;border-radius:4px;font-size:13px;">' +
             '<strong>目标镜像：</strong> ' + RESET_SYSTEM_IMAGE_NAME + ' （ImageId: <code>' + RESET_SYSTEM_IMAGE_ID + '</code>）<br>' +
-            '<strong>操作地域：</strong> <span id="resetSystemRegions"></span>' +
+            '<strong>操作地域：</strong> <span id="resetSystemRegions"></span><br>' +
+            '<strong>凭证范围（' + credList.length + ' 个，并发执行）：</strong><br><span style="white-space:pre-line;color:var(--primary);">' + credList.join('\n') + '</span>' +
           '</div>' +
           '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">' +
             '<button class="btn btn-default" onclick="closeResetSystemModal()">取消</button>' +
@@ -4332,46 +4476,73 @@ async function confirmResetSystem() {
   btn.disabled = true; btn.textContent = '⏳ 重置中...';
 
   try {
-    var groups;
-    try { groups = await collectInstancesFromSelectedRegions(); }
+    var selected = getSelectedBatchCreds();
+    if (selected.length === 0) {
+      log('⚠️ 请先在「选择凭证」下拉勾选至少一个阿里云账号', 'warn');
+      btn.disabled = false; btn.textContent = '确认重置';
+      return;
+    }
+    var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+    var probeName = (originalActive && selected.indexOf(originalActive) >= 0) ? originalActive : selected[0];
+    AliyunClient.useProfile(probeName);
+    var probeGroups;
+    try { probeGroups = await collectInstancesFromSelectedRegions(); }
     catch (err) { log('⚠️ ' + err.message, 'warn'); btn.disabled = false; btn.textContent = '确认重置'; return; }
-    if (groups.length === 0) { log('⚠️ 所选地域暂无云主机', 'warn'); btn.disabled = false; btn.textContent = '确认重置'; return; }
+    if (probeGroups.length === 0) { log('⚠️ 所选地域暂无云主机（凭证 ' + probeName + ' 下为空，其他凭证会单独统计）', 'warn'); }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('♻️ 开始批量重置系统为 ' + RESET_SYSTEM_IMAGE_NAME + '：' + groups.length + ' 台', 'info');
+    log('♻️ 开始批量重置系统为 ' + RESET_SYSTEM_IMAGE_NAME + '：' + selected.length + ' 个凭证（并发执行）', 'info');
 
     var CONCURRENCY = 50;
-    var totalSuccess = 0, totalFail = 0, totalStoppedFirst = 0;
-    var byRegion = {};
-    groups.forEach(function(g) { (byRegion[g.regionId] = byRegion[g.regionId] || []).push(g); });
+    var grandTotalSuccess = 0, grandTotalFail = 0, grandStoppedFirst = 0;
 
-    var regionPromises = Object.keys(byRegion).map(function(rid) {
-      var arr = byRegion[rid];
+    var profilePromises = selected.map(function(pname) {
       return (async function() {
-        log('  ▶ [' + REGION_INFO[rid] + '] 重置 ' + arr.length + ' 台...', 'info');
-        for (var i = 0; i < arr.length; i += CONCURRENCY) {
-          var slice = arr.slice(i, i + CONCURRENCY);
-          var rs = await Promise.all(slice.map(function(g) {
-            return AliyunClient.resetSystem(g.regionId, g.instance.InstanceId, RESET_SYSTEM_IMAGE_ID).then(function(data) {
-              return { ok: true, id: g.instance.InstanceId, stoppedFirst: !!data.stoppedFirst };
-            }).catch(function(err) {
-              return { ok: false, id: g.instance.InstanceId, err: (err && err.message) || String(err) };
-            });
-          }));
-          rs.forEach(function(r) {
-            if (r.ok) { totalSuccess++; if (r.stoppedFirst) totalStoppedFirst++; }
-            else { totalFail++; log('    ❌ ' + r.id + ' 失败: ' + r.err, 'error'); }
-          });
-          if (i + CONCURRENCY < arr.length) await new Promise(function(r) { setTimeout(r, 200); });
-        }
-        log('  ✅ [' + REGION_INFO[rid] + '] 完成', 'success');
+        AliyunClient.useProfile(pname);
+        var groups;
+        try { groups = await collectInstancesFromSelectedRegions(); }
+        catch (err) { log('  ⚠️ [凭证 ' + pname + '] 拉取实例失败: ' + err.message, 'error'); return; }
+        if (groups.length === 0) { log('  ⚪ [凭证 ' + pname + '] 所选地域无实例', 'info'); return; }
+        var byRegion = {};
+        groups.forEach(function(g){ (byRegion[g.regionId]=byRegion[g.regionId]||[]).push(g); });
+        var pTotalSuccess = 0, pTotalFail = 0, pStoppedFirst = 0;
+        var regionPromises = Object.keys(byRegion).map(function(rid) {
+          var arr = byRegion[rid];
+          return (async function() {
+            log('  ▶ [' + pname + ' / ' + REGION_INFO[rid] + '] 重置 ' + arr.length + ' 台...', 'info');
+            for (var i=0; i<arr.length; i+=CONCURRENCY) {
+              var slice = arr.slice(i, i+CONCURRENCY);
+              var rs = await Promise.all(slice.map(function(g) {
+                return AliyunClient.resetSystem(g.regionId, g.instance.InstanceId, RESET_SYSTEM_IMAGE_ID).then(function(data) {
+                  return { ok: true, id: g.instance.InstanceId, stoppedFirst: !!data.stoppedFirst };
+                }).catch(function(err) {
+                  return { ok: false, id: g.instance.InstanceId, err: (err && err.message) || String(err) };
+                });
+              }));
+              rs.forEach(function(r) {
+                if (r.ok) { pTotalSuccess++; if (r.stoppedFirst) pStoppedFirst++; }
+                else { pTotalFail++; log('    ❌ ' + pname + ' / ' + r.id + ' 失败: ' + r.err, 'error'); }
+              });
+              if (i + CONCURRENCY < arr.length) await new Promise(function(r){ setTimeout(r, 200); });
+            }
+            log('  ✅ [' + pname + ' / ' + REGION_INFO[rid] + '] 完成', 'success');
+          })();
+        });
+        await Promise.all(regionPromises);
+        grandTotalSuccess += pTotalSuccess;
+        grandTotalFail += pTotalFail;
+        grandStoppedFirst += pStoppedFirst;
+        log('  📊 [凭证 ' + pname + '] 完成：成功 ' + pTotalSuccess + ' 台，失败 ' + pTotalFail + ' 台', pTotalFail === 0 ? 'success' : 'warn');
       })();
     });
-    await Promise.all(regionPromises);
+    await Promise.all(profilePromises);
+
+    if (originalActive) AliyunClient.useProfile(originalActive);
+    renderBatchCredSelect();
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('📊 批量重置完成：成功 ' + totalSuccess + ' 台，失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
-    if (totalStoppedFirst > 0) log('  其中 ' + totalStoppedFirst + ' 台是运行中自动停机后再重置的', 'info');
+    log('📊 批量重置总完成：成功 ' + grandTotalSuccess + ' 台，失败 ' + grandTotalFail + ' 台', grandTotalFail === 0 ? 'success' : 'warn');
+    if (grandStoppedFirst > 0) log('  其中 ' + grandStoppedFirst + ' 台是运行中自动停机后再重置的', 'info');
     log('💡 提示：重置后实例会自动启动，可在控制台「服务器运维 → 实例」查看', 'info');
   } catch (err) {
     log('❌ 批量重置出错: ' + err.message, 'error');

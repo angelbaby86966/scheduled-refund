@@ -55,7 +55,10 @@
           <div class="section-actions">
             <button class="btn btn-sm" id="regionSelectAllBtn" onclick="selectAllRegions()">全选地域</button>
             <button class="btn btn-sm" onclick="deselectAllRegions()">取消全选</button>
-            <button class="btn btn-sm" style="background:#ff9800;color:#fff;border:none;" onclick="batchRebootSelectedRegions()" title="重启所选地域的所有云主机">🔁 批量重启</button>
+            <select id="batchCredSelect" class="cred-select" title="选择本次批量操作使用的阿里云凭证（多账号场景）" onchange="onBatchCredSelectChange()">
+              <option value="">-- 加载凭证 --</option>
+            </select>
+            <button class="btn btn-sm" id="batchRebootBtn" style="background:#ff9800;color:#fff;border:none;" onclick="batchRebootSelectedRegions()" title="重启所选地域的所有云主机">🔁 批量重启</button>
             <button class="btn btn-sm" style="background:#e91e63;color:#fff;border:none;" onclick="openResetSystemModal()" title="将所选地域的所有云主机重装为 CentOS-7.9">♻️ 批量重置系统</button>
             <button class="btn btn-sm btn-unsub" id="batchUnsubBtn" onclick="batchUnsubscribeSelectedRegions()" title="退订所选地域的所有云主机（调用阿里云 BSS RefundInstance 真正退款，不可逆）" disabled>🗑️ 批量退订 (0)</button>
             <button class="btn btn-sm btn-primary" onclick="refreshAllRegions()">🔄 刷新</button>
@@ -811,7 +814,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=10"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=95"></script>
+  <script src="app.js?v=96"></script>
   <script src="node-extract.js?v=13"></script>
   <script src="one-click-deploy.js?v=9"></script>
   <script src="image-clone.js?v=13"></script>

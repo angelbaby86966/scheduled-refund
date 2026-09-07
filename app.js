@@ -406,6 +406,52 @@ function renderCredentialProfiles() {
       useCredentialProfile(name);
     });
   });
+
+  renderBatchCredSelect();
+}
+
+function escAttr(s) {
+  return String(s).replace(/[<>&"]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; });
+}
+function escHtml(s) {
+  return String(s).replace(/[<>&]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; });
+}
+
+// 批量操作凭证下拉（重启 / 重置 / 退订 三按钮共用）：列出全部已保存凭证，选中项即「本次批量操作使用的阿里云账号」
+function renderBatchCredSelect() {
+  var sel = document.getElementById('batchCredSelect');
+  if (!sel) return;
+  if (!window.AliyunClient || !AliyunClient.listProfiles) {
+    sel.innerHTML = '<option value="">-- 凭证模块未加载 --</option>';
+    sel.disabled = true;
+    return;
+  }
+  var profiles = AliyunClient.listProfiles();
+  var active = AliyunClient.getActiveProfile();
+  var html = '<option value="">— 选择凭证（全部操作）—</option>';
+  profiles.forEach(function(p) {
+    var sel1 = (active && p.name === active.name) ? ' selected' : '';
+    var label = escHtml(p.name) + (p.ak_id_hint ? ' · ' + p.ak_id_hint : '') + (p.note ? ' · ' + escHtml(p.note) : '');
+    html += '<option value="' + escAttr(p.name) + '"' + sel1 + '>' + label + '</option>';
+  });
+  sel.innerHTML = html;
+  sel.title = active ? ('当前批量操作凭证：' + active.name + '（重启 / 重置 / 退订将使用此账号）') : '选择本次批量操作（重启 / 重置 / 退订）使用的阿里云凭证';
+  sel.disabled = profiles.length === 0;
+}
+
+// 下拉切换 → 复用已有的切凭证逻辑（切 active + 刷新凭证栏 + 重列地域实例），保证后续批量操作走所选账号
+function onBatchCredSelectChange() {
+  var sel = document.getElementById('batchCredSelect');
+  if (!sel) return;
+  var name = sel.value;
+  if (!name) return; // 占位项：保持当前凭证不变
+  try {
+    useCredentialProfile(name);
+    log('🎯 批量操作凭证已切换为「' + name + '」（重启 / 重置 / 退订 将使用此账号）', 'info');
+    renderBatchCredSelect();
+  } catch (e) {
+    alert('切换凭证失败：' + e.message);
+  }
 }
 
 function showCredentialDialog() {
@@ -2560,6 +2606,7 @@ async function init() {
   state.hasCredentials = AliyunClient.hasCredentials();
   console.log('[init] hasCredentials=' + state.hasCredentials + ' user=' + (currentUser ? currentUser.user : 'null') + ' profiles=' + (AliyunClient.listProfiles ? AliyunClient.listProfiles().length : 0));
   updateCredentialBar();
+  renderBatchCredSelect();
 
   // 凭证就绪后，再次尝试布防 / 补跑定时退订
   checkAndRunScheduledRefund();

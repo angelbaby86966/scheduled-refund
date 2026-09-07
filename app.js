@@ -610,18 +610,21 @@ function credMultiGetSelected(inst) {
   return (inst.selected || []).slice();
 }
 
-// 自定义命令弹窗 / 防火墙批量执行弹窗 各自的实例与入口
+// 自定义命令弹窗 / 防火墙批量执行弹窗 / 防火墙应用面板 各自的实例与入口
 var ccCredMulti = makeCredMultiSelect('ccCredBtn', 'ccCredDropdown');
 var fwCredMulti = makeCredMultiSelect('fwCredBtn', 'fwCredDropdown');
+var fwApplyCredMulti = makeCredMultiSelect('fwApplyCredBtn', 'fwApplyCredDropdown');
 function toggleCcCredDropdown() { toggleCredMultiDropdown(ccCredMulti); }
 function toggleFwCredDropdown() { toggleCredMultiDropdown(fwCredMulti); }
+function toggleFwApplyCredDropdown() { toggleCredMultiDropdown(fwApplyCredMulti); }
 
 // 点击下拉外区域关闭（批量按钮 + 自定义命令弹窗 + 防火墙弹窗 共用）
 document.addEventListener('click', function(e) {
   var dds = [
     document.getElementById('batchCredDropdown'),
     document.getElementById(ccCredMulti.ddId),
-    document.getElementById(fwCredMulti.ddId)
+    document.getElementById(fwCredMulti.ddId),
+    document.getElementById(fwApplyCredMulti.ddId)
   ];
   dds.forEach(function(dd) {
     if (!dd || dd.style.display !== 'block') return;
@@ -1117,6 +1120,7 @@ function switchTab(tabName) {
   for (var j = 0; j < contents.length; j++) contents[j].classList.remove('active');
   document.querySelector('.tab[data-tab="' + tabName + '"]').classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
+  if (tabName === 'firewall') renderCredMultiFor(fwApplyCredMulti);  // 进入防火墙面板渲染凭证多选
 }
 
 // ====== 防火墙 ======
@@ -1143,6 +1147,7 @@ async function loadAllRegionTemplates() {
     });
     state.allTemplates = Object.values(nameMap);
     updateStep2TemplateName();
+    renderCredMultiFor(fwApplyCredMulti);  // 同步渲染「应用到所有云主机」的凭证多选
     log('✅ 加载了 ' + state.allTemplates.length + ' 个模板（跨 ' + regionIds.length + ' 个地域）', 'success');
   } catch (err) {
     log('❌ 加载模板失败: ' + err.message, 'error');
@@ -1228,97 +1233,133 @@ async function batchApplyAllTemplates() {
       return;
     }
 
+    // 凭证多选：勾 N 个账号 → 逐账号 × 所选地域全部云主机
+    renderCredMultiFor(fwApplyCredMulti);  // 确保按钮状态最新（首次进入面板未同步模板时也能看到当前凭证）
+    var credList = credMultiGetSelected(fwApplyCredMulti);
+    if (credList.length === 0) {
+      log('❌ 请先在右上角「选择凭证」下拉勾选至少一个阿里云账号', 'error');
+      return;
+    }
+
     log('📋 已选择模板的地域：' + Object.keys(regionSelections).map(function(r) { return REGION_INFO[r]; }).join('、'), 'info');
+    log('👥 凭证（' + credList.length + ' 个，逐账号串行执行）：' + credList.join('、'), 'info');
 
-    // 全选地域 + 加载实例
-    state.selectedRegions.clear();
-    for (var j = 0; j < regionIds.length; j++) { state.selectedRegions.add(regionIds[j]); }
-    renderRegionCards();
+    var btn = document.getElementById('fwApplyBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 应用中...'; }
 
-    // 加载所有地域的全部实例（带翻页，不限 100 台上限）
-    log('🔄 加载全部实例...', 'info');
-    await Promise.all(regionIds.map(async function(rid2) {
-      try {
-        var allInsts = [];
-        var pageNum = 1;
-        var pageSize = 100;
-        while (true) {
-          var data = await AliyunClient.listInstances(rid2, { pageSize: pageSize, pageNumber: pageNum });
-          var insts = data.Instances || [];
-          allInsts = allInsts.concat(insts);
-          var total = data.TotalCount || 0;
-          if (pageNum * pageSize >= total || insts.length === 0) break;
-          pageNum++;
-        }
-        if (!state.regionData[rid2]) state.regionData[rid2] = { name: REGION_INFO[rid2], totalCount: 0, error: null, instances: [] };
-        state.regionData[rid2].instances = allInsts;
-        state.regionData[rid2].totalCount = allInsts.length;
-      } catch(err) {
-        if (!state.regionData[rid2]) state.regionData[rid2] = { name: REGION_INFO[rid2], totalCount: 0, error: null, instances: [] };
-        state.regionData[rid2].instances = [];
-        log('⚠️ [' + REGION_INFO[rid2] + '] 加载实例失败: ' + err.message, 'warn');
-      }
-    }));
-    renderInstances();
-
-    var totalSuccess = 0, totalFail = 0;
-    var ROUNDS = 3;          // 总共执行 3 遍
-    var ROUND_DELAY_MS = 2000; // 每遍之间间隔 2 秒
-
-    // 地域之间并行执行，每个地域内部按 10 台分批（阿里云 ApplyFirewallTemplate 单次上限 10 个 InstanceId）
-    for (var round = 1; round <= ROUNDS; round++) {
+    // 多账号串行执行（单例客户端签名实时读 active 凭证，并行会密钥错配）
+    var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+    var grand = { ok: 0, fail: 0 };
+    for (var ci = 0; ci < credList.length; ci++) {
+      var pname = credList[ci];
       log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-      log('🛡️ 第 ' + round + '/' + ROUNDS + ' 遍应用防火墙模板...', 'info');
-
-      await Promise.all(regionIds.map(async function(rid3) {
-        var templateName = regionSelections[rid3];
-        if (!templateName) return;
-
-        var tmpl = state.allTemplates.find(function(t) { return t.name === templateName; });
-        if (!tmpl || !tmpl.regionTemplates[rid3]) { log('❌ [' + REGION_INFO[rid3] + '] 模板映射有问题', 'error'); return; }
-
-        var templateId = tmpl.regionTemplates[rid3];
-        var rd = state.regionData[rid3];
-        var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
-
-        if (instanceIds.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
-
-        var BATCH_SIZE = 10;     // 阿里云 ApplyFirewallTemplate 单次最多 10 个 InstanceId
-        var BATCH_DELAY = 300;   // 批间间隔 ms
-        var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
-        log('🛡️ [' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台分 ' + batchCount + ' 批执行（每批最多10台）', 'info');
-
-        for (var b = 0; b < instanceIds.length; b += BATCH_SIZE) {
-          var batch = instanceIds.slice(b, b + BATCH_SIZE);
-          var batchNum = Math.floor(b / BATCH_SIZE) + 1;
-          try {
-            var result = await AliyunClient.applyFirewallTemplate(rid3, templateId, batch);
-            totalSuccess++;
-            log('  ✅ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): TaskId=' + (result.TaskId || 'OK'), 'success');
-          } catch (err) {
-            totalFail++;
-            log('  ❌ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): ' + (err.message || err), 'error');
-          }
-          // 批间停顿避免限流
-          if (b + BATCH_SIZE < instanceIds.length) {
-            await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
-          }
-        }
-      }));
-
-      // 每遍之间停顿 2 秒（最后一遍后不需要）
-      if (round < ROUNDS) {
-        log('⏱️ 第 ' + round + ' 遍完成，等待 2 秒后继续...', 'info');
-        await new Promise(function(r) { setTimeout(r, ROUND_DELAY_MS); });
+      log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始应用防火墙模板…', 'warn');
+      try {
+        AliyunClient.useProfile(pname);
+        var st = await runFwApplyForProfile(pname, regionSelections, regionIds);
+        grand.ok += st.ok;
+        grand.fail += st.fail;
+      } catch (e) {
+        log('❌ [凭证 ' + pname + '] 执行异常: ' + (e && e.message || e), 'error');
       }
     }
 
+    // 切回原 active 凭证
+    if (originalActive) AliyunClient.useProfile(originalActive);
+    renderCredMultiFor(fwApplyCredMulti);
+
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('📊 防火墙模板批量执行完成（共 ' + ROUNDS + ' 遍）: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
+    log('🏆 防火墙模板批量执行全部完成（' + credList.length + ' 个凭证）: 成功 ' + grand.ok + ' 批, 失败 ' + grand.fail + ' 批', grand.fail === 0 ? 'success' : 'warn');
+    if (btn) { btn.disabled = false; btn.textContent = '🚀 应用到所有云主机'; }
   } catch (err) {
     log('❌ 严重错误: ' + err.message, 'error');
     console.error(err);
   }
+}
+
+// 单凭证：加载全部实例 → 3 遍应用各地域所选模板（10台/批）
+async function runFwApplyForProfile(pname, regionSelections, regionIds) {
+  var selectedRegionIds = regionIds.filter(function(r) { return regionSelections[r]; });
+
+  // 加载所有地域的全部实例（带翻页，不限 100 台上限）
+  log('🔄 [凭证 ' + pname + '] 加载全部实例...', 'info');
+  await Promise.all(selectedRegionIds.map(async function(rid2) {
+    try {
+      var allInsts = [];
+      var pageNum = 1;
+      var pageSize = 100;
+      while (true) {
+        var data = await AliyunClient.listInstances(rid2, { pageSize: pageSize, pageNumber: pageNum });
+        var insts = data.Instances || [];
+        allInsts = allInsts.concat(insts);
+        var total = data.TotalCount || 0;
+        if (pageNum * pageSize >= total || insts.length === 0) break;
+        pageNum++;
+      }
+      if (!state.regionData[rid2]) state.regionData[rid2] = { name: REGION_INFO[rid2], totalCount: 0, error: null, instances: [] };
+      state.regionData[rid2].instances = allInsts;
+      state.regionData[rid2].totalCount = allInsts.length;
+    } catch(err) {
+      if (!state.regionData[rid2]) state.regionData[rid2] = { name: REGION_INFO[rid2], totalCount: 0, error: null, instances: [] };
+      state.regionData[rid2].instances = [];
+      log('⚠️ [' + REGION_INFO[rid2] + '] 加载实例失败: ' + err.message, 'warn');
+    }
+  }));
+
+  var totalSuccess = 0, totalFail = 0;
+  var ROUNDS = 3;            // 总共执行 3 遍
+  var ROUND_DELAY_MS = 2000; // 每遍之间间隔 2 秒
+
+  // 地域之间并行执行，每个地域内部按 10 台分批（阿里云 ApplyFirewallTemplate 单次上限 10 个 InstanceId）
+  for (var round = 1; round <= ROUNDS; round++) {
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+    log('🛡️ [凭证 ' + pname + '] 第 ' + round + '/' + ROUNDS + ' 遍应用防火墙模板...', 'info');
+
+    await Promise.all(selectedRegionIds.map(async function(rid3) {
+      var templateName = regionSelections[rid3];
+      if (!templateName) return;
+
+      var tmpl = state.allTemplates.find(function(t) { return t.name === templateName; });
+      if (!tmpl || !tmpl.regionTemplates[rid3]) { log('❌ [' + REGION_INFO[rid3] + '] 模板映射有问题', 'error'); return; }
+
+      var templateId = tmpl.regionTemplates[rid3];
+      var rd = state.regionData[rid3];
+      var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
+
+      if (instanceIds.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
+
+      var BATCH_SIZE = 10;     // 阿里云 ApplyFirewallTemplate 单次最多 10 个 InstanceId
+      var BATCH_DELAY = 300;   // 批间间隔 ms
+      var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
+      log('🛡️ [' + REGION_INFO[rid3] + '] ' + instanceIds.length + ' 台分 ' + batchCount + ' 批执行（每批最多10台）', 'info');
+
+      for (var b = 0; b < instanceIds.length; b += BATCH_SIZE) {
+        var batch = instanceIds.slice(b, b + BATCH_SIZE);
+        var batchNum = Math.floor(b / BATCH_SIZE) + 1;
+        try {
+          var result = await AliyunClient.applyFirewallTemplate(rid3, templateId, batch);
+          totalSuccess++;
+          log('  ✅ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): TaskId=' + (result.TaskId || 'OK'), 'success');
+        } catch (err) {
+          totalFail++;
+          log('  ❌ [' + REGION_INFO[rid3] + '] 第' + batchNum + '/' + batchCount + '批 (' + batch.length + '台): ' + (err.message || err), 'error');
+        }
+        // 批间停顿避免限流
+        if (b + BATCH_SIZE < instanceIds.length) {
+          await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
+        }
+      }
+    }));
+
+    // 每遍之间停顿 2 秒（最后一遍后不需要）
+    if (round < ROUNDS) {
+      log('⏱️ 第 ' + round + ' 遍完成，等待 2 秒后继续...', 'info');
+      await new Promise(function(r) { setTimeout(r, ROUND_DELAY_MS); });
+    }
+  }
+
+  log('🏁 [凭证 ' + pname + '] 完成: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
+  return { ok: totalSuccess, fail: totalFail };
 }
 
 // ====== 命令助手 ======

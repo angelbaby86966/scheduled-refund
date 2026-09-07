@@ -220,21 +220,25 @@
                 <p class="card-desc" data-page-node-id="CQWK0JYqpF9k62AN6owXPR">直接读取阿里云中已有的防火墙模板，9个地域各自选择模板后一键应用到该地域所有云主机。</p>
               </div>
               <div class="card-body" data-page-node-id="sPwkj52gEYU3OZa3NaTR3X">
-                <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap;" data-page-node-id="AIFctDRWoHwQrh3qCGaGNZ">
+                <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center;" data-page-node-id="AIFctDRWoHwQrh3qCGaGNZ">
                   <button class="btn btn-primary" onclick="loadAllRegionTemplates()" data-page-node-id="m8Vqx1JETliGPvreeshXma">🔄 同步阿里云模板</button>
                   <button class="btn btn-success" style="font-size:13px; padding:8px 14px;" onclick="openCreateFirewallModal()" title="在阿里云批量创建防火墙模板" data-page-node-id="T1K8EdjcWh9N1Yrh0MHv40">➕ 创建防火墙</button>
                   <button class="btn btn-danger" style="font-size:13px; padding:8px 14px;" onclick="openDeleteFirewallModal()" title="批量删除阿里云防火墙模板" data-page-node-id="eqQQPmP4gidgSeN2nHPWb2">🗑️ 删除防火墙</button>
+                  <div class="cred-multi-wrap" style="margin-left:auto;">
+                    <button type="button" id="fwApplyCredBtn" class="cred-multi-btn" onclick="toggleFwApplyCredDropdown()" title="选择本次应用使用的阿里云凭证（可多选，逐账号串行执行）">— 选择凭证（多选）—</button>
+                    <div id="fwApplyCredDropdown" class="cred-multi-dropdown" style="display:none;"></div>
+                  </div>
                 </div>
                 <div class="fw-region-grid" id="fwRegionGrid" data-page-node-id="a9zn6eXzv7zjUjVCX1rGMj">
                   <p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;" data-page-node-id="crhaUgeQKxPuHBskkcBeb4">点击「同步阿里云模板」加载已有模板</p>
                 </div>
                 <div class="action-bar" style="justify-content:center; padding:16px 0;" data-page-node-id="RvfmRk943fGcAG6OFN80Dt">
-                  <button class="btn btn-primary" style="font-size:16px; padding:12px 32px;" onclick="batchApplyAllTemplates()" data-page-node-id="6oA096Ry6hJVsRY277APNE">
+                  <button class="btn btn-primary" id="fwApplyBtn" style="font-size:16px; padding:12px 32px;" onclick="batchApplyAllTemplates()" data-page-node-id="6oA096Ry6hJVsRY277APNE">
                     🚀 应用到所有云主机
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;" data-page-node-id="xA6dCAcLQj795t46uPGpJ5">
-                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行
+                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行；多凭证时逐账号执行
                 </p>
               </div>
             </div>
@@ -815,7 +819,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=10"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=100"></script>
+  <script src="app.js?v=101"></script>
   <script src="node-extract.js?v=13"></script>
   <script src="one-click-deploy.js?v=9"></script>
   <script src="image-clone.js?v=17"></script>

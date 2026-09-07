@@ -310,6 +310,16 @@
     return token;
   }
 
+  // ★ 镜像名合法性处理：阿里云要求 2-128 字符、字母/中文开头、只能含 数字:字母中文_-
+  // （「18杭州9.7」这类名字会报 Image name must be between 2 and 128...）
+  function icSanitizeImageName(raw) {
+    var n = String(raw || '').trim();
+    n = n.replace(/[^\u4e00-\u9fa5A-Za-z0-9:_-]/g, '-');   // 点号/空格等非法字符 → 连字符
+    if (n.length > 128) n = n.slice(0, 128);
+    if (!/^[\u4e00-\u9fa5A-Za-z]/.test(n)) n = 'img-' + n;  // 必须 字母/中文 开头
+    return n;
+  }
+
   // ① 从实例创建自定义镜像
   async function icCreateImage() {
     if (!icGuard()) return;
@@ -317,6 +327,8 @@
     var instId = (document.getElementById('icSrcInstance').value || '').trim();
     var name = (document.getElementById('icImageName').value || '').trim();
     if (!instId || !name) { alert('请填写「源实例ID」和「镜像名称」'); return; }
+    name = icSanitizeImageName(name);
+    document.getElementById('icImageName').value = name;  // 回写纠正后的名字，让用户看到实际值
     var st = document.getElementById('icCreateImgStatus');
     st.innerHTML = '⏳ 正在从 ' + instId + ' 创建镜像「' + name + '」...';
     try {
@@ -952,6 +964,8 @@
     var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
     var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
     var autoPay = document.getElementById('icAutoPay').checked;
+    imageName = icSanitizeImageName(imageName);
+    document.getElementById('icImageName').value = imageName;  // 回写纠正后的名字
 
     if (!instId || !imageName || !planId) { alert('请填写：① 源实例ID、镜像名称、套餐PlanId'); return; }
     if (amount < 1 || amount > 100) { alert('开通数量需在 1~100 之间'); return; }

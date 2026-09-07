@@ -320,6 +320,50 @@
     return n;
   }
 
+  // ====== 🏆 黄金机身份保护（2026-09-07 事故后新增） ======
+  // 事故：一键全流程「标准化」在黄金机上 rm -f /etc/.mac 并随机重生 → 黄金机以新身份上线，原设备掉线"消失"。
+  // 规则：黄金机的 device_code 一经记录永不改变；克隆/绑定流程跳过黄金机；全流程结束后自动校验并恢复身份。
+  var IC_GOLDEN_KEY = 'icGoldenMap';
+  function icGetGoldenMap() { try { return JSON.parse(localStorage.getItem(IC_GOLDEN_KEY) || '{}'); } catch (e) { return {}; } }
+  function icSaveGoldenMap(m) { try { localStorage.setItem(IC_GOLDEN_KEY, JSON.stringify(m || {})); } catch (e) {} }
+  function icRememberGolden(instId, code) {
+    if (!instId || !code) return;
+    var m = icGetGoldenMap();
+    if (m[instId] !== code) { m[instId] = code; icSaveGoldenMap(m); }
+  }
+  function icIsGolden(instId) { return !!icGetGoldenMap()[instId]; }
+  // 已知黄金机种子（杭州黄金源机，2026-09-07 人工恢复后固化，防 localStorage 清空后失去保护）
+  (function () {
+    var m = icGetGoldenMap();
+    if (!m['9bae6d988653466f8b12bd40e7444aeb']) {
+      m['9bae6d988653466f8b12bd40e7444aeb'] = 'd8fc3eb3b0ef0d3e35bde2f867c9c3db';
+      icSaveGoldenMap(m);
+    }
+  })();
+
+  // RunCommand 下发并取回输出（提交 → 轮询 DescribeCommandInvocations → 返回 Output 文本）
+  async function icRunCmdOutput(region, iid, cmd, timeoutSec) {
+    var r = await AliyunClient.callCentralApi('RunCommand', {
+      RegionId: region, InstanceId: iid,
+      CommandContent: cmd, Type: 'RunShellScript', Timeout: timeoutSec || 30, Name: 'ic-golden-guard'
+    });
+    var invId = (r && (r.InvokeId || r.invokeId)) || '';
+    if (!invId) throw new Error('RunCommand 未返回 InvokeId（resp=' + JSON.stringify(r).slice(0, 150) + '）');
+    var dl = Date.now() + 150000;
+    while (Date.now() < dl) {
+      await icSleep(3000);
+      var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', { RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1 });
+      var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
+      var iis = inv && ((inv.InvokeInstances || inv.invocationInstances || inv.InvocationInstances || []))[0];
+      if (!iis) continue;
+      var stt = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
+      if (stt === 'success' || stt === 'failed' || stt === 'stopped') {
+        return (iis.Output || iis.output || '').trim();
+      }
+    }
+    throw new Error('RunCommand 轮询超时（150s）');
+  }
+
   // ① 从实例创建自定义镜像
   async function icCreateImage() {
     if (!icGuard()) return;
@@ -861,13 +905,8 @@
       'rm -f /etc/ssh/ssh_host_*',
       'ssh-keygen -A',
       '',
-      '# 6. 重置 machine-id / zyy 身份 / hostname',
-      'echo "[6/8] 重置 machine-id 与 hostname ..."',
-      'rm -f /etc/machine-id /etc/.mac',
-      'head -c 16 /dev/urandom | xxd -p > /etc/machine-id',
-      'head -c 16 /dev/urandom | xxd -p > /etc/.mac',
-      'chmod 644 /etc/machine-id /etc/.mac',
-      ': > /etc/hostname',
+      '# 6. 【黄金机保护】不再重置 machine-id / /etc/.mac / hostname！',
+      'echo "[6/8] 跳过身份重置（保护源机身份；克隆机身份由首启脚本 ipes-firstboot.sh 重生成，无需动源机）"',
       '',
       '# 7. 写入首启自举脚本',
       'echo "[7/8] 部署首启自举脚本 /usr/local/bin/ipes-firstboot.sh ..."',
@@ -979,8 +1018,22 @@
     var st = document.getElementById('icStdStatus');
     function step(msg) { st.innerHTML += '<div style="margin:2px 0;">' + msg + '</div>'; }
     st.innerHTML = '';
+    var goldenCode = '';   // 🏆 黄金机原身份（流程结束后自动校验恢复的基准）
 
     try {
+      // 🏆 记录黄金机身份（必须在标准化前读；流程收尾以此校验恢复）
+      try {
+        var gOut = await icRunCmdOutput(region, instId, 'cat /etc/.mac 2>/dev/null || cat /usr/local/edge_zycloud/device_code 2>/dev/null', 30);
+        var gm = (gOut || '').match(/[a-f0-9]{32}/);
+        if (gm) {
+          goldenCode = gm[0];
+          icRememberGolden(instId, goldenCode);
+          step('🏆 黄金机身份已记录：<code>' + goldenCode + '</code>（流程结束后自动校验，被改即恢复）');
+        } else {
+          step('⚠️ 未能读取黄金机身份（可能尚未注册），本次跳过身份保护');
+        }
+      } catch (ge) { step('⚠️ 黄金机身份读取失败（流程继续）: ' + ge.message); }
+
       // ① 标准化
       step('① 下发标准化命令到 ' + instId + ' ...');
       // ✅ SWAS RunCommand 的 CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
@@ -1165,6 +1218,26 @@
     } catch (e) {
       step('❌ 流程中断: ' + e.message);
       icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
+    } finally {
+      // 🏆 黄金机身份自动校验恢复（成功/中断都执行）——确保黄金机永不因克隆流程掉线
+      if (goldenCode) {
+        try {
+          var curOut = await icRunCmdOutput(region, instId, 'cat /etc/.mac 2>/dev/null', 30);
+          var cm2 = (curOut || '').match(/[a-f0-9]{32}/);
+          if (!cm2 || cm2[0] !== goldenCode) {
+            step('🛡️ 检测到黄金机身份被改动（' + (cm2 ? cm2[0] : '丢失') + ' → ' + goldenCode + '），自动恢复中...');
+            var fixOut = await icRunCmdOutput(region, instId,
+              'echo ' + goldenCode + ' > /etc/.mac; echo ' + goldenCode + ' > /etc/machine-id; mkdir -p /usr/local/edge_zycloud; echo ' + goldenCode + ' > /usr/local/edge_zycloud/device_code; chmod 644 /etc/.mac /etc/machine-id; systemctl restart edge_client_zycloud 2>/dev/null || true; sleep 6; grep -E "登录成功|登录数据" /usr/local/edge_zycloud/logs/edge_client.log 2>/dev/null | tail -1', 90);
+            step('✅ <b style="color:#389e0d;">黄金机身份已恢复为 ' + goldenCode + '</b>，edge_client 已重启' + (fixOut ? '：' + fixOut.slice(-60) : ''));
+            icLog('[镜像克隆] 🛡️ 黄金机身份已自动恢复 ' + goldenCode, 'success');
+          } else {
+            step('✅ 黄金机身份校验无改动（' + goldenCode + '）');
+          }
+        } catch (e2) {
+          step('⚠️ 黄金机身份恢复失败，请手动检查: ' + e2.message);
+          icLog('[镜像克隆] 黄金机身份恢复失败: ' + e2.message, 'error');
+        }
+      }
     }
   }
 
@@ -1200,8 +1273,10 @@
           var id = x.InstanceId || x.instanceId;
           var st = x.Status || x.status || '';
           var col = st === 'Running' ? '#389e0d' : '#999';
-          return '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;">' +
-            '<input type="checkbox" class="icBindChk" value="' + id + '" ' + (st === 'Running' ? 'checked' : '') + '> ' +
+          var isG = icIsGolden(id);   // 🏆 黄金机：默认不勾选，绑定流程强制跳过
+          return '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;' + (isG ? 'background:#fffbe6;border-radius:4px;' : '') + '">' +
+            '<input type="checkbox" class="icBindChk" value="' + id + '" ' + (st === 'Running' && !isG ? 'checked' : '') + '> ' +
+            (isG ? '<span title="黄金机受保护：不参与绑定，身份永不重置">🏆<b>黄金机</b></span>' : '') +
             '<code>' + id + '</code> <span style="color:' + col + '">(' + st + ')</span></label>';
         }).join('') + '</div>';
       icLog('[绑定舟翼云] 加载 ' + insts.length + ' 台实例（' + region + '）', 'info');
@@ -1213,7 +1288,7 @@
 
   function icBindToggleAll(master) {
     var chks = document.querySelectorAll('.icBindChk');
-    chks.forEach(function (c) { c.checked = master.checked; });
+    chks.forEach(function (c) { c.checked = master.checked ? !icIsGolden(c.value) : false; });  // 🏆 全选也跳过黄金机
   }
 
   async function icBindZhouyi() {
@@ -1227,6 +1302,13 @@
     var chks = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:checked'));
     if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
     var ids = chks.map(function (c) { return c.value; });
+    // 🏆 黄金机保护：注册在案的黄金机不参与绑定（防清身份/重装导致设备掉线）
+    var goldenHits = ids.filter(function (x) { return icIsGolden(x); });
+    if (goldenHits.length) {
+      ids = ids.filter(function (x) { return !icIsGolden(x); });
+      icLog('[绑定舟翼云] 🛡️ 已强制跳过黄金机（身份保护）: ' + goldenHits.join(', '), 'warn');
+    }
+    if (!ids.length) { alert('勾选的实例全部是受保护的黄金机，已全部跳过。\n\n黄金机不参与绑定/清身份，防止 device_code 被重置导致设备掉线。'); return; }
     if (!confirm('🔗 将向 ' + ids.length + ' 台实例（' + (REGION_INFO[region] || region) + '）下发舟翼云绑定命令。\n\n这是真实注册操作，确认执行？')) return;
 
     // Bug A：绑定前同步云端克隆映射，按实例ID 取业务ID（让克隆机注册时也带上业务标识）
@@ -1318,10 +1400,18 @@
     var chks = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:checked'));
     if (!chks.length) { alert('请先「加载实例」并勾选要绑定的机器'); return; }
     var ids = chks.map(function (c) { return c.value; });
+    // 🏆 黄金机保护：注册在案的黄金机不参与绑定/流转（防清身份导致掉线）
+    var goldenHits = ids.filter(function (x) { return icIsGolden(x); });
+    if (goldenHits.length) {
+      ids = ids.filter(function (x) { return !icIsGolden(x); });
+      icLog('[一键流转] 🛡️ 已强制跳过黄金机（身份保护）: ' + goldenHits.join(', '), 'warn');
+    }
+    if (!ids.length) { alert('勾选的实例全部是受保护的黄金机，已全部跳过。\n\n黄金机不参与绑定/清身份，防止 device_code 被重置导致设备掉线。'); return; }
 
     // 保险：如果还有未勾选的 Running 实例，提示用户（避免误漏克隆机）
     var unchk = Array.prototype.slice.call(document.querySelectorAll('.icBindChk:not(:checked)'));
     var unchkRunning = unchk.filter(function (c) {
+      if (icIsGolden(c.value)) return false;  // 🏆 黄金机默认不勾选，不算遗漏
       var lab = c.parentElement && c.parentElement.textContent || '';
       return /Running/i.test(lab);
     });

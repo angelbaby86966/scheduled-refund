@@ -625,7 +625,11 @@
       return j.data;
     },
 
-    /** 重置实例系统（重装系统为指定镜像；Edge Function 内部会自动先停机） */
+    /** 重置实例系统（重装系统为指定镜像；SWAS 端会自动先停机）
+     *  注意：action 必须是 SWAS 的 ResetSystem，不是 ECS 的 replaceSystemDisk
+     *  （之前错用了 ECS 的 action，导致 SWAS endpoint 返回
+     *  "Specified api is not found"）
+     */
     async resetSystem(regionId, instanceId, imageId) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
@@ -633,7 +637,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'replaceSystemDisk',
+          action: 'ResetSystem',
           ak_id: ak,
           ak_secret: sk,
           params: { RegionId: regionId, InstanceId: instanceId, ImageId: imageId }

@@ -991,29 +991,44 @@
       step('✅ 标准化命令已下发，等待 120 秒执行完成...');
       await icSleep(120000);
 
-      // ② 创建镜像
-      step('② 创建镜像「' + imageName + '」...');
-      var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
-      var newImageId = cr.ImageId || cr.imageId || '';
-      step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+      // ② 创建镜像（先查同名镜像：已存在直接复用，避免重打 + 支持中断后重跑续接）
+      var newImageId = '';
+      var reusedExisting = false;
+      try {
+        var existR = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+        var existImgs = icParseImgs(existR);
+        var exist = existImgs.filter(function (im) { return im.ImageName === imageName; })[0];
+        if (exist) {
+          newImageId = exist.ImageId || '';
+          reusedExisting = true;
+          step('✅ 镜像「' + imageName + '」已存在（ImageId=' + newImageId + '），跳过创建直接复用');
+        }
+      } catch (e) { step('⚠️ 查询已有镜像失败（忽略，继续创建）: ' + e.message); }
+      if (!newImageId) {
+        step('② 创建镜像「' + imageName + '」...');
+        var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
+        newImageId = cr.ImageId || cr.imageId || '';
+        step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+      }
 
-      // ③ 轮询镜像就绪（最多 5 分钟）
+      // ③ 轮询镜像就绪（最多 15 分钟 —— 实测 SWAS 自定义镜像创建要 5~10 分钟，5 分钟根本不够）
       // 【关键修复】SWAS ListImages 对自定义镜像不返回 Status 字段（实测仅 ImageName/Platform/ImageId/ImageType），
       // 因此“镜像出现在列表里”即视为就绪，不能再等 Status==='available'（永远等不到 → 超时中断 → 没有订单）。
       // 仅当 Status 字段存在且显式为 Creating/Waiting 时继续轮询，显式为失败时才报错。
       // 兜底：主地域一直空时跨地域扫描（镜像可能被路由到实例所在地域）。
       var allRegions = ['cn-hangzhou','cn-beijing','cn-shanghai','cn-shenzhen','cn-chengdu',
                         'cn-guangzhou','cn-heyuan','cn-wuhan-lr','cn-wulanchabu'];
-      var ready = false;
+      var ready = reusedExisting;  // 复用已有镜像：列表里能查到即已就绪，无需轮询
+      if (reusedExisting) step('✅ 复用已有镜像，直接进入开通环节');
       var lastInfo = '';
       var scannedRegions = {};  // 跨地域扫描结果
-      for (var i = 0; i < 30; i++) {
+      for (var i = 0; i < 90; i++) {
         await icSleep(10000);
         var lr;
         try {
           lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
         } catch (e) {
-          step('⚠️ [轮询 ' + (i + 1) + '/30] ListImages 报错：' + e.message);
+          step('⚠️ [轮询 ' + (i + 1) + '/90] ListImages 报错：' + e.message);
           continue;
         }
         var imgs = icParseImgs(lr);
@@ -1032,7 +1047,7 @@
           lastInfo = info;
           if (!s || s.toLowerCase() === 'available' || s.toLowerCase() === 'success' || s.toLowerCase() === 'ready') {
             newImageId = found.ImageId || newImageId; ready = true;
-            step('✅ 镜像就绪（第 ' + (i + 1) + '/30 轮，' + info + '）');
+            step('✅ 镜像就绪（第 ' + (i + 1) + '/90 轮，' + info + '）');
             break;
           }
           if (/fail|error|创建失败/i.test(s)) {
@@ -1040,11 +1055,11 @@
             return;
           }
           // Status 显式还在 Creating/Waiting 等中间态：继续轮询
-          step('⏳ [轮询 ' + (i + 1) + '/30] ' + info + '，继续等待...');
+          step('⏳ [轮询 ' + (i + 1) + '/90] ' + info + '，继续等待...');
         } else {
-          step('⏳ [轮询 ' + (i + 1) + '/30] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
+          step('⏳ [轮询 ' + (i + 1) + '/90] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
           // 关键节点打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
-          if (i === 0 || i === 9 || i === 19 || i === 29) {
+          if (i === 0 || (i + 1) % 10 === 0) {
             step('🔍 [' + region + '] ListImages 返回前 3 个：' + JSON.stringify(imgs.slice(0, 3)).slice(0, 600));
           }
           // 跨地域扫描：主地域一直空时（每 3 轮一次），9 个地域挨个查一遍
@@ -1067,7 +1082,7 @@
                   step('🎯 跨地域命中！实际 RegionId=' + rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
                   if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
                     region = rid; newImageId = hit.ImageId || newImageId; ready = true;
-                    step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/30 轮）');
+                    step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/90 轮）');
                     break;
                   }
                   if (/fail|error/i.test(s2)) {
@@ -1088,7 +1103,7 @@
         }
       }
       if (!ready) {
-        step('⚠️ 镜像未在 5 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
+        step('⚠️ 镜像未在 15 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
         // 兜底：去掉 ImageType 参数再查一次（SWAS 自定义镜像可能没这个 filter）
         step('🔄 兜底：不带 ImageType 参数重试一次 ListImages...');
         try {

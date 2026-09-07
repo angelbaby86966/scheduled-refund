@@ -1281,6 +1281,28 @@ async function batchApplyAllTemplates() {
 async function runFwApplyForProfile(pname, regionSelections, regionIds) {
   var selectedRegionIds = regionIds.filter(function(r) { return regionSelections[r]; });
 
+  // 🔄 模板ID是账号级的：切换凭证后必须用当前账号重新同步模板，否则拿别的账号的
+  //    TemplateId 去应用会报 "The specified parameter FirewallTemplateId value is not valid"
+  var tplMap = {};   // regionId -> { 模板名: 模板ID }（当前凭证的）
+  await Promise.all(selectedRegionIds.map(async function(rid) {
+    try {
+      var lst = await AliyunClient.listFirewallTemplates(rid);
+      var m = {};
+      ((lst && lst.FirewallTemplates) || []).forEach(function(t) { m[t.Name] = t.FirewallTemplateId; });
+      tplMap[rid] = m;
+    } catch (e) {
+      tplMap[rid] = {};
+      log('⚠️ [' + REGION_INFO[rid] + '] 同步模板失败: ' + (e.message || e), 'warn');
+    }
+  }));
+  // 缺失检查：当前账号没有所选模板的地域跳过（可用「创建防火墙」弹窗一键补建+应用）
+  selectedRegionIds.forEach(function(rid) {
+    var want = regionSelections[rid];
+    if (want && !(tplMap[rid] && tplMap[rid][want])) {
+      log('⚠️ [凭证 ' + pname + '] [' + REGION_INFO[rid] + '] 该账号下没有模板「' + want + '」，跳过该地域（可用「创建防火墙」弹窗批量执行自动补建）', 'warn');
+    }
+  });
+
   // 加载所有地域的全部实例（带翻页，不限 100 台上限）
   log('🔄 [凭证 ' + pname + '] 加载全部实例...', 'info');
   await Promise.all(selectedRegionIds.map(async function(rid2) {
@@ -1319,10 +1341,10 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
       var templateName = regionSelections[rid3];
       if (!templateName) return;
 
-      var tmpl = state.allTemplates.find(function(t) { return t.name === templateName; });
-      if (!tmpl || !tmpl.regionTemplates[rid3]) { log('❌ [' + REGION_INFO[rid3] + '] 模板映射有问题', 'error'); return; }
+      // 用当前凭证的模板映射按名取ID（跨账号旧ID无效，必须用刚同步的 tplMap）
+      var templateId = tplMap[rid3] ? tplMap[rid3][templateName] : null;
+      if (!templateId) { log('⚠️ [' + REGION_INFO[rid3] + '] 无模板「' + templateName + '」，跳过', 'warn'); return; }
 
-      var templateId = tmpl.regionTemplates[rid3];
       var rd = state.regionData[rid3];
       var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
 

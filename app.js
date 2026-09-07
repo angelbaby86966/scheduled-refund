@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v98 已加载 - 全功能统一9地域（含武汉cn-wuhan-lr）+青岛替换为乌兰察布cn-wulanchabu+单实例退订假成功修复+批量操作前强制翻页拉全部实例（不依赖缓存、彻底无100台限制）+退订对齐scheduled-refund：全局有界并发8+QPS8令牌桶+限流自动退避+已退/不存在实例状态预过滤+持久化跳过+批量操作凭证多选下拉（多账号并发执行）+ 修复 checkbox change 事件未绑定导致只跑 1 个账号的 bug', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v99 已加载 - 全功能统一9地域+批量凭证多选下拉 + 修复多账号并发导致密钥错配（InstanceId does not exist）→ 改为逐账号串行，账号内保持地域并行+50台/批', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -3706,7 +3706,7 @@ async function batchRebootSelectedRegions() {
     var confirmMsg = '确定要重启「' + probeRegionCount + ' 个地域、共 ' + probeGroups.length + ' 台云主机」吗？\n\n' +
       '• 操作系统会重启，连接会短暂中断\n' +
       '• 数据不会丢失\n' +
-      '• 凭证范围（' + selected.length + ' 个账号，并发执行）：\n  ' + selected.join('\n  ') + '\n' +
+      '• 凭证范围（' + selected.length + ' 个账号，逐账号执行）：\n  ' + selected.join('\n  ') + '\n' +
       '• 每账号每批 50 台并发执行（无数量限制）';
     if (!confirm(confirmMsg)) return;
 
@@ -3719,9 +3719,11 @@ async function batchRebootSelectedRegions() {
     var CONCURRENCY = 50;
     var grandTotalSuccess = 0, grandTotalFail = 0;
 
-    // 多账号并行：每个账号内部按地域并行、每地域 50 台/批
-    var profilePromises = selected.map(function(pname) {
-      return (async function() {
+    // 多账号改为串行执行：AliyunClient 是单例、callAliyunApi 签名时实时读 localStorage 里的 active 凭证，
+    // 并行跑多账号会互相覆盖凭证 → 实例ID和密钥错配（The specified InstanceId does not exist）。
+    // 串行保证正确性；账号内部仍按地域并行、每地域 50 台/批，速度足够。
+    var profileTasks = selected.map(function(pname) {
+      return function() { return (async function() {
         AliyunClient.useProfile(pname);
         var groups;
         try { groups = await collectInstancesFromSelectedRegions(); }
@@ -3757,10 +3759,12 @@ async function batchRebootSelectedRegions() {
         grandTotalFail += pTotalFail;
         log('  📊 [凭证 ' + pname + '] 完成：成功 ' + pTotalSuccess + ' 台，失败 ' + pTotalFail + ' 台', pTotalFail === 0 ? 'success' : 'warn');
       })();
+      };
     });
-    await Promise.all(profilePromises);
+    // 逐账号串行跑
+    for (var _pi = 0; _pi < profileTasks.length; _pi++) await profileTasks[_pi]();
 
-    // 切回原 active 凭证（多账号并发过程中 active 被覆盖）
+    // 切回原 active 凭证（批量过程中 active 被切换过）
     if (originalActive) AliyunClient.useProfile(originalActive);
     renderBatchCredSelect();
 
@@ -4303,7 +4307,7 @@ async function batchUnsubscribeSelectedRegions() {
       '• 退订 = 调用阿里云 BSS RefundInstance 真正退款（需直销客户 + AliyunBSSFullAccess）\n' +
       '• 退款将退回账户/原支付渠道，实例会被释放\n' +
       '• 操作不可逆，实例将被释放，数据不可恢复\n' +
-      '• 凭证范围（' + credList.length + ' 个账号，并发执行）：\n  ' + credList.join('\n  ') + '\n' +
+      '• 凭证范围（' + credList.length + ' 个账号，逐账号执行）：\n  ' + credList.join('\n  ') + '\n' +
       '• 每账号全局有界并发≤' + REFUND_CONCURRENCY + '、QPS≤' + REFUND_QPS + '/s、限流自动退避';
     if (!confirm(confirmMsg)) return;
 
@@ -4354,13 +4358,16 @@ async function batchUnsubscribeSelectedRegions() {
       return pStats;
     }
 
-    var profilePromises = credList.map(function(pname) {
-      return runUnsubscribeLoopForProfile(pname).catch(function(err) {
-        log('  ❌ [凭证 ' + pname + '] 异常: ' + (err && err.message || err), 'error');
+    // 多账号串行执行（单例客户端签名实时读 active 凭证，并行会密钥错配）
+    var allStats = [];
+    for (var _ui = 0; _ui < credList.length; _ui++) {
+      var _pname = credList[_ui];
+      var _st = await runUnsubscribeLoopForProfile(_pname).catch(function(err) {
+        log('  ❌ [凭证 ' + _pname + '] 异常: ' + (err && err.message || err), 'error');
         return { success: 0, skipped: 0, locked: 0, fail: 0 };
       });
-    });
-    var allStats = await Promise.all(profilePromises);
+      allStats.push(_st);
+    }
     var grand = allStats.reduce(function(a, s) {
       return { success: a.success + s.success, skipped: a.skipped + s.skipped, locked: a.locked + s.locked, fail: a.fail + s.fail };
     }, { success: 0, skipped: 0, locked: 0, fail: 0 });
@@ -4444,7 +4451,7 @@ function openResetSystemModal() {
           '<div style="background:#f0f8ff;padding:10px 14px;border-radius:4px;font-size:13px;">' +
             '<strong>目标镜像：</strong> ' + RESET_SYSTEM_IMAGE_NAME + ' （ImageId: <code>' + RESET_SYSTEM_IMAGE_ID + '</code>）<br>' +
             '<strong>操作地域：</strong> <span id="resetSystemRegions"></span><br>' +
-            '<strong>凭证范围（' + credList.length + ' 个，并发执行）：</strong><br><span style="white-space:pre-line;color:var(--primary);">' + credList.join('\n') + '</span>' +
+            '<strong>凭证范围（' + credList.length + ' 个，逐账号执行）：</strong><br><span style="white-space:pre-line;color:var(--primary);">' + credList.join('\n') + '</span>' +
           '</div>' +
           '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">' +
             '<button class="btn btn-default" onclick="closeResetSystemModal()">取消</button>' +
@@ -4496,13 +4503,14 @@ async function confirmResetSystem() {
     if (probeGroups.length === 0) { log('⚠️ 所选地域暂无云主机（凭证 ' + probeName + ' 下为空，其他凭证会单独统计）', 'warn'); }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('♻️ 开始批量重置系统为 ' + RESET_SYSTEM_IMAGE_NAME + '：' + selected.length + ' 个凭证（并发执行）', 'info');
+    log('♻️ 开始批量重置系统为 ' + RESET_SYSTEM_IMAGE_NAME + '：' + selected.length + ' 个凭证（逐账号执行）', 'info');
 
     var CONCURRENCY = 50;
     var grandTotalSuccess = 0, grandTotalFail = 0, grandStoppedFirst = 0;
 
-    var profilePromises = selected.map(function(pname) {
-      return (async function() {
+    // 多账号串行执行（单例客户端签名实时读 active 凭证，并行会密钥错配 → InstanceId does not exist）
+    var profileTasks = selected.map(function(pname) {
+      return function() { return (async function() {
         AliyunClient.useProfile(pname);
         var groups;
         try { groups = await collectInstancesFromSelectedRegions(); }
@@ -4539,8 +4547,10 @@ async function confirmResetSystem() {
         grandStoppedFirst += pStoppedFirst;
         log('  📊 [凭证 ' + pname + '] 完成：成功 ' + pTotalSuccess + ' 台，失败 ' + pTotalFail + ' 台', pTotalFail === 0 ? 'success' : 'warn');
       })();
+      };
     });
-    await Promise.all(profilePromises);
+    // 逐账号串行跑
+    for (var _pi2 = 0; _pi2 < profileTasks.length; _pi2++) await profileTasks[_pi2]();
 
     if (originalActive) AliyunClient.useProfile(originalActive);
     renderBatchCredSelect();

@@ -1551,26 +1551,38 @@
   }
   window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
-  // 已知 deviceCode → 直接调 admin 后端：updateEdgeRemark（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
-  // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，填到 admin 业务ID 字段并流转
+  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeRemark（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
+  // 业务ID = IPES SN（76hex，从 `docker exec ipes cat bin/ipes_sn` 读），不是 nodeId（32hex，edge_client device_code）
+  // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，一键把业务ID 填到 admin 并流转
   // 流程：
-  //   1) POST /api/edgeNode/updateEdgeRemark  body={nodeId, businessId, vendorSuggestCustomers, transMode, isCrossNetwork, crossNetworkIsp, isTransProv, usbw, bwNum}
-  //   2) POST /api/bigDeployLog/directDeployment  body={nodeId}
+  //   1) SWAS RunCommand（实例内 docker exec ipes cat bin/ipes_sn）+ DescribeCommandInvocations → 拿 76hex IPES SN
+  //   2) POST /api/edgeNode/updateEdgeRemark  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
+  //   3) POST /api/bigDeployLog/directDeployment  body={nodeId}
   async function icDirectDeployByNodeId() {
     if (!icGuard()) return;
     var st = document.getElementById('icBindStatus');
     if (!st) return;
-    var nodeId = prompt('输入 device_code（新设备SN），例如 94e9a95af733f202ae6c5ea74697120c：', '');
+    // 输入 1: device_code (32hex edge_client device_code = /etc/.mac)
+    var nodeId = prompt('步骤1：输入 device_code（32hex 新设备SN），例如 94e9a95af733f202ae6c5ea74697120c：', '');
     if (!nodeId) return;
     nodeId = nodeId.trim();
     if (!nodeId || !/^[a-f0-9]{32}$/i.test(nodeId)) { alert('device_code 必须是 32 位 hex 字符'); return; }
-    // 鉴权检查
+    // 输入 2: SWAS 实例 ID（用于 RunCommand 读 IPES SN）
+    var instanceId = prompt('步骤2：输入 SWAS 实例 ID（用于读 IPES SN），例如 d62a3db1c86c4860aaf7737cb5fda7b2：', '');
+    if (!instanceId) return;
+    instanceId = instanceId.trim();
+    var region = 'cn-hangzhou';
+    // 检查阿里云 AK/SK 是否已配置（RunCommand 需要）
+    var ak = (window.getAccessKeyId ? window.getAccessKeyId() : (typeof getAccessKeyId === 'function' ? getAccessKeyId() : ''));
+    var sk = (window.getAccessKeySecret ? window.getAccessKeySecret() : (typeof getAccessKeySecret === 'function' ? getAccessKeySecret() : ''));
+    if (!ak || !sk) { alert('请先在「凭证管理」填阿里云 AK/SK（用于 RunCommand 读 IPES SN）'); return; }
+    // 检查 admin 鉴权
     var token = icGetAdminToken();
     if (!token && !icHasAdminHmac()) {
-      alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
+      alert('请二选一填写：admin 鉴权\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
       return;
     }
-    if (!confirm('将使用以下参数调 admin 后端：\n\nnodeId (设备ID) = ' + nodeId + '\nbusinessId (业务ID) = ' + nodeId + ' （同时填到「业务ID」字段）\nvendorSuggestCustomers = 41\ntransMode = 1\nisCrossNetwork = false\nusbw = 200\nbwNum = 1\n\n1) updateEdgeRemark（自动 upsert 节点 + 写业务ID + 业务参数）\n2) directDeployment（流转「待配置 → 服务中」）\n\n确认执行？')) return;
+    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeRemark：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1\n3) admin directDeployment：流转「待配置 → 服务中」\n\n确认执行？')) return;
 
     st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
     var cfg = {
@@ -1582,15 +1594,59 @@
       usbw: IC_DEFAULT_USBW,
       bwNum: IC_DEFAULT_BW_NUM,
     };
-    if (icHasAdminHmac()) st.innerHTML += '<div style="font-size:12px;color:#888;">🔐 走 appId/ak/sk HMAC 直连 admin</div>';
-    else st.innerHTML += '<div style="font-size:12px;color:#888;">🔑 走 x-token 经 supabase 转发</div>';
+    if (icHasAdminHmac()) st.innerHTML += '<div style="font-size:12px;color:#888;">🔐 admin 走 appId/ak/sk HMAC 直连</div>';
+    else st.innerHTML += '<div style="font-size:12px;color:#888;">🔑 admin 走 x-token 经 supabase 转发</div>';
+    st.innerHTML += '<div style="font-size:12px;color:#888;">📡 RunCommand 走 supabase aliyun-proxy 转发（避免 SWAS CORS）</div>';
 
     try {
-      // 步骤 1: updateEdgeRemark
-      st.innerHTML += '<div>📝 1/2 updateEdgeRemark（写业务ID + 业务参数）...</div>';
+      // 步骤 1: RunCommand 读 IPES SN（业务ID，76hex）
+      // CommandContent 发明文（云助手 agent 不会自动 base64 -d；commit 6ef73f05 修复）
+      st.innerHTML += '<div>📝 1/3 RunCommand 读 IPES SN（docker exec ipes cat bin/ipes_sn）...</div>';
+      var r = await AliyunClient.callCentralApi('RunCommand', {
+        RegionId: region, InstanceId: instanceId,
+        CommandContent: 'docker exec ipes cat bin/ipes_sn 2>/dev/null || echo NO_IPES_SN',
+        Type: 'RunShellScript', Timeout: 30, Name: 'zyy-read-ipes-sn-' + Date.now()
+      });
+      var invId = (r && (r.InvokeId || r.invokeId)) || '';
+      if (!invId) throw new Error('未拿到 InvokeId（resp=' + JSON.stringify(r).slice(0,200) + '）');
+
+      // 轮询 DescribeCommandInvocations（最多 90s）
+      var businessId = null;
+      var lastStatus = '';
+      var rcDeadline = Date.now() + 90000;
+      while (Date.now() < rcDeadline) {
+        await icSleep(3000);
+        try {
+          var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', {
+            RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1
+          });
+          var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
+          if (!inv) continue;
+          var iis = (inv.InvocationInstances || inv.invocationInstances || inv.InvokeInstances || [])[0];
+          if (!iis) continue;
+          var status = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
+          lastStatus = status;
+          if (status === 'success' || status === 'failed' || status === 'stopped') {
+            var output = (iis.Output || iis.output || '').trim();
+            // IPES SN 是 76 hex（extract first match）
+            var m = output.match(/[a-f0-9]{76}/);
+            if (m) { businessId = m[0]; break; }
+            throw new Error('RunCommand 输出无 76hex IPES SN（status=' + status + '）: ' + output.slice(0, 200));
+          }
+          // Running/Pending 继续等
+        } catch (e) {
+          if (e && /MissingAccessKeyId|InvalidAccessKey|InvalidParameter/i.test(e.message)) throw e;
+          // 否则继续轮询
+        }
+      }
+      if (!businessId) throw new Error('RunCommand 超时（lastStatus=' + (lastStatus || 'unknown') + '），未拿到 IPES SN');
+      st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID）= <code style="color:#cf1322;">' + businessId + '</code></div>';
+
+      // 步骤 2: updateEdgeRemark（写业务ID = IPES SN）
+      st.innerHTML += '<div>📝 2/3 updateEdgeRemark（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
       var r1 = await icAdminCall('POST', '/api/edgeNode/updateEdgeRemark', {
         nodeId: nodeId,
-        businessId: nodeId,
+        businessId: businessId,
         vendorSuggestCustomers: cfg.vendorSuggestCustomers,
         transMode: cfg.transMode,
         isCrossNetwork: cfg.isCrossNetwork,
@@ -1601,13 +1657,13 @@
       });
       st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
-      // 步骤 2: directDeployment（流转到「服务中」）
-      st.innerHTML += '<div>🔄 2/2 directDeployment（流转到服务中）...</div>';
+      // 步骤 3: directDeployment（流转到「服务中」）
+      st.innerHTML += '<div>🔄 3/3 directDeployment（流转到服务中）...</div>';
       var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId });
       st.innerHTML += '<div style="color:#389e0d;">✅ directDeployment 成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 
-      st.innerHTML += '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;color:#389e0d;font-weight:600;">🎉 ' + nodeId + ' 已流转到「服务中」！请去 admin 后台核对节点状态。</div>';
-      icLog('[镜像克隆] 已知 deviceCode 流转成功 ' + nodeId, 'success');
+      st.innerHTML += '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;color:#389e0d;font-weight:600;">🎉 ' + nodeId + '（业务ID=' + businessId + '）已流转到「服务中」！请去 admin 后台核对节点状态。</div>';
+      icLog('[镜像克隆] 已知 deviceCode 流转成功 ' + nodeId + ' → businessId=' + businessId, 'success');
     } catch (e) {
       st.innerHTML += '<div style="color:#cf1322;">❌ 失败：' + e.message + '</div>';
       icLog('[镜像克隆] 已知 deviceCode 流转失败 ' + nodeId + ': ' + e.message, 'error');

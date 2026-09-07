@@ -815,7 +815,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=10"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=99"></script>
+  <script src="app.js?v=100"></script>
   <script src="node-extract.js?v=13"></script>
   <script src="one-click-deploy.js?v=9"></script>
   <script src="image-clone.js?v=17"></script>
@@ -906,13 +906,21 @@
           <input type="number" id="ccTimeout" value="60" min="10" max="86400" style="width:200px; padding:8px; border:1px solid #ccc; border-radius:4px;" data-page-node-id="kj4TDawcflihkfHjOPktdz">
         </div>
 
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">* 选择凭证（可多选，逐账号 × 9地域全部云主机执行）</label>
+          <div class="cred-multi-wrap">
+            <button type="button" id="ccCredBtn" class="cred-multi-btn" onclick="toggleCcCredDropdown()" title="选择本次执行使用的阿里云凭证（可多选，逐账号串行执行）">— 选择凭证（多选）—</button>
+            <div id="ccCredDropdown" class="cred-multi-dropdown" style="display:none;"></div>
+          </div>
+        </div>
+
         <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;" data-page-node-id="VJaDTCvky1EXb03JShD7EZ">
-          ⚠️ 点击「执行」后，<b data-page-node-id="BfrgVbZy2KHW8DFvRAT4WI">会对全部 9 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b data-page-node-id="ionqdWtLumpF4TiQmBPChM">全自动分批执行</b>。命令<b data-page-node-id="b3NHjB9W9yLAYq7wX4UZHa">不会保存</b>，下次输入就是新命令。
+          ⚠️ 点击「执行」后，会对所选<b>全部凭证</b>（逐账号）的 <b data-page-node-id="BfrgVbZy2KHW8DFvRAT4WI">全部 9 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b data-page-node-id="ionqdWtLumpF4TiQmBPChM">全自动分批执行</b>。命令<b data-page-node-id="b3NHjB9W9yLAYq7wX4UZHa">不会保存</b>，下次输入就是新命令。
         </div>
       </div>
       <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;" data-page-node-id="jUCRWVgCekNhI233fM3qsA">
         <button class="btn" onclick="closeCustomCommandModal()" style="background:#999; color:white; margin-right:8px;" data-page-node-id="RkfnlbrvghusM8jhnQJwzk">取消</button>
-        <button class="btn btn-primary" id="ccExecuteBtn" onclick="executeCustomCommandToAllRegions()" style="font-size:14px; padding:8px 22px;" data-page-node-id="vS8zVLSsEgDnfHOidstM9V">🚀 执行到全部地域</button>
+        <button class="btn btn-primary" id="ccExecuteBtn" onclick="executeCustomCommandToAllRegions()" style="font-size:14px; padding:8px 22px;" data-page-node-id="vS8zVLSsEgDnfHOidstM9V">🚀 执行（全部所选凭证）</button>
       </div>
     </div>
   </div>
@@ -1001,7 +1009,7 @@
   <div class="modal-overlay" id="createFirewallModal" style="display:none" data-page-node-id="bABmk9HjA79lGL38MxDQG9">
     <div class="modal" style="max-width:760px; width:92%; max-height:90vh; display:flex; flex-direction:column;" data-page-node-id="lMMimR3oVxQzkzyB6erFwg">
       <div class="modal-header" data-page-node-id="agTKyfk8ZOCxhrDBHmmv5v">
-        <h3 data-page-node-id="NbDNYKT3HIXVPi9Wdhcuoj">🛡️ 批量创建防火墙模板</h3>
+        <h3 data-page-node-id="NbDNYKT3HIXVPi9Wdhcuoj">🛡️ 防火墙模板批量执行</h3>
         <button class="modal-close" onclick="closeCreateFirewallModal()" data-page-node-id="kSCNRiw8cbhqbTXl7w8aKi">×</button>
       </div>
       <div class="modal-body" style="overflow-y:auto;" data-page-node-id="gkakzwTbTD9GFzNLlbST4X">
@@ -1028,13 +1036,20 @@
             <button class="btn btn-xs" onclick="deselectAllCreateFwRegions()" style="font-size:12px; padding:4px 10px;" data-page-node-id="fhcrEBOaXXsBDGnFsHFZJu">取消</button>
           </div>
         </div>
-        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;" data-page-node-id="q7GfMMvHwp1vqcJ1nYP33L">
-          ⚠️ 模板将在所选地域的阿里云中创建，创建后可在此页面「防火墙」标签中同步并批量应用。
+        <div class="form-group" style="margin-bottom:6px;">
+          <label style="font-weight:600;">* 选择凭证（可多选，逐账号执行）</label>
+          <div class="cred-multi-wrap">
+            <button type="button" id="fwCredBtn" class="cred-multi-btn" onclick="toggleFwCredDropdown()" title="选择本次执行使用的阿里云凭证（可多选，逐账号串行执行）">— 选择凭证（多选）—</button>
+            <div id="fwCredDropdown" class="cred-multi-dropdown" style="display:none;"></div>
+          </div>
+        </div>
+        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;">
+          🔒 模板已锁定（名称+规则以此弹窗为准）：点「批量执行」时，每个地域<b>没有同名模板就自动创建，有则直接复用</b>，然后把模板应用到该地域<b>全部云主机</b>（10台/批，不限数量）。多凭证逐账号串行执行，无需先单独创建模板。
         </div>
       </div>
       <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;" data-page-node-id="GT1kZMCT4shz6shirzEEe8">
         <button class="btn" onclick="closeCreateFirewallModal()" style="background:#999; color:white; margin-right:8px;" data-page-node-id="skfwPQKnz15G4HAgsMfdZa">取消</button>
-        <button class="btn btn-success" id="createFwExecuteBtn" onclick="batchCreateFirewallTemplates()" style="font-size:14px; padding:8px 22px;" data-page-node-id="LpV6O6HQLVBWjcdfemvNRH">🚀 批量创建模板</button>
+        <button class="btn btn-success" id="createFwExecuteBtn" onclick="batchExecuteFirewallAll()" style="font-size:14px; padding:8px 22px;" data-page-node-id="LpV6O6HQLVBWjcdfemvNRH">🚀 批量执行（缺模板自动创建）</button>
       </div>
     </div>
   </div>

@@ -523,13 +523,112 @@ function getSelectedBatchCreds() {
   return (_batchCredSelected || []).slice();
 }
 
-// 点击下拉外区域关闭
+// ====== 凭证多选通用组件工厂（自定义命令弹窗 / 防火墙批量执行弹窗复用） ======
+// 与上面的 batchCred* 同款交互，但按实例隔离选中状态，互不影响
+function makeCredMultiSelect(btnId, ddId) {
+  return { btnId: btnId, ddId: ddId, selected: [] };
+}
+
+function credMultiSyncBtn(inst) {
+  var btn = document.getElementById(inst.btnId);
+  if (!btn) return;
+  var profiles = (window.AliyunClient && AliyunClient.listProfiles) ? AliyunClient.listProfiles() : [];
+  btn.disabled = profiles.length === 0;
+  var n = (inst.selected || []).length;
+  btn.textContent = n === 0 ? '— 选择凭证（多选）—' : '✓ 凭证（已选 ' + n + '）';
+  btn.title = n > 0 ? '本次将对所选 ' + n + ' 个阿里云账号逐账号执行：\n' + inst.selected.join('\n') : '选择阿里云凭证（可多选，逐账号执行）';
+}
+
+function renderCredMultiFor(inst) {
+  var btn = document.getElementById(inst.btnId);
+  var dd = document.getElementById(inst.ddId);
+  if (!btn || !dd) return;
+  if (!window.AliyunClient || !AliyunClient.listProfiles) {
+    btn.textContent = '凭证模块未加载';
+    btn.disabled = true;
+    dd.innerHTML = '';
+    return;
+  }
+  var profiles = AliyunClient.listProfiles();
+  var active = AliyunClient.getActiveProfile();
+  var existingNames = {};
+  profiles.forEach(function(p) { existingNames[p.name] = true; });
+  inst.selected = (inst.selected || []).filter(function(n) { return existingNames[n]; });
+  // 默认勾上当前凭证（避免每次手动勾）
+  if (inst.selected.length === 0 && active) inst.selected = [active.name];
+
+  var html = '';
+  profiles.forEach(function(p) {
+    var checked = inst.selected.indexOf(p.name) >= 0;
+    var label = escHtml(p.name) + (p.ak_id_hint ? ' · ' + escHtml(p.ak_id_hint) : '') + (p.note ? ' · ' + escHtml(p.note) : '');
+    html += '<label class="cred-multi-item' + (checked ? ' checked' : '') + '" data-name="' + escAttr(p.name) + '">' +
+              '<input type="checkbox"' + (checked ? ' checked' : '') + ' data-credname="' + escAttr(p.name) + '">' +
+              '<span class="cred-multi-name">' + label + '</span>' +
+            '</label>';
+  });
+  dd.innerHTML = html;
+
+  Array.prototype.forEach.call(dd.querySelectorAll('input[type=checkbox][data-credname]'), function(cb) {
+    cb.addEventListener('change', function() { credMultiToggle(inst, cb); });
+  });
+  Array.prototype.forEach.call(dd.querySelectorAll('.cred-multi-item'), function(item) {
+    item.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (e.target.tagName === 'INPUT') return;
+      var cb = item.querySelector('input[type=checkbox]');
+      if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+    });
+  });
+  credMultiSyncBtn(inst);
+}
+
+function credMultiToggle(inst, cb) {
+  var name = cb.getAttribute('data-credname');
+  if (!name) return;
+  if (!inst.selected) inst.selected = [];
+  if (cb.checked) {
+    if (inst.selected.indexOf(name) < 0) inst.selected.push(name);
+  } else {
+    inst.selected = inst.selected.filter(function(n) { return n !== name; });
+  }
+  credMultiSyncBtn(inst);
+  var dd = document.getElementById(inst.ddId);
+  if (dd) {
+    var lbl = dd.querySelector('.cred-multi-item[data-name="' + cssEscape(name) + '"]');
+    if (lbl) lbl.classList.toggle('checked', cb.checked);
+  }
+}
+
+function toggleCredMultiDropdown(inst) {
+  var dd = document.getElementById(inst.ddId);
+  if (!dd) return;
+  dd.style.display = dd.style.display === 'block' ? 'none' : 'block';
+  if (dd.style.display === 'block') renderCredMultiFor(inst);  // 每次打开重渲染（凭证列表可能变化）
+}
+
+function credMultiGetSelected(inst) {
+  return (inst.selected || []).slice();
+}
+
+// 自定义命令弹窗 / 防火墙批量执行弹窗 各自的实例与入口
+var ccCredMulti = makeCredMultiSelect('ccCredBtn', 'ccCredDropdown');
+var fwCredMulti = makeCredMultiSelect('fwCredBtn', 'fwCredDropdown');
+function toggleCcCredDropdown() { toggleCredMultiDropdown(ccCredMulti); }
+function toggleFwCredDropdown() { toggleCredMultiDropdown(fwCredMulti); }
+
+// 点击下拉外区域关闭（批量按钮 + 自定义命令弹窗 + 防火墙弹窗 共用）
 document.addEventListener('click', function(e) {
-  var dd = document.getElementById('batchCredDropdown');
-  if (!dd || dd.style.display !== 'block') return;
-  var wrap = dd.parentElement;
-  if (!wrap) return;
-  if (!wrap.contains(e.target)) dd.style.display = 'none';
+  var dds = [
+    document.getElementById('batchCredDropdown'),
+    document.getElementById(ccCredMulti.ddId),
+    document.getElementById(fwCredMulti.ddId)
+  ];
+  dds.forEach(function(dd) {
+    if (!dd || dd.style.display !== 'block') return;
+    var wrap = dd.parentElement;
+    if (!wrap) return;
+    if (!wrap.contains(e.target)) dd.style.display = 'none';
+  });
 });
 
 function showCredentialDialog() {
@@ -3059,6 +3158,7 @@ document.addEventListener('click', function(e) {
 function openCustomCommandModal() {
   var modal = document.getElementById('customCommandModal');
   if (modal) modal.style.display = 'flex';
+  renderCredMultiFor(ccCredMulti);  // 渲染凭证多选（默认勾上当前凭证）
 }
 
 function closeCustomCommandModal() {
@@ -3095,11 +3195,18 @@ async function executeCustomCommandToAllRegions() {
   // 命令名不填就给个默认（仅用于日志）
   var finalName = name || ('custom-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19));
 
+  // 凭证多选：勾了 N 个账号就逐账号 × 9 地域全部云主机执行
+  var credList = credMultiGetSelected(ccCredMulti);
+  if (credList.length === 0) {
+    log('❌ 请先在弹窗「选择凭证」中勾选至少一个阿里云账号', 'error');
+    return;
+  }
+
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('✏️ 开始执行自定义命令: [' + finalName + '] type=' + type + ' 9个地域全部云主机', 'info');
+  log('✏️ 开始执行自定义命令: [' + finalName + '] type=' + type + '，凭证 ' + credList.length + ' 个（逐账号）× 9个地域全部云主机', 'info');
   log('   命令内容（共 ' + content.length + ' 字符）：\n' + content, 'info');
 
-  // 检查凭证
+  // 检查凭证模块
   if (!AliyunClient.hasCredentials()) {
     log('❌ 缺少阿里云 AK/SK 凭证，请先在右上角设置', 'error');
     return;
@@ -3111,9 +3218,49 @@ async function executeCustomCommandToAllRegions() {
   // 立即关闭弹窗，避免挡住操作日志
   closeCustomCommandModal();
 
+  var opts = {
+    type: type,
+    name: finalName,
+    content: content,
+    workingDir: workingDir,
+    timeout: timeout
+  };
+
+  // 多账号必须串行（单例客户端签名实时读 active 凭证，并行会密钥错配）
+  var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+  var grand = { success: 0, fail: 0 };
+  for (var ci = 0; ci < credList.length; ci++) {
+    var pname = credList[ci];
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+    log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始执行…', 'warn');
+    try {
+      AliyunClient.useProfile(pname);
+      var st = await runCustomCommandForAllRegions(opts, pname);
+      grand.success += st.success;
+      grand.fail += st.fail;
+    } catch (e) {
+      log('❌ [凭证 ' + pname + '] 执行异常: ' + (e && e.message || e), 'error');
+    }
+  }
+
+  // 切回原 active 凭证
+  if (originalActive) AliyunClient.useProfile(originalActive);
+  renderCredMultiFor(ccCredMulti);
+
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+  log('🏆 自定义命令全部完成（' + credList.length + ' 个凭证）: 成功 ' + grand.success + ' 台，失败 ' + grand.fail + ' 台', grand.fail === 0 ? 'success' : 'warn');
+  log('💡 提示：执行结果可在阿里云控制台「服务器运维 → 命令助手 → 执行历史」按账号查看每台机器的输出', 'info');
+
+  if (btn) { btn.disabled = false; btn.textContent = '🚀 执行到全部地域'; }
+  // 关掉弹窗（不清空命令内容，让用户看到刚执行的内容）
+  closeCustomCommandModal();
+}
+
+// 单凭证：加载 9 个地域全部实例并批量下发命令（原 executeCustomCommandToAllRegions 主体）
+async function runCustomCommandForAllRegions(opts, pname) {
   // 1) 加载 9 个地域的全部实例（只调用 listInstances，运维类 API 走地域 endpoint 不需要代理）
   var regionIds = Object.keys(REGION_INFO);
-  log('🔄 加载 9 个地域的实例…', 'info');
+  log('🔄 [凭证 ' + pname + '] 加载 9 个地域的实例…', 'info');
   if (!state.regionData) state.regionData = {};
 
   await Promise.all(regionIds.map(function(rid) {
@@ -3159,26 +3306,16 @@ async function executeCustomCommandToAllRegions() {
     grandTotal += n;
     if (n > 0) summaryLines.push('  ' + REGION_INFO[rid] + ': ' + n + ' 台');
   });
-  log('📊 待执行: ' + grandTotal + ' 台', 'info');
+  log('📊 [凭证 ' + pname + '] 待执行: ' + grandTotal + ' 台', 'info');
   summaryLines.forEach(function(l) { log(l, 'info'); });
 
   if (grandTotal === 0) {
-    log('⚠️ 没有找到任何实例', 'warn');
-    if (btn) { btn.disabled = false; btn.textContent = '🚀 执行到全部地域'; }
-    return;
+    return { success: 0, fail: 0 };
   }
 
   // 2) 对每个地域的实例批量执行自定义命令
   //    【优化】SWAS InvokeCommand 单次支持最多 100 台：每批 100 台只发 1 次请求，
   //    把 600 台从 600 次请求降到 ~6 次/地域，从根上规避 QPS 限流。
-  var opts = {
-    type: type,
-    name: finalName,
-    content: content,
-    workingDir: workingDir,
-    timeout: timeout
-  };
-
   var BATCH_SIZE = 100;        // SWAS InvokeCommand 单次最多 100 台（一次请求覆盖整批）
   var BATCH_DELAY = 400;       // 批间间隔 ms（保守，进一步降 QPS）
   var FALLBACK_BATCH = 20;     // 整批失败时的降级批大小（逐台重试，避免再次限流）
@@ -3228,14 +3365,9 @@ async function executeCustomCommandToAllRegions() {
     log('✅ [' + REGION_INFO[rid] + '] ' + instances.length + ' 台下发完成', 'success');
   }));
 
-  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('📊 自定义命令执行完成: 成功 ' + totalSuccess + ' 台，失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
+  log('🏁 [凭证 ' + pname + '] 完成: 成功 ' + totalSuccess + ' 台，失败 ' + totalFail + ' 台', totalFail === 0 ? 'success' : 'warn');
   if (totalInvokeIds.length > 0) log('📋 InvokeId 示例: ' + totalInvokeIds.slice(0, 3).join(', ') + (totalInvokeIds.length > 3 ? ' …' : ''), 'info');
-  log('💡 提示：执行结果可在阿里云控制台「服务器运维 → 命令助手 → 执行历史」查看每台机器的输出', 'info');
-
-  if (btn) { btn.disabled = false; btn.textContent = '🚀 执行到全部地域'; }
-  // 关掉弹窗（不清空命令内容，让用户看到刚执行的内容）
-  closeCustomCommandModal();
+  return { success: totalSuccess, fail: totalFail };
 }
 
 // =====================================================================
@@ -3424,7 +3556,7 @@ async function batchDeleteCommands() {
 var _fwRuleCounter = 0;
 function openCreateFirewallModal() {
   var modal = document.getElementById('createFirewallModal');
-  if (modal) { modal.style.display = 'flex'; _fwRuleCounter = 0; document.getElementById('createFwName').value = ''; document.getElementById('createFwDesc').value = ''; document.getElementById('createFwRulesContainer').innerHTML = ''; addFwRuleRow(); initCreateFwRegionCheckboxes(); }
+  if (modal) { modal.style.display = 'flex'; _fwRuleCounter = 0; document.getElementById('createFwName').value = ''; document.getElementById('createFwDesc').value = ''; document.getElementById('createFwRulesContainer').innerHTML = ''; addFwRuleRow(); initCreateFwRegionCheckboxes(); renderCredMultiFor(fwCredMulti); }
 }
 function closeCreateFirewallModal() { document.getElementById('createFirewallModal').style.display = 'none'; }
 function initCreateFwRegionCheckboxes() {
@@ -3513,6 +3645,137 @@ async function batchCreateFirewallTemplates() {
   log('💡 提示：创建成功后请点击「同步阿里云模板」刷新列表', 'info');
   if (btn) { btn.disabled = false; btn.textContent = '🚀 批量创建模板'; }
   closeCreateFirewallModal();
+}
+
+// =====================================================================
+// 防火墙一键批量执行：锁定本弹窗的模板（名称+规则）→ 每个地域"有则用、缺则自动建"
+// → 应用到该地域全部实例（10台/批，不限数量）。支持凭证多选（逐账号执行）。
+// =====================================================================
+async function batchExecuteFirewallAll() {
+  var name = document.getElementById('createFwName').value.trim();
+  var desc = document.getElementById('createFwDesc').value.trim();
+  var rules = collectFwRulesFromUI();
+  var btn = document.getElementById('createFwExecuteBtn');
+
+  if (!name) { log('❌ 模板名称不能为空', 'error'); return; }
+  if (rules.length === 0) { log('❌ 请至少添加一条防火墙规则', 'error'); return; }
+
+  var selectedRegions = [];
+  var cbs = document.querySelectorAll('input[name="createFwRegion"]:checked');
+  for (var i = 0; i < cbs.length; i++) selectedRegions.push(cbs[i].value);
+  if (selectedRegions.length === 0) { log('❌ 请至少选择一个目标地域', 'error'); return; }
+
+  var credList = credMultiGetSelected(fwCredMulti);
+  if (credList.length === 0) { log('❌ 请先在「选择凭证」中勾选至少一个阿里云账号', 'error'); return; }
+  if (!AliyunClient.hasCredentials()) { log('❌ 请先设置阿里云凭证', 'error'); return; }
+
+  var ok = confirm('🛡️ 防火墙模板批量执行\n\n模板「' + name + '」（' + rules.length + ' 条规则，已锁定）× ' +
+    credList.length + ' 个账号 × ' + selectedRegions.length + ' 个地域：\n' +
+    '1) 每个地域没有同名模板就自动创建，有则直接复用\n' +
+    '2) 然后把模板应用到该地域全部云主机（10台/批，不限数量）\n' +
+    '3) 凭证范围（逐账号串行执行）：\n  ' + credList.join('\n  ') + '\n\n确认执行？');
+  if (!ok) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 执行中…'; }
+  closeCreateFirewallModal();
+
+  // 多账号串行（单例客户端签名实时读 active 凭证，并行会密钥错配）
+  var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+  var grand = { tplCreated: 0, tplReused: 0, applyOk: 0, applyFail: 0 };
+
+  for (var ci = 0; ci < credList.length; ci++) {
+    var pname = credList[ci];
+    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+    log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 防火墙批量执行开始', 'warn');
+    try {
+      AliyunClient.useProfile(pname);
+      var st = await runFirewallEnsureAndApply(pname, name, desc, rules, selectedRegions);
+      grand.tplCreated += st.tplCreated;
+      grand.tplReused += st.tplReused;
+      grand.applyOk += st.applyOk;
+      grand.applyFail += st.applyFail;
+    } catch (e) {
+      log('❌ [凭证 ' + pname + '] 执行异常: ' + (e && e.message || e), 'error');
+    }
+  }
+
+  // 切回原 active 凭证
+  if (originalActive) AliyunClient.useProfile(originalActive);
+  renderCredMultiFor(fwCredMulti);
+
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+  log('🏆 防火墙批量执行全部完成（' + credList.length + ' 个凭证）: 模板新建 ' + grand.tplCreated + ' / 复用 ' + grand.tplReused +
+    '，应用成功 ' + grand.applyOk + ' 批，失败 ' + grand.applyFail + ' 批', grand.applyFail === 0 ? 'success' : 'warn');
+  if (btn) { btn.disabled = false; btn.textContent = '🚀 批量执行（缺模板自动创建）'; }
+}
+
+// 单凭证：逐地域「有模板则复用、缺则创建」→ 加载全部实例 → 批量应用模板
+async function runFirewallEnsureAndApply(pname, name, desc, rules, regionIds) {
+  var st = { tplCreated: 0, tplReused: 0, applyOk: 0, applyFail: 0 };
+  for (var ri = 0; ri < regionIds.length; ri++) {
+    var rid = regionIds[ri];
+    var rn = REGION_INFO[rid] || rid;
+    try {
+      // 1) 查该地域是否已有同名模板
+      var templateId = null;
+      try {
+        var lst = await AliyunClient.listFirewallTemplates(rid);
+        var templates = (lst && lst.FirewallTemplates) || [];
+        for (var ti = 0; ti < templates.length; ti++) {
+          if (templates[ti].Name === name) { templateId = templates[ti].FirewallTemplateId; break; }
+        }
+      } catch (le) {
+        log('⚠️ [' + rn + '] 列模板失败（将尝试直接创建）: ' + (le.message || le), 'warn');
+      }
+
+      // 2) 缺则自动创建
+      if (!templateId) {
+        var cr = await AliyunClient.createFirewallTemplate(rid, name, desc, rules);
+        templateId = cr && cr.FirewallTemplateId;
+        st.tplCreated++;
+        log('  🆕 [' + rn + '] 无同名模板，已自动创建 → ' + (templateId || 'OK'), 'success');
+      } else {
+        st.tplReused++;
+        log('  ♻️ [' + rn + '] 已有同名模板，直接复用 → ' + templateId, 'info');
+      }
+      if (!templateId) { log('❌ [' + rn + '] 未取到模板ID，跳过该地域', 'error'); continue; }
+
+      // 3) 加载该地域全部实例（带翻页，不限 100 台）
+      var allInsts = [];
+      var pageNum = 1;
+      while (true) {
+        var data = await AliyunClient.listInstances(rid, { pageSize: 100, pageNumber: pageNum });
+        var insts = data.Instances || [];
+        allInsts = allInsts.concat(insts);
+        var total = data.TotalCount || 0;
+        if (pageNum * 100 >= total || insts.length === 0) break;
+        pageNum++;
+      }
+      if (allInsts.length === 0) { log('⚠️ [' + rn + '] 无实例，跳过应用', 'warn'); continue; }
+
+      // 4) 应用模板（ApplyFirewallTemplate 单次上限 10 个 InstanceId）
+      var BATCH_SIZE = 10, BATCH_DELAY = 300;
+      var batchCount = Math.ceil(allInsts.length / BATCH_SIZE);
+      log('  🛡️ [' + rn + '] ' + allInsts.length + ' 台分 ' + batchCount + ' 批应用模板…', 'info');
+      for (var b = 0; b < allInsts.length; b += BATCH_SIZE) {
+        var batch = allInsts.slice(b, b + BATCH_SIZE).map(function(x) { return x.InstanceId; });
+        try {
+          var result = await AliyunClient.applyFirewallTemplate(rid, templateId, batch);
+          st.applyOk++;
+          log('    ✅ 第' + (Math.floor(b / BATCH_SIZE) + 1) + '/' + batchCount + '批 (' + batch.length + '台): TaskId=' + (result.TaskId || 'OK'), 'success');
+        } catch (ae) {
+          st.applyFail++;
+          log('    ❌ 第' + (Math.floor(b / BATCH_SIZE) + 1) + '/' + batchCount + '批 (' + batch.length + '台): ' + (ae.message || ae), 'error');
+        }
+        if (b + BATCH_SIZE < allInsts.length) await new Promise(function(r) { setTimeout(r, BATCH_DELAY); });
+      }
+    } catch (re) {
+      log('❌ [' + rn + '] 地域执行失败: ' + (re.message || re), 'error');
+    }
+    if (ri < regionIds.length - 1) await new Promise(function(r) { setTimeout(r, 200); });
+  }
+  log('🏁 [凭证 ' + pname + '] 地域遍历完成: 模板新建 ' + st.tplCreated + ' / 复用 ' + st.tplReused + '，应用成功 ' + st.applyOk + ' / 失败 ' + st.applyFail, st.applyFail === 0 ? 'success' : 'warn');
+  return st;
 }
 
 // =====================================================================

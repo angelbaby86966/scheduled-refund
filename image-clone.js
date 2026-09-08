@@ -1222,6 +1222,19 @@
       }
       step('✅ 镜像就绪: ' + newImageId);
 
+      // 🔒 镜像已固化 → 立即禁用黄金机的首启脚本
+      //    镜像快照里 firstboot 仍是 enabled（克隆机首启要靠它重生身份），
+      //    但黄金机自己必须禁用：否则黄金机哪天重启，首启脚本会重置身份导致掉线（9/7 事故）。
+      //    守卫只是逻辑兜底，真正根治是这里直接关掉。
+      try {
+        await icRunCmdOutput(region, instId,
+          'systemctl disable ipes-firstboot 2>/dev/null || true; echo firstboot-disabled', 30);
+        step('🔒 黄金机首启脚本已禁用（镜像已固化，黄金机身份永不重置）');
+        icLog('[镜像克隆] 🔒 黄金机 ipes-firstboot 已禁用', 'success');
+      } catch (fe) {
+        step('⚠️ 黄金机首启脚本禁用失败（不影响开通，可手动执行 systemctl disable ipes-firstboot）: ' + fe.message);
+      }
+
       // ④ 开通
       step('④ 基于镜像开通 ' + amount + ' 台...');
       var ids = [];

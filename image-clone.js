@@ -1656,6 +1656,7 @@
   window.icCreateImage = icCreateImage;
   window.icLoadImages = icLoadImages;
   window.icDeleteImage = icDeleteImage;
+  window.icDeleteSelectedImage = icDeleteSelectedImage;
   window.icLaunchFromImage = icLaunchFromImage;
   window.icOneKeyStandardize = icOneKeyStandardize;
   window.icFullCloneFlow = icFullCloneFlow;

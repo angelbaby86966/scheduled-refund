@@ -332,11 +332,16 @@
     if (m[instId] !== code) { m[instId] = code; icSaveGoldenMap(m); }
   }
   function icIsGolden(instId) { return !!icGetGoldenMap()[instId]; }
-  // 已知黄金机种子（杭州黄金源机，2026-09-07 人工恢复后固化，防 localStorage 清空后失去保护）
+  // 已知黄金机种子（杭州黄金源机，防 localStorage 清空后失去保护）
+  // ⚠️ 2026-09-08 修正：旧种子 9bae6d988653466f8b12bd40e7444aeb / d8fc3eb3b0ef0d3e35bde2f867c9c3db
+  //    对应的实例在「张瑞瑶15」账号 cn-hangzhou 已 NotFoundInstance（不存在），导致黄金机守卫长期失灵。
+  //    权威黄金机：实例 9f2adaf7f4d9467aa42982db05ff77fc（118.178.193.66），节点ID b1bd4b68f9cac05a3cf3de642341b8a9。
   (function () {
     var m = icGetGoldenMap();
-    if (!m['9bae6d988653466f8b12bd40e7444aeb']) {
-      m['9bae6d988653466f8b12bd40e7444aeb'] = 'd8fc3eb3b0ef0d3e35bde2f867c9c3db';
+    // 清理已失效的旧种子，避免误判
+    if (m['9bae6d988653466f8b12bd40e7444aeb']) { delete m['9bae6d988653466f8b12bd40e7444aeb']; }
+    if (!m['9f2adaf7f4d9467aa42982db05ff77fc']) {
+      m['9f2adaf7f4d9467aa42982db05ff77fc'] = 'b1bd4b68f9cac05a3cf3de642341b8a9';
       icSaveGoldenMap(m);
     }
   })();
@@ -1642,7 +1647,7 @@
         '[ -z "$NID" ] && NID=$(hostname);',
         '[ -z "$SN" ] && SN="$NID";',
         'printf "IPES_SN=%s\\nNODE_ID=%s\\n" "$SN" "$NID"'
-      ].join(' ');
+      ].join('\n');
     }
     var RC_DEADLINE = Date.now() + 300000;  // 5 分钟总截止（docker exec tee + ipes 重启轮询最坏 33s，留余量）
     async function readDeviceCode(iid) {

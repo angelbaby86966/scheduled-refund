@@ -381,6 +381,33 @@
     }
   }
 
+  // SWAS 异步下发命令（不轮询输出，下发完立刻返回）。
+  // 用于"标准化脚本下发后 sleep 等结果"这种场景，避免依赖 icRunCmdOutput 的 90s 轮询。
+  // 模板不自动删除（异步执行可能还没完），交给后续"批量清理过期模板"流程。
+  // 返回 { commandId, invokeId }，失败抛错。
+  async function icRunCommandSubmit(region, iid, cmd, timeoutSec) {
+    if (!window.AliyunClient) throw new Error('AliyunClient 未加载');
+    var ts = timeoutSec || 60;
+    var cr = await AliyunClient.callSwasApi(region, 'CreateCommand', {
+      RegionId: region, Name: 'wb-ic-' + Date.now(), Type: 'RunShellScript',
+      CommandContent: cmd, WorkingDir: '/root', Timeout: ts
+    });
+    var commandId = (cr && (cr.CommandId || cr.commandId)) || '';
+    if (!commandId) throw new Error('CreateCommand 未返回 CommandId：' + JSON.stringify(cr).slice(0, 150));
+    try {
+      var iv = await AliyunClient.callSwasApi(region, 'InvokeCommand', {
+        RegionId: region, CommandId: commandId, InstanceIds: JSON.stringify([iid])
+      });
+      var invokeId = (iv && (iv.InvokeId || iv.invokeId)) || '';
+      if (!invokeId) throw new Error('InvokeCommand 未返回 InvokeId：' + JSON.stringify(iv).slice(0, 150));
+      return { commandId: commandId, invokeId: invokeId };
+    } catch (e) {
+      // 出错清模板（避免堆积）
+      try { await AliyunClient.callSwasApi(region, 'DeleteCommand', { RegionId: region, CommandId: commandId }); } catch (_) {}
+      throw e;
+    }
+  }
+
   // ① 从实例创建自定义镜像
   async function icCreateImage() {
     if (!icGuard()) return;
@@ -1006,20 +1033,11 @@
     st.innerHTML = '⏳ 正在向 ' + instId + ' 下发标准化命令...';
 
     try {
-      var r = await AliyunClient.callCentralApi('RunCommand', {
-        RegionId: region,
-        InstanceId: instId,
-        // ✅ SWAS RunCommand 的 CommandContent 必须发明文！云助手 agent 不会自动 base64 -d
-        // 之前用 icB64() 包装导致云助手把 base64 字符串当 shell 执行，报"line 1: REM9..."语法错
-        CommandContent: icBuildStandardizeScript(),
-        Type: 'RunShellScript',
-        Timeout: 600,
-        Name: 'ipes-golden-prep'
-      });
-      var cmdId = r.CommandId || r.commandId || '';
-      st.innerHTML = '✅ 标准化命令已下发到 ' + instId + '<br>CommandId: <code>' + (cmdId || '下发成功') + '</code><br>' +
+      // 🚨 SWAS 没有 RunCommand action（ECS 才有），改走 CreateCommand+InvokeCommand（v18r5 批量根治）
+      var sub = await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
+      st.innerHTML = '✅ 标准化命令已下发到 ' + instId + '<br>CommandId: <code>' + sub.commandId + '</code><br>' +
         '请等待 1~2 分钟，登录实例确认 <code>/var/log/ipes-golden-prep.log</code> 末尾显示「标准化完成」后再重新打镜像。';
-      icLog('[镜像克隆] 标准化命令已下发: ' + instId + ' CommandId=' + cmdId, 'success');
+      icLog('[镜像克隆] 标准化命令已下发: ' + instId + ' CommandId=' + sub.commandId, 'success');
     } catch (e) {
       st.innerHTML = '❌ 标准化命令下发失败: ' + e.message;
       icLog('[镜像克隆] 标准化命令下发失败: ' + e.message, 'error');
@@ -1069,11 +1087,8 @@
 
       // ① 标准化
       step('① 下发标准化命令到 ' + instId + ' ...');
-      // ✅ SWAS RunCommand 的 CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
-      await AliyunClient.callCentralApi('RunCommand', {
-        RegionId: region, InstanceId: instId,
-        CommandContent: icBuildStandardizeScript(), Type: 'RunShellScript', Timeout: 600, Name: 'ipes-golden-prep'
-      });
+      // 🚨 SWAS 没有 RunCommand action，改走 CreateCommand+InvokeCommand（v18r5 批量根治）
+      await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
       step('✅ 标准化命令已下发，等待 120 秒执行完成...');
       await icSleep(120000);
 
@@ -1399,11 +1414,8 @@
         // 该实例专属命令：绑定 + 把业务ID 写克隆机本地，使「设备ID ↔ 业务ID」在设备侧物理闭环
         var instCmd = cmd + (bid ? ('; mkdir -p /usr/local/edge && echo "' + bid + '" > /usr/local/edge/business_id') : '');
         try {
-          // ✅ CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
-          await AliyunClient.callCentralApi('RunCommand', {
-            RegionId: region, InstanceId: iid,
-            CommandContent: instCmd, Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
-          });
+          // 🚨 SWAS 没有 RunCommand action，改走 CreateCommand+InvokeCommand（v18r5 批量根治）
+          await icRunCommandSubmit(region, iid, instCmd, 600);
           ok++;
           st.innerHTML += '<div style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发' + (bid ? '（标记业务ID ' + bid + '）' : '') + '</div>';
           icLog('[绑定舟翼云] ' + iid + ' 命令已下发' + (bid ? ' 业务ID=' + bid : ''), 'success');
@@ -1514,11 +1526,8 @@
       while (idx < ids.length) {
         var iid = ids[idx++];
         try {
-          await AliyunClient.callCentralApi('RunCommand', {
-            RegionId: region, InstanceId: iid,
-            // ✅ CommandContent 必须发明文，云助手 agent 不会自动 base64 -d
-            CommandContent: cmd, Type: 'RunShellScript', Timeout: 600, Name: 'zyy-bind'
-          });
+          // 🚨 SWAS 没有 RunCommand action，改走 CreateCommand+InvokeCommand（v18r5 批量根治）
+          await icRunCommandSubmit(region, iid, cmd, 600);
           ok++;
           log('<span style="color:#389e0d;">✅ ' + iid + ' 绑定命令已下发</span>');
         } catch (e) {
@@ -1560,51 +1569,12 @@
     var readCodeCmd = 'DC=""; for f in /usr/local/edge_zycloud/device_code /etc/.mac /usr/local/edge/device_code; do if [ -f "$f" ] && [ -r "$f" ]; then DC=$(cat "$f" 2>/dev/null); [ -n "$DC" ] && break; fi; done; if [ -z "$DC" ]; then DC=$(hostname); fi; echo "$DC"';
     var RC_DEADLINE = Date.now() + 240000;  // 4 分钟总截止
     async function readDeviceCode(iid) {
-      // ✅ 步骤 a: 发 RunCommand 读 device_code
-      // CommandContent 发明文（云助手 agent 不会自动 base64 -d）
-      // 走 callCentralApi 经 supabase aliyun-proxy 转发，避免 SWAS 直连可能的 CORS/限流
-      var r;
-      try {
-        r = await AliyunClient.callCentralApi('RunCommand', {
-          RegionId: region, InstanceId: iid,
-          CommandContent: readCodeCmd,
-          Type: 'RunShellScript', Timeout: 30, Name: 'zyy-readcode'
-        });
-      } catch (e) {
-        throw new Error('RunCommand 提交失败: ' + e.message);
-      }
-      var invId = (r && (r.InvokeId || r.invokeId)) || '';
-      if (!invId) throw new Error('未拿到 InvokeId（resp=' + JSON.stringify(r).slice(0,200) + '）');
-      // ✅ 步骤 b: 轮询 DescribeCommandInvocations（也走 callCentralApi 保持一致，避免 SWAS 直连 CORS）
-      var dl = Date.now() + 150000;  // 单台机器最多等 150s
-      var lastStatus = '';
-      while (Date.now() < dl && Date.now() < RC_DEADLINE) {
-        await icSleep(3000);
-        try {
-          var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', {
-            RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1
-          });
-          var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
-          if (!inv) continue;
-          var iis = (inv.InvocationInstances || inv.invocationInstances || inv.InvokeInstances || [])[0];
-          if (!iis) continue;
-          var status = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
-          lastStatus = status;
-          if (status === 'success' || status === 'failed' || status === 'stopped') {
-            var output = (iis.Output || iis.output || '').trim();
-            // device_code 是 32 hex，可能在 Output 末尾；提取第一个匹配
-            var m = output.match(/[a-f0-9]{32}/);
-            if (m) return m[0];
-            throw new Error('RunCommand 输出无 32hex device_code（lastStatus=' + status + '）: ' + output.slice(0, 200));
-          }
-          // Running/Pending 继续等
-        } catch (e) {
-          // 关键错误（鉴权/参数错）不重试；网络/CORS 错误重试
-          if (e && /MissingAccessKeyId|InvalidAccessKey|InvalidParameter/i.test(e.message)) throw e;
-          // 否则继续轮询
-        }
-      }
-      throw new Error('DescribeCommandInvocations 超时（lastStatus=' + (lastStatus || 'unknown') + '）');
+      // 🚨 SWAS 没有 RunCommand action（v18r3 已踩坑），必须走 CreateCommand+InvokeCommand+DescribeCommandInvocations。
+      // 复用 icRunCmdOutput（callSwasApi 直连，含超时/DeleteCommand 兜底）。
+      var out = await icRunCmdOutput(region, iid, readCodeCmd, 30);
+      var m = (out || '').match(/[a-f0-9]{32}/);
+      if (m) return m[0];
+      throw new Error('输出无 32hex device_code: ' + (out || '').slice(0, 200));
     }
     var rcIdx = 0;
     async function rcPool() {
@@ -1776,47 +1746,16 @@
     st.innerHTML += '<div style="font-size:12px;color:#888;">📡 RunCommand 走 supabase aliyun-proxy 转发（避免 SWAS CORS）</div>';
 
     try {
-      // 步骤 1: RunCommand 读 IPES SN（业务ID，76hex）
-      // CommandContent 发明文（云助手 agent 不会自动 base64 -d；commit 6ef73f05 修复）
-      st.innerHTML += '<div>📝 1/3 RunCommand 读 IPES SN（docker exec ipes cat bin/ipes_sn）...</div>';
-      var r = await AliyunClient.callCentralApi('RunCommand', {
-        RegionId: region, InstanceId: instanceId,
-        CommandContent: 'docker exec ipes cat bin/ipes_sn 2>/dev/null || echo NO_IPES_SN',
-        Type: 'RunShellScript', Timeout: 30, Name: 'zyy-read-ipes-sn-' + Date.now()
-      });
-      var invId = (r && (r.InvokeId || r.invokeId)) || '';
-      if (!invId) throw new Error('未拿到 InvokeId（resp=' + JSON.stringify(r).slice(0,200) + '）');
-
-      // 轮询 DescribeCommandInvocations（最多 90s）
+      // 步骤 1: 创建 SWAS 命令模板 + 调用，读 IPES SN（业务ID，76hex）
+      // 🚨 SWAS 没有 RunCommand action，复用 icRunCmdOutput（v18r5 批量根治）
+      st.innerHTML += '<div>📝 1/3 调用 SWAS CreateCommand+InvokeCommand 读 IPES SN...</div>';
       var businessId = null;
-      var lastStatus = '';
-      var rcDeadline = Date.now() + 90000;
-      while (Date.now() < rcDeadline) {
-        await icSleep(3000);
-        try {
-          var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', {
-            RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1
-          });
-          var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
-          if (!inv) continue;
-          var iis = (inv.InvocationInstances || inv.invocationInstances || inv.InvokeInstances || [])[0];
-          if (!iis) continue;
-          var status = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
-          lastStatus = status;
-          if (status === 'success' || status === 'failed' || status === 'stopped') {
-            var output = (iis.Output || iis.output || '').trim();
-            // IPES SN 是 76 hex（extract first match）
-            var m = output.match(/[a-f0-9]{76}/);
-            if (m) { businessId = m[0]; break; }
-            throw new Error('RunCommand 输出无 76hex IPES SN（status=' + status + '）: ' + output.slice(0, 200));
-          }
-          // Running/Pending 继续等
-        } catch (e) {
-          if (e && /MissingAccessKeyId|InvalidAccessKey|InvalidParameter/i.test(e.message)) throw e;
-          // 否则继续轮询
-        }
-      }
-      if (!businessId) throw new Error('RunCommand 超时（lastStatus=' + (lastStatus || 'unknown') + '），未拿到 IPES SN');
+      try {
+        var snOut = await icRunCmdOutput(region, instanceId, 'docker exec ipes cat bin/ipes_sn 2>/dev/null || echo NO_IPES_SN', 30);
+        var m = (snOut || '').match(/[a-f0-9]{40,}/i);
+        if (m) businessId = m[0];
+      } catch (e) { throw new Error('读 IPES SN 失败: ' + e.message); }
+      if (!businessId) throw new Error('未读到 IPES SN（机器可能未运行 docker ipes）');
       st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID）= <code style="color:#cf1322;">' + businessId + '</code></div>';
 
       // 步骤 2: updateEdgeRemark（写业务ID = IPES SN）

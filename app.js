@@ -4911,10 +4911,10 @@ async function zyDiagProxy() {
   var ownerEl = document.getElementById('zyOwnerId');
   var ownerId = ((ownerEl && ownerEl.value || '').trim()) || '7695';
   var adv = (typeof readAdvancedFromInputs === 'function') ? readAdvancedFromInputs()
-    : { method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
+    : { method: 'GET', path: '/backend/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
   var query = (adv.query || 'ownerId={ownerId}&isOnline=1').replace(/\{ownerId\}/g, encodeURIComponent(ownerId));
   var st = document.getElementById('zySearchStatus');
-  if (st) st.innerHTML = '🔬 诊断中：分别测试 header / cookie / header+cookie 三种 token 传法…<br><small>path: ' + (adv.method || 'GET') + ' ' + (adv.path || '/api/edgeNode/getEdgeNodeList') + '?' + query + '</small>';
+  if (st) st.innerHTML = '🔬 诊断中：分别测试 header / cookie / header+cookie 三种 token 传法…<br><small>path: ' + (adv.method || 'GET') + ' ' + (adv.path || '/backend/api/edgeNode/getEdgeNodeList') + '?' + query + '</small>';
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
   function truncate(s) { var t = String(s || ''); return t.length > 400 ? t.slice(0, 400) + '…（共' + t.length + '字符）' : t; }
@@ -4928,7 +4928,7 @@ async function zyDiagProxy() {
           token: token,
           headers: headers,
           method: adv.method || 'GET',
-          path: adv.path || '/api/edgeNode/getEdgeNodeList',
+          path: (function(p){return String(p||'').replace(/^(https?:\/\/[^\/]+)?\/api\//,function(m,h){return (h||'')+'/backend/api/';});})(adv.path || '/backend/api/edgeNode/getEdgeNodeList'),
           query: query,
           body: null
         })

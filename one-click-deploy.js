@@ -140,7 +140,7 @@ function ocdExtractArrayFromObject(obj) {
 }
 
 async function ocdFetchOwnerNodes(token, ownerId) {
-  var path = '/api/edgeNode/getEdgeNodeList';
+  var path = '/backend/api/edgeNode/getEdgeNodeList';
   var query = 'ownerId=' + encodeURIComponent(ownerId) + '&isOnline=1&status=online&stage=configured';
   var resp = await fetch(OCD_SUPABASE_FN, {
     method: 'POST',
@@ -412,7 +412,7 @@ async function ocdStartDeploy() {
 
       // 步骤2：批量提交  →  POST /api/edgeNode/updateEdgeRemark（admin 前端"上机小助手-批量提交"真实接口）
       // 该接口按节点逐个调用（参考 setupAssistant 源码 e.map(e=>_(l))），这里批内并发对齐手动。
-      var submitPath = '/api/edgeNode/updateEdgeRemark';
+      var submitPath = '/backend/api/edgeNode/updateEdgeRemark';
       if (submitOverride) {
         try { submitOverride = JSON.parse(submitOverride); } catch (e) { ocdAddLog(2, '提交请求体 JSON 解析失败', 'error', e.message); throw e; }
       }
@@ -443,7 +443,7 @@ async function ocdStartDeploy() {
       if (submitFailList.length) continue; // 提交失败的批不再部署
 
       // 步骤3：批量部署  →  POST /api/bigDeployLog/directDeployment（admin 前端"上机小助手-批量部署"真实接口）
-      var deployPath = '/api/bigDeployLog/directDeployment';
+      var deployPath = '/backend/api/bigDeployLog/directDeployment';
       if (deployOverride) {
         try { deployOverride = JSON.parse(deployOverride); } catch (e) { ocdAddLog(3, '部署请求体 JSON 解析失败', 'error', e.message); throw e; }
       }

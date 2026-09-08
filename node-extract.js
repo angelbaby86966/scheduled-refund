@@ -208,8 +208,17 @@ function withTimeout(promise, ms, label) {
   });
 }
 
+// 【路径归一化 v18r6】admin.zhouyi.top 后端真实前缀是 /backend/api/（实测），
+// /api/xxx 是死路径（nginx 404）。所有调用自动归一化，含用户「高级模式」手动填的 path。
+function zyFixPath(p) {
+  p = String(p || '');
+  return p.replace(/^(https?:\/\/[^\/]+)?\/api\//, function (m, host) {
+    return (host || '') + '/backend/api/';
+  });
+}
+
 async function zyFetchNodeById(token, nodeId) {
-  var path = '/api/edgeNode/getEdgeNodeList';
+  var path = zyFixPath('/api/edgeNode/getEdgeNodeList');
   var query = 'nodeID=' + encodeURIComponent(nodeId);
   var upstreamHeaders = {};
   upstreamHeaders['Authorization'] = token;
@@ -464,7 +473,7 @@ function zySetCache(ownerId, ids) {
 async function zyFetchOwner(token, ownerId, opts) {
   opts = opts || {};
   var method = (opts.method || 'GET').toUpperCase();
-  var path   = opts.path || '/api/edgeNode/getEdgeNodeList';
+  var path   = zyFixPath(opts.path || '/api/edgeNode/getEdgeNodeList');
   var queryTpl = opts.query || 'ownerId={ownerId}&isOnline=1';
   var query  = queryTpl.replace(/\{ownerId\}/g, encodeURIComponent(ownerId));
 
@@ -556,9 +565,9 @@ function loadAdvancedConfig() {
     if (!raw) return null;
     var o = JSON.parse(raw);
     if (!o || typeof o !== 'object') return null;
-    // 自动把旧默认错误路径升级到新真实路径
-    if (o.path === '/smallNode/getEdgeNodeList') {
-      o.path = '/api/edgeNode/getEdgeNodeList';
+    // 自动把旧默认错误路径升级到新真实路径（v18r6：实测 /backend/api/ 是 admin 真实前缀）
+    if (o.path === '/smallNode/getEdgeNodeList' || o.path === '/api/edgeNode/getEdgeNodeList') {
+      o.path = '/backend/api/edgeNode/getEdgeNodeList';
       try { localStorage.setItem(ZY_ADV_KEY, JSON.stringify(o)); } catch (e) {}
     }
     return o;
@@ -579,7 +588,7 @@ function applyAdvancedToInputs() {
 function readAdvancedFromInputs() {
   return {
     method: (document.getElementById('zyApiMethod')  || {}).value || 'GET',
-    path:   (document.getElementById('zyApiPath')    || {}).value || '/api/edgeNode/getEdgeNodeList',
+    path:   (document.getElementById('zyApiPath')    || {}).value || '/backend/api/edgeNode/getEdgeNodeList',
     query:  (document.getElementById('zyApiQuery')   || {}).value || 'ownerId={ownerId}&isOnline=1',
   };
 }
@@ -591,7 +600,7 @@ function zySaveAdvanced() {
 }
 function zyResetAdvanced() {
   try { localStorage.removeItem(ZY_ADV_KEY); } catch (e) {}
-  var def = { method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
+  var def = { method: 'GET', path: '/backend/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
   var setVal = function (id, v) { var el = document.getElementById(id); if (el) el.value = v; };
   setVal('zyApiMethod', def.method);
   setVal('zyApiPath',   def.path);

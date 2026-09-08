@@ -817,13 +817,24 @@
     return json;
   }
 
-  // 统一 admin 调用入口：优先用 HMAC 鉴权（三件套都填了），否则走 x-token (supabase fn 转发)
-  // 失败时抛 Error，调用方 catch；HMAC 走不通（典型场景：admin 没开 CORS）自动回退到 x-token
-  // Fallback 仅在「网络层失败」时触发：HTTP 0、CORS 拦截、TypeError: Failed to fetch
-  // 业务错误（HTTP 4xx/5xx）说明请求已到达后端，不 fallback（HMAC 错 / 参数错 fallback 也救不了）
+  // 统一 admin 调用入口：优先用 HMAC 鉴权（三件套都填了），否则浏览器直连 admin.x-token，失败兜底走 supabase fn 转发
+  // 失败时抛 Error，调用方 catch；HMAC 走不通（典型场景：admin 没开 CORS）自动回退到浏览器直连 → supabase
+  // Fallback 仅在「网络层失败」或「HTTP 5xx」时触发；业务错误（HTTP 4xx 业务码）说明请求已到达后端，不 fallback
+  //
+  // 【路径归一化 v18r6】实测 admin 后端真实前缀是 /backend/api/（v18r6 探活确认），
+  // 历史代码里的 /api/ 是死路径（nginx 404）；入口自动归一化，让「高级模式」手动填的 path 也能自动修正。
   async function icAdminCall(method, path, body) {
+    path = String(path || '');
+    // /api/xxx → /backend/api/xxx（兼容完整 URL 带域名 https://...com/api/xxx）
+    path = path.replace(/^(https?:\/\/[^\/]+)?\/api\//, function (m, host) {
+      return (host || '') + '/backend/api/';
+    });
+
     var hmacUsed = false;
+    var directUsed = false;
     var hmacErr = null;
+    var directErr = null;
+    // ① 优先 HMAC（直连 admin，带 appId/timestamp/sign 头）— 不走任何代理
     if (icHasAdminHmac()) {
       hmacUsed = true;
       try {
@@ -831,13 +842,13 @@
       } catch (e) {
         hmacErr = e;
         if (!icIsNetworkErr(e)) {
-          // 业务错（HTTP 4xx/5xx 但请求成功到达后端）→ 不 fallback，直接抛
+          // 业务错（HTTP 4xx 但请求成功到达后端）→ 不 fallback，直接抛
           throw e;
         }
-        // 网络/CORS 失败 → 继续往下走 x-token 兜底
+        // 网络/CORS 失败 → 继续往下走「浏览器直连 x-token」兜底
       }
     }
-    // 走 x-token 鉴权（supabase fn 转发）
+    // ② 浏览器直连 admin.zhouyi.top（x-token 鉴权）— 绕开 supabase 区域出口被屏蔽
     var token = icGetAdminToken();
     if (!token) {
       if (hmacUsed && hmacErr) {
@@ -846,33 +857,61 @@
       throw new Error('未填写 admin Token 也未填 appId/ak/sk 三件套，请二选一');
     }
     try {
-      var result;
-      if (window.OcdAdmin && window.OcdAdmin.call) {
-        result = await window.OcdAdmin.call(token, method || 'POST', path, '', body);
-      } else {
-        // 兜底：直接调 supabase fn（不通过 OcdAdmin 包装）
-        var resp = await fetch(IC_SUPABASE_FN, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
-          body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: '', body: (body === undefined ? null : body) })
-        });
-        var json = null;
-        try { json = await resp.json(); } catch (e2) {}
-        if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
-        result = json;
+      directUsed = true;
+      var directResp = await fetch('https://admin.zhouyi.top' + path, {
+        method: method || 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-token': token },
+        body: body == null ? undefined : JSON.stringify(body)
+      });
+      var directJson = null;
+      try { directJson = await directResp.json(); } catch (e) { /* 非 JSON 也继续 */ }
+      // 业务错（HTTP 4xx 业务码）→ 直接抛，不 fallback（兜底也救不了）
+      if (directResp.status >= 400 && directResp.status < 500) {
+        throw new Error('HTTP ' + directResp.status + (directJson ? ' · ' + (directJson.msg || directJson.message || JSON.stringify(directJson).slice(0, 200)) : ''));
+      }
+      // 网络层失败（HTTP 0/5xx/CORS）→ fallback 到 supabase 转发
+      if (!directResp.ok) {
+        throw new Error('HTTP ' + directResp.status + (directJson ? ' · ' + JSON.stringify(directJson).slice(0, 200) : ''));
       }
       // fallback 成功时日志（仅一次提示）
       if (hmacUsed && !icAdminCall._fallbackWarned) {
         icAdminCall._fallbackWarned = true;
-        try { icLog('[image-clone] ⚠️ HMAC 通道不可用（' + hmacErr.message + '），已自动回退到 x-token 鉴权（本会话仅提示一次）', 'warn'); } catch (e3) {}
+        try { icLog('[image-clone] ⚠️ HMAC 通道不可用（' + hmacErr.message + '），已自动回退到浏览器直连 admin（本会话仅提示一次）', 'warn'); } catch (e3) {}
       }
-      return result;
-    } catch (e4) {
-      // x-token 路径也失败 → 把两层错误合并抛出去
-      if (hmacUsed) {
-        throw new Error('HMAC 失败（' + (hmacErr ? hmacErr.message : '?') + '），fallback 到 x-token 也失败：' + e4.message);
+      return directJson;
+    } catch (e) {
+      directErr = e;
+      // 这里只可能是网络/CORS/HTTP5xx（业务错已在前面 throw）；走 supabase 兜底
+      try {
+        var result;
+        if (window.OcdAdmin && window.OcdAdmin.call) {
+          result = await window.OcdAdmin.call(token, method || 'POST', path, '', body);
+        } else {
+          // 兜底：直接调 supabase fn（不通过 OcdAdmin 包装）
+          var resp = await fetch(IC_SUPABASE_FN, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IC_ANON_KEY },
+            body: JSON.stringify({ token: token, method: method || 'POST', path: path, query: '', body: (body === undefined ? null : body) })
+          });
+          var json = null;
+          try { json = await resp.json(); } catch (e2) {}
+          if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + JSON.stringify(json) : ''));
+          result = json;
+        }
+        // 兜底成功时日志（仅一次提示）
+        if (!icAdminCall._directFallbackWarned) {
+          icAdminCall._directFallbackWarned = true;
+          var hint = directErr ? ('浏览器直连失败（' + directErr.message + '），已自动回退到 supabase 转发') : '已自动回退到 supabase 转发';
+          try { icLog('[image-clone] ⚠️ ' + hint + '（本会话仅提示一次）', 'warn'); } catch (e3) {}
+        }
+        return result;
+      } catch (e4) {
+        // 三层全部失败 → 把错误合并抛出去
+        if (hmacUsed) {
+          throw new Error('HMAC 失败（' + (hmacErr ? hmacErr.message : '?') + '），浏览器直连失败（' + directErr.message + '），supabase 转发也失败：' + e4.message);
+        }
+        throw new Error('浏览器直连 admin 失败（' + directErr.message + '），supabase 转发也失败：' + e4.message);
       }
-      throw e4;
     }
   }
 

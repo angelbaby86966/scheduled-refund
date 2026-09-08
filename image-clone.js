@@ -331,7 +331,18 @@
     var m = icGetGoldenMap();
     if (m[instId] !== code) { m[instId] = code; icSaveGoldenMap(m); }
   }
-  function icIsGolden(instId) { return !!icGetGoldenMap()[instId]; }
+  // ⚠️ 不能只依赖 localStorage！种子失效/缓存被清空时守卫会整体失灵（9/8 事故：种子实例已 NotFoundInstance）。
+  //    改为「先用 aliyun-client-v2 的权威常量硬判定（实例ID/节点ID/公网IP 三要素任一命中），再回退本地记录」。
+  function icIsGolden(instId, extra) {
+    if (!instId && !extra) return false;
+    try {
+      if (window.AliyunClient && AliyunClient.isGoldenInstance) {
+        if (AliyunClient.isGoldenInstance(instId)) return true;
+        if (extra && AliyunClient.isGoldenInstance(extra)) return true;
+      }
+    } catch (e) {}
+    return !!icGetGoldenMap()[instId];
+  }
   // 已知黄金机种子（杭州黄金源机，防 localStorage 清空后失去保护）
   // ⚠️ 2026-09-08 修正：旧种子 9bae6d988653466f8b12bd40e7444aeb / d8fc3eb3b0ef0d3e35bde2f867c9c3db
   //    对应的实例在「张瑞瑶15」账号 cn-hangzhou 已 NotFoundInstance（不存在），导致黄金机守卫长期失灵。

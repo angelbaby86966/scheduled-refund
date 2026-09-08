@@ -947,5 +947,53 @@
   // 暴露通用 SWAS 直连入口（镜像克隆等功能复用，与 ListInstances 同源）
   window.AliyunClient.callSwasApi = callAliyunApi;
 
+  // ====== 🏆 黄金机硬保护（2026-09-08 新增） ======
+  // 事故背景：旧守卫把黄金机身份只存在 localStorage（image-clone.js 的 icGoldenMap），
+  //   一旦 localStorage 被清空、或种子对应的实例已释放（NotFoundInstance），守卫就整体失灵 —— 黄金机会被当成普通机批量退订/重置。
+  // 规则：下面三要素任一命中即判定为黄金机；**任何破坏性操作（释放/退订/重置系统/停止）一律拒绝**。
+  //   黄金机公网 IP 是固定资产，绝不允许变更或随机器释放而消失。
+  var GOLDEN_INSTANCE_ID = '9f2adaf7f4d9467aa42982db05ff77fc';
+  var GOLDEN_NODE_ID = 'b1bd4b68f9cac05a3cf3de642341b8a9';
+  var GOLDEN_PUBLIC_IP = '118.178.193.66';
+
+  /** 判定是否为黄金机。入参可为实例对象（含 InstanceId/PublicIpAddress）或 实例ID/公网IP/节点ID 字符串。 */
+  function isGoldenInstance(inst) {
+    if (!inst) return false;
+    if (typeof inst === 'string') {
+      return inst === GOLDEN_INSTANCE_ID || inst === GOLDEN_PUBLIC_IP || inst === GOLDEN_NODE_ID;
+    }
+    var id   = inst.InstanceId || inst.instanceId || inst.InstanceID || inst.id || '';
+    var ip   = inst.PublicIpAddress || inst.publicIpAddress || inst.IpAddress || inst.ipAddress || inst.publicIp || inst.publicIP || '';
+    var node = inst.deviceCode || inst.device_code || inst.nodeId || inst.NodeId || '';
+    if (id && id === GOLDEN_INSTANCE_ID) return true;
+    if (ip && ip === GOLDEN_PUBLIC_IP) return true;
+    if (node && node === GOLDEN_NODE_ID) return true;
+    return false;
+  }
+  /** 按 ID/IP/节点ID 字符串判定（供只有 ID 的场景用） */
+  function isGoldenByIdOrIp(idOrIp) { return isGoldenInstance(idOrIp); }
+  /** 破坏性操作前置断言：命中黄金机直接抛错中断 */
+  function assertNotGolden(inst, actionLabel) {
+    if (isGoldenInstance(inst)) {
+      throw new Error('🚫 已阻止对黄金机的破坏性操作（' + (actionLabel || '未知操作') + '）：黄金机受永久保护，禁止释放/退订/重置系统/停止，公网 ' + GOLDEN_PUBLIC_IP + ' 不得变更。');
+    }
+  }
+  /** 从实例数组中剔除黄金机，返回 { list, blocked } */
+  function filterOutGolden(list, getInst) {
+    var out = [], blocked = [];
+    (list || []).forEach(function (x) {
+      var inst = typeof getInst === 'function' ? getInst(x) : x;
+      if (isGoldenInstance(inst)) blocked.push(inst && (inst.InstanceId || inst) || x);
+      else out.push(x);
+    });
+    return { list: out, blocked: blocked };
+  }
+
+  window.AliyunClient.isGoldenInstance = isGoldenInstance;
+  window.AliyunClient.isGoldenByIdOrIp = isGoldenByIdOrIp;
+  window.AliyunClient.assertNotGolden = assertNotGolden;
+  window.AliyunClient.filterOutGolden = filterOutGolden;
+  window.AliyunClient.GOLDEN = { instanceId: GOLDEN_INSTANCE_ID, nodeId: GOLDEN_NODE_ID, publicIp: GOLDEN_PUBLIC_IP };
+
   console.log('[aliyun-client] 浏览器端阿里云客户端已就绪');
 })();

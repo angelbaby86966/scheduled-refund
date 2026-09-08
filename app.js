@@ -4132,6 +4132,14 @@ function unsubIsSkipped(msg) {
 // 释放实例（退订）：先尝试 DeleteInstance；若实例运行中则先 StopInstance，等待 5 秒后重试
 // 参考「乾亿益云主机管理平台」的释放逻辑，普通账号即可执行，不依赖 BSS RefundInstance 退款权限
 async function releaseInstance(regionId, instanceId, status) {
+  // 🏆 黄金机硬保护：释放/退订会连公网 IP 一起销毁，黄金机永久禁止走这条路（含批量退订、定时退订）
+  try {
+    if (window.AliyunClient && AliyunClient.isGoldenInstance && AliyunClient.isGoldenInstance(instanceId)) {
+      var gip = (AliyunClient.GOLDEN && AliyunClient.GOLDEN.publicIp) || '118.178.193.66';
+      log('  🚫 [' + (REGION_INFO[regionId] || regionId) + '] ' + instanceId + ' 是黄金机，已拒绝释放！黄金机公网 ' + gip + ' 禁止变更、机器禁止退订。', 'error');
+      return { ok: false, skipped: 'golden' };
+    }
+  } catch (e) { /* 守卫异常不应阻断正常流程，但下面的删除仍会执行；仅记录 */ }
   var triedStop = false;
   if (status === 'Running' || status === 'Starting') {
     log('  ⏹️ [' + (REGION_INFO[regionId] || regionId) + '] ' + instanceId + ' 运行中，先停止...', 'info');
@@ -4310,6 +4318,15 @@ function makeSemaphore(max) {
 
 // 单实例退订：令牌桶限速 + 幂等 token + 限流/瞬时错误退避重试
 async function refundOneBounded(rid, instanceId, bucket, hooks) {
+  // 🏆 黄金机硬保护：退订会连公网 IP 一起销毁，黄金机永久禁止退订。
+  //    这里是所有退款路径的收敛点（单台退订 / 批量退订 / 定时退订都走这里），必须拦住。
+  try {
+    if (window.AliyunClient && AliyunClient.isGoldenInstance && AliyunClient.isGoldenInstance(instanceId)) {
+      var gip = (AliyunClient.GOLDEN && AliyunClient.GOLDEN.publicIp) || '118.178.193.66';
+      log('  🚫 [' + (REGION_INFO[rid] || rid) + '] ' + instanceId + ' 是黄金机，已拒绝退订！黄金机公网 ' + gip + ' 禁止变更、机器禁止退订。', 'error');
+      return { ok: false, id: instanceId, kind: 'locked', err: '黄金机受永久保护，禁止退订' };
+    }
+  } catch (e) { /* 守卫异常不阻断后续逻辑 */ }
   if (bucket) await bucket.take(1);
   var clientToken = 'wb-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
   var maxRetry = REFUND_MAX_RETRY, attempt = 0;
@@ -4726,6 +4743,14 @@ async function unsubscribeSingleInstance(regionId, instanceId) {
       }
     }
   } catch (e) {}
+  // 🏆 黄金机硬保护：直接拦在确认框之前，避免用户误以为已提交
+  try {
+    if (window.AliyunClient && AliyunClient.isGoldenInstance && AliyunClient.isGoldenInstance(instanceId)) {
+      alert('🚫 该实例是黄金机，禁止退订！\n\n黄金机 ' + instanceId + '\n公网 ' + ((AliyunClient.GOLDEN && AliyunClient.GOLDEN.publicIp) || '118.178.193.66') +
+        ' 为固定资产，受永久保护：\n• 禁止退订 / 释放（公网 IP 会一起消失）\n• 禁止重置系统\n• 身份 device_code 永不重置');
+      return;
+    }
+  } catch (e) {}
   if (!confirm('确定要退订实例「' + name + '」(' + instanceId + ') 吗？\n\n' +
       '退订 = 调用阿里云 BSS RefundInstance 真正退款（需直销客户 + AliyunBSSFullAccess）。\n操作不可逆，实例将被释放，数据不可恢复！')) return;
 
@@ -4847,6 +4872,15 @@ async function confirmResetSystem() {
         var pTotalSuccess = 0, pTotalFail = 0, pStoppedFirst = 0;
         var regionPromises = Object.keys(byRegion).map(function(rid) {
           var arr = byRegion[rid];
+          // 🏆 黄金机硬保护：批量重置系统不得碰黄金机（会抹掉整机与业务身份）
+          if (window.AliyunClient && AliyunClient.filterOutGolden) {
+            var fg = AliyunClient.filterOutGolden(arr, function (g) { return g && g.instance; });
+            if (fg.blocked.length) {
+              log('  🚫 [' + pname + ' / ' + (REGION_INFO[rid] || rid) + '] 已跳过黄金机 ' + fg.blocked.length + ' 台（禁止重置系统）', 'error');
+            }
+            arr = fg.list;
+            if (!arr.length) return;
+          }
           return (async function() {
             log('  ▶ [' + pname + ' / ' + REGION_INFO[rid] + '] 重置 ' + arr.length + ' 台...', 'info');
             for (var i=0; i<arr.length; i+=CONCURRENCY) {

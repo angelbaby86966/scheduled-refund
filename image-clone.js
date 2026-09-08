@@ -343,25 +343,42 @@
 
   // RunCommand 下发并取回输出（提交 → 轮询 DescribeCommandInvocations → 返回 Output 文本）
   async function icRunCmdOutput(region, iid, cmd, timeoutSec) {
-    var r = await AliyunClient.callCentralApi('RunCommand', {
-      RegionId: region, InstanceId: iid,
-      CommandContent: cmd, Type: 'RunShellScript', Timeout: timeoutSec || 30, Name: 'ic-golden-guard'
+    // 🚨 SWAS 没有 RunCommand action（那是 ECS 的），正确流程：
+    //   CreateCommand(拿到 CommandId) → InvokeCommand(指定 InstanceId) → DescribeCommandInvocations(轮询 Output)
+    // 走 callSwasApi 直接调用（绕开 aliyun-proxy 的 RunCommand 白名单）。
+    if (!window.AliyunClient) throw new Error('AliyunClient 未加载');
+    var ts = timeoutSec || 30;
+    var cmdRes = await AliyunClient.callSwasApi(region, 'CreateCommand', {
+      RegionId: region, Name: 'ic-golden-guard-' + Date.now(), Type: 'RunShellScript',
+      CommandContent: cmd, WorkingDir: '/root', Timeout: ts
     });
-    var invId = (r && (r.InvokeId || r.invokeId)) || '';
-    if (!invId) throw new Error('RunCommand 未返回 InvokeId（resp=' + JSON.stringify(r).slice(0, 150) + '）');
-    var dl = Date.now() + 150000;
-    while (Date.now() < dl) {
-      await icSleep(3000);
-      var out = await AliyunClient.callCentralApi('DescribeCommandInvocations', { RegionId: region, InvokeId: invId, IncludeOutput: true, PageSize: 1 });
-      var inv = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
-      var iis = inv && ((inv.InvokeInstances || inv.invocationInstances || inv.InvocationInstances || []))[0];
-      if (!iis) continue;
-      var stt = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
-      if (stt === 'success' || stt === 'failed' || stt === 'stopped') {
-        return (iis.Output || iis.output || '').trim();
+    var commandId = (cmdRes && (cmdRes.CommandId || cmdRes.commandId)) || '';
+    if (!commandId) throw new Error('CreateCommand 未返回 CommandId：' + JSON.stringify(cmdRes).slice(0, 150));
+    var invokeId = '';
+    try {
+      var inv = await AliyunClient.callSwasApi(region, 'InvokeCommand', {
+        RegionId: region, CommandId: commandId, InstanceIds: JSON.stringify([iid])
+      });
+      invokeId = (inv && (inv.InvokeId || inv.invokeId)) || '';
+      if (!invokeId) throw new Error('InvokeCommand 未返回 InvokeId：' + JSON.stringify(inv).slice(0, 150));
+      // 轮询拿 Output
+      var dl = Date.now() + 90000;
+      while (Date.now() < dl) {
+        await icSleep(2000);
+        var out = await AliyunClient.callSwasApi(region, 'DescribeCommandInvocations', { RegionId: region, InvokeId: invokeId, IncludeOutput: true, PageSize: 1 });
+        var invRec = (out && (out.CommandInvocations || out.commandInvocations || []))[0];
+        var iis = invRec && ((invRec.InvokeInstances || invRec.invocationInstances || invRec.InvocationInstances || []))[0];
+        if (!iis) continue;
+        var stt = (iis.InvocationStatus || iis.invocationStatus || '').toLowerCase();
+        if (stt === 'success' || stt === 'failed' || stt === 'stopped') {
+          return (iis.Output || iis.output || '').trim();
+        }
       }
+      throw new Error('DescribeCommandInvocations 轮询超时（90s），InvokeId=' + invokeId);
+    } finally {
+      // 清理临时命令模板，避免残留到命令助手
+      try { await AliyunClient.callSwasApi(region, 'DeleteCommand', { RegionId: region, CommandId: commandId }); } catch (e) {}
     }
-    throw new Error('RunCommand 轮询超时（150s）');
   }
 
   // ① 从实例创建自定义镜像

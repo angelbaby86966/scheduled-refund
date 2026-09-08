@@ -821,13 +821,14 @@
   // 失败时抛 Error，调用方 catch；HMAC 走不通（典型场景：admin 没开 CORS）自动回退到浏览器直连 → supabase
   // Fallback 仅在「网络层失败」或「HTTP 5xx」时触发；业务错误（HTTP 4xx 业务码）说明请求已到达后端，不 fallback
   //
-  // 【路径归一化 v18r6】实测 admin 后端真实前缀是 /backend/api/（v18r6 探活确认），
-  // 历史代码里的 /api/ 是死路径（nginx 404）；入口自动归一化，让「高级模式」手动填的 path 也能自动修正。
+  // 【路径归一化】admin 后端真实前缀是 /api/（从 admin 前端 JS 包 baseURL:"/api" 反编译确认；
+  // v18r6 曾误改成 /backend/api/，导致 POST 命中 SPA 兜底返回 405，本次回退）。
+  // 这里做防御性归一化：若有人手动填了 /backend/api/，自动纠正回 /api/。
   async function icAdminCall(method, path, body) {
     path = String(path || '');
-    // /api/xxx → /backend/api/xxx（兼容完整 URL 带域名 https://...com/api/xxx）
-    path = path.replace(/^(https?:\/\/[^\/]+)?\/api\//, function (m, host) {
-      return (host || '') + '/backend/api/';
+    // /backend/api/xxx → /api/xxx（GET 会命中 SPA 兜底 HTML、POST 返回 405，必须纠正）
+    path = path.replace(/^(https?:\/\/[^\/]+)?\/backend\/api\//, function (m, host) {
+      return (host || '') + '/api/';
     });
 
     var hmacUsed = false;

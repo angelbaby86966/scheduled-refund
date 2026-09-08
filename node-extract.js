@@ -208,12 +208,13 @@ function withTimeout(promise, ms, label) {
   });
 }
 
-// 【路径归一化 v18r6】admin.zhouyi.top 后端真实前缀是 /backend/api/（实测），
-// /api/xxx 是死路径（nginx 404）。所有调用自动归一化，含用户「高级模式」手动填的 path。
+// 【路径归一化】admin 后端真实前缀是 /api/（从 admin 前端 JS 包 baseURL:"/api" 反编译确认；
+// v18r6 曾误改成 /backend/api/，导致 POST 命中 SPA 兜底返回 405，本次回退）。
+// 防御性归一化：若手动填了 /backend/api/，自动纠正回 /api/。
 function zyFixPath(p) {
   p = String(p || '');
-  return p.replace(/^(https?:\/\/[^\/]+)?\/api\//, function (m, host) {
-    return (host || '') + '/backend/api/';
+  return p.replace(/^(https?:\/\/[^\/]+)?\/backend\/api\//, function (m, host) {
+    return (host || '') + '/api/';
   });
 }
 
@@ -565,9 +566,9 @@ function loadAdvancedConfig() {
     if (!raw) return null;
     var o = JSON.parse(raw);
     if (!o || typeof o !== 'object') return null;
-    // 自动把旧默认错误路径升级到新真实路径（v18r6：实测 /backend/api/ 是 admin 真实前缀）
-    if (o.path === '/smallNode/getEdgeNodeList' || o.path === '/api/edgeNode/getEdgeNodeList') {
-      o.path = '/backend/api/edgeNode/getEdgeNodeList';
+    // 自动把 v18r6 误改的死路径升级回真实路径（admin 前端 baseURL:"/api"）；/smallNode 为更早期别名
+    if (o.path === '/backend/api/edgeNode/getEdgeNodeList' || o.path === '/smallNode/getEdgeNodeList') {
+      o.path = '/api/edgeNode/getEdgeNodeList';
       try { localStorage.setItem(ZY_ADV_KEY, JSON.stringify(o)); } catch (e) {}
     }
     return o;
@@ -588,7 +589,7 @@ function applyAdvancedToInputs() {
 function readAdvancedFromInputs() {
   return {
     method: (document.getElementById('zyApiMethod')  || {}).value || 'GET',
-    path:   (document.getElementById('zyApiPath')    || {}).value || '/backend/api/edgeNode/getEdgeNodeList',
+    path:   (document.getElementById('zyApiPath')    || {}).value || '/api/edgeNode/getEdgeNodeList',
     query:  (document.getElementById('zyApiQuery')   || {}).value || 'ownerId={ownerId}&isOnline=1',
   };
 }
@@ -600,7 +601,7 @@ function zySaveAdvanced() {
 }
 function zyResetAdvanced() {
   try { localStorage.removeItem(ZY_ADV_KEY); } catch (e) {}
-  var def = { method: 'GET', path: '/backend/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
+  var def = { method: 'GET', path: '/api/edgeNode/getEdgeNodeList', query: 'ownerId={ownerId}&isOnline=1' };
   var setVal = function (id, v) { var el = document.getElementById(id); if (el) el.value = v; };
   setVal('zyApiMethod', def.method);
   setVal('zyApiPath',   def.path);

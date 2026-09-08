@@ -1605,25 +1605,56 @@
     log('⏳ SSH 读取每台机器的 device_code（用于后续 admin 后台注册）...');
     var matched = [];
     var tokenInvalid = false;
-    // 读 device_code 的脚本：先 /usr/local/edge_zycloud/device_code，再 /etc/.mac，最后边缘兜底
-    var readCodeCmd = 'DC=""; for f in /usr/local/edge_zycloud/device_code /etc/.mac /usr/local/edge/device_code; do if [ -f "$f" ] && [ -r "$f" ]; then DC=$(cat "$f" 2>/dev/null); [ -n "$DC" ] && break; fi; done; if [ -z "$DC" ]; then DC=$(hostname); fi; echo "$DC"';
-    var RC_DEADLINE = Date.now() + 240000;  // 4 分钟总截止
+    // 读 device_code 的脚本（v18r8 修复：克隆机必须重启 IPES 让 IPES 重新生成 76hex SN，
+    // 旧版本只读 edge_client 节点ID 32hex 当业务ID，被 admin 拒为"待配置"）
+    //   1) 主路径：docker restart ipes（克隆机从黄金镜像继承后必须重启才能拿新 76hex IPES SN）→ 轮询 8 次读 SN
+    //   2) 兜底：cat /usr/local/edge_zycloud/device_code（32hex edge_client 节点ID）
+    //   3) 终极兜底：hostname
+    // 输出两行 key=value：IPES_SN=<76hex> / NODE_ID=<32hex>
+    var readCodeCmd = [
+      'SN=""; NID="";',
+      'if command -v docker >/dev/null 2>&1 && docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx "ipes"; then',
+      '  docker restart ipes >/dev/null 2>&1 || true;',
+      '  for i in 1 2 3 4 5 6 7 8; do',
+      '    sleep 3;',
+      '    s=$(docker exec ipes cat bin/ipes_sn 2>/dev/null | tr -d "[:space:]");',
+      '    [ ${#s} -ge 40 ] && echo "$s" | grep -qE "^[a-f0-9]+$" && SN="$s" && break;',
+      '  done;',
+      'fi;',
+      'for f in /usr/local/edge_zycloud/device_code /etc/.mac; do',
+      '  [ -r "$f" ] && NID=$(cat "$f" 2>/dev/null | tr -d "[:space:]") && [ -n "$NID" ] && break;',
+      'done;',
+      '[ -z "$NID" ] && NID=$(hostname);',
+      '[ -z "$SN" ] && SN="$NID";',
+      'printf "IPES_SN=%s\\nNODE_ID=%s\\n" "$SN" "$NID"'
+    ].join(' ');
+    var RC_DEADLINE = Date.now() + 240000;  // 4 分钟总截止（IPES 重启轮询最坏 24s，留余量）
     async function readDeviceCode(iid) {
       // 🚨 SWAS 没有 RunCommand action（v18r3 已踩坑），必须走 CreateCommand+InvokeCommand+DescribeCommandInvocations。
       // 复用 icRunCmdOutput（callSwasApi 直连，含超时/DeleteCommand 兜底）。
-      var out = await icRunCmdOutput(region, iid, readCodeCmd, 30);
-      var m = (out || '').match(/[a-f0-9]{32}/);
-      if (m) return m[0];
-      throw new Error('输出无 32hex device_code: ' + (out || '').slice(0, 200));
+      var out = await icRunCmdOutput(region, iid, readCodeCmd, 50);
+      // 解析 SSH 输出：IPES_SN=<76hex 业务ID> + NODE_ID=<32hex edge_client 节点ID>
+      var snMatch  = (out || '').match(/IPES_SN=([a-f0-9]{40,})/i);
+      var nidMatch = (out || '').match(/NODE_ID=([a-f0-9]+)/i);
+      if (snMatch && nidMatch) {
+        return { nodeId: nidMatch[1], businessId: snMatch[1], source: 'ipes-restart' };
+      }
+      // 兜底 1：只抓到单段长 hex 串（兼容老 SSH 输出格式）
+      var single = (out || '').match(/[a-f0-9]{40,}/i);
+      if (single) return { nodeId: single[0], businessId: single[0], source: 'ipes-direct' };
+      // 兜底 2：只抓到 32hex（无 IPES 容器，老机器）
+      var shortHex = (out || '').match(/[a-f0-9]{32}/i);
+      if (shortHex) return { nodeId: shortHex[0], businessId: shortHex[0], source: 'edge_client-only' };
+      throw new Error('输出无有效 device_code: ' + (out || '').slice(0, 200));
     }
     var rcIdx = 0;
     async function rcPool() {
       while (rcIdx < ids.length && Date.now() < RC_DEADLINE) {
         var iid = ids[rcIdx++];
         try {
-          var dc = await readDeviceCode(iid);
-          matched.push({ instanceId: iid, deviceId: dc, publicIp: ipMap[iid] || '' });
-          log('✅ ' + iid + ' device_code = ' + dc);
+          var r = await readDeviceCode(iid);
+          matched.push({ instanceId: iid, nodeId: r.nodeId, businessId: r.businessId, deviceId: r.nodeId, publicIp: ipMap[iid] || '', snSource: r.source });
+          log('✅ ' + iid + ' nodeId=' + r.nodeId + '  businessId(IPES SN)=' + r.businessId + '（SN来源：' + r.source + '）');
         } catch (e) {
           log('❌ ' + iid + ' 读 device_code 失败: ' + e.message);
         }
@@ -1636,7 +1667,7 @@
     log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 device_code，开始调 admin 后台流转</b>');
 
     // 4) 状态流转：把新设备SN填入业务ID，调用 updateEdgeRemark + directDeployment
-    log('🚀 开始状态流转（待配置 → 服务中），业务ID = 新设备SN...');
+    log('🚀 开始状态流转（待配置 → 服务中），业务ID = 新生成的 IPES SN（76hex）...');
     // 鉴权方式提示：填了三件套走 HMAC，否则走 x-token
     if (icHasAdminHmac()) log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin）');
     else log('🔑 当前使用 x-token 鉴权（经 supabase 转发）');
@@ -1649,11 +1680,13 @@
         try {
           // 把新设备SN填入业务ID（同步到 one-click-deploy 面板展示）
           var bizEl = document.getElementById('ocdBusinessId');
-          if (bizEl) bizEl.value = m.deviceId;
+          if (bizEl) bizEl.value = m.businessId;
           // 批量提交（updateEdgeRemark）
+          //   nodeId    = 32hex edge_client 节点ID（admin 用它识别节点）
+          //   businessId = 76hex IPES SN（admin 业务字段，关联到黄金机 d8891866... 同格式）
           await adminFn('POST', '/api/edgeNode/updateEdgeRemark', {
-            nodeId: m.deviceId,
-            businessId: m.deviceId,
+            nodeId: m.nodeId,
+            businessId: m.businessId,
             vendorSuggestCustomers: cfg.vendorSuggestCustomers,
             transMode: cfg.transMode,
             isCrossNetwork: cfg.isCrossNetwork,
@@ -1663,16 +1696,16 @@
             bwNum: cfg.bwNum,
           });
           submitOk++;
-          // 批量部署（directDeployment）
-          await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.deviceId });
+          // 批量部署（directDeployment）：流转「待配置 → 服务中」
+          await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.nodeId });
           deployOk++;
           successList.push(m);
-          log('<span style="color:#389e0d;">✅ ' + m.deviceId + ' 已流转到服务中（业务ID=' + m.deviceId + '）</span>');
-          icLog('[镜像克隆] 状态流转成功 ' + m.deviceId, 'success');
+          log('<span style="color:#389e0d;">✅ ' + m.nodeId + ' 已流转到服务中（业务ID=' + m.businessId + '，SN来源=' + m.snSource + '）</span>');
+          icLog('[镜像克隆] 状态流转成功 nodeId=' + m.nodeId + ' businessId=' + m.businessId, 'success');
         } catch (e) {
           deployFail++;
-          log('<span style="color:#cf1322;">❌ ' + m.deviceId + ' 流转失败: ' + e.message + '</span>');
-          icLog('[镜像克隆] 状态流转失败 ' + m.deviceId + ': ' + e.message, 'error');
+          log('<span style="color:#cf1322;">❌ ' + m.nodeId + ' 流转失败: ' + e.message + '</span>');
+          icLog('[镜像克隆] 状态流转失败 ' + m.nodeId + ': ' + e.message, 'error');
         }
       }
     }
@@ -1684,7 +1717,7 @@
     // 5) 保存 deviceId ↔ businessId（业务ID = 设备SN）映射
     if (successList.length) {
       var bizBatch = icGenBusinessId();
-      var entries = successList.map(function (m) { return { instanceId: m.instanceId, deviceId: m.deviceId, publicIp: m.publicIp }; });
+      var entries = successList.map(function (m) { return { instanceId: m.instanceId, deviceId: m.nodeId, businessId: m.businessId, publicIp: m.publicIp, snSource: m.snSource }; });
       await icSaveCloneBizMap(entries, bizBatch, region, '');
       log('🔗 已保存业务ID映射：批次 ' + bizBatch + '，共 ' + entries.length + ' 台（业务ID/设备SN 一一对应）');
     }

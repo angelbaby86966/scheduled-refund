@@ -1075,9 +1075,20 @@
       } catch (e) { step('⚠️ 查询已有镜像失败（忽略，继续创建）: ' + e.message); }
       if (!newImageId) {
         step('② 创建镜像「' + imageName + '」...');
-        var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
-        newImageId = cr.ImageId || cr.imageId || '';
-        step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+        try {
+          var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
+          newImageId = cr.ImageId || cr.imageId || '';
+          step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+        } catch (ce) {
+          var cmsg = (ce && ce.message) || String(ce);
+          // 🚨 自定义镜像配额已满（每个地域有上限，达到后无法再建）
+          if (/maximum|exceed|quota|limit|超过.*上限|超过.*限制/i.test(cmsg)) {
+            step('🚨 该地域自定义镜像已达上限（阿里云配额），请在面板「② 列镜像」点「🔄 加载我的自定义镜像」→「🗑️ 删除选中镜像」清掉不用的镜像后重试');
+            step('   原始错误：' + cmsg);
+            icLog('[镜像克隆] 镜像配额已满：' + region + '，需先删除旧镜像，原始=' + cmsg, 'error');
+          }
+          throw ce;  // 保留原有中断行为
+        }
       }
 
       // ③ 轮询镜像就绪（最多 15 分钟 —— 实测 SWAS 自定义镜像创建要 5~10 分钟，5 分钟根本不够）

@@ -437,11 +437,26 @@ async function ocdStartDeploy() {
         };
         return ocdCallAdmin(token, 'POST', submitPath, '', body);
       }));
-      var submitOk = submitResults.filter(function (r) { return r.status === 'fulfilled' && r.value && r.value.ok; }).length;
-      var submitFailList = submitResults.filter(function (r) { return !(r.status === 'fulfilled' && r.value && r.value.ok); });
+      // 【v18r14】同样按 admin 业务码 data.code 判定，不只看 supabase 层 ok
+      var submitOk = submitResults.filter(function (r) {
+        if (!(r.status === 'fulfilled' && r.value && r.value.ok)) return false;
+        var d = r.value.data;
+        return !(d && d.code !== undefined && d.code !== 0);
+      }).length;
+      var submitFailList = submitResults.filter(function (r) {
+        if (!(r.status === 'fulfilled' && r.value && r.value.ok)) return true;
+        var d = r.value.data;
+        return !!(d && d.code !== undefined && d.code !== 0);
+      });
       if (submitFailList.length) {
+        var sf = submitFailList[0];
+        var sfDetail = '';
+        try {
+          sfDetail = sf.reason ? sf.reason.message
+            : (sf.value && sf.value.data ? ('admin code=' + sf.value.data.code + ' ' + (sf.value.data.msg || '')) : JSON.stringify(sf.value));
+        } catch (e2) { sfDetail = String(e2); }
         ocdAddLog(2, '第 ' + batchNum + ' 批提交部分失败', submitOk > 0 ? 'warn' : 'error',
-          submitOk + ' 成功 / ' + submitFailList.length + ' 失败 · ' + JSON.stringify(submitFailList[0].reason ? submitFailList[0].reason.message : (submitFailList[0].value && submitFailList[0].value.data)).slice(0, 200));
+          submitOk + ' 成功 / ' + submitFailList.length + ' 失败 · ' + String(sfDetail).slice(0, 200));
         totalFail += submitFailList.length;
       } else {
         ocdAddLog(2, '第 ' + batchNum + ' 批提交成功', 'ok', chunk.length + ' 台');
@@ -458,11 +473,30 @@ async function ocdStartDeploy() {
         var body = deployOverride || { nodeId: id };
         return ocdCallAdmin(token, 'POST', deployPath, '', body);
       }));
-      var deployOk = deployResults.filter(function (r) { return r.status === 'fulfilled' && r.value && r.value.ok; }).length;
-      var deployFailList = deployResults.filter(function (r) { return !(r.status === 'fulfilled' && r.value && r.value.ok); });
+      // 【v18r14 关键修复】不能只看 supabase 层的 ok（那只代表 HTTP 通了）。
+      // admin 业务码在 data.code 里：实测 directDeployment 不认 HMAC、token 失效时会返回
+      // HTTP 200 + {"code":7,"msg":"未登录或非法访问"}，旧逻辑会谎报"部署成功"。
+      var deployOk = deployResults.filter(function (r) {
+        if (!(r.status === 'fulfilled' && r.value && r.value.ok)) return false;
+        var d = r.value.data;
+        return !(d && d.code !== undefined && d.code !== 0);
+      }).length;
+      var deployFailList = deployResults.filter(function (r) {
+        if (!(r.status === 'fulfilled' && r.value && r.value.ok)) return true;
+        var d = r.value.data;
+        return !!(d && d.code !== undefined && d.code !== 0);
+      });
       if (deployFailList.length) {
+        var firstFail = deployFailList[0];
+        var failDetail = '';
+        try {
+          failDetail = firstFail.reason ? firstFail.reason.message
+            : (firstFail.value && firstFail.value.data
+                ? ('admin code=' + firstFail.value.data.code + ' ' + (firstFail.value.data.msg || ''))
+                : JSON.stringify(firstFail.value));
+        } catch (e) { failDetail = String(e); }
         ocdAddLog(3, '第 ' + batchNum + ' 批部署部分失败', deployOk > 0 ? 'warn' : 'error',
-          deployOk + ' 成功 / ' + deployFailList.length + ' 失败 · ' + JSON.stringify(deployFailList[0].reason ? deployFailList[0].reason.message : (deployFailList[0].value && deployFailList[0].value.data)).slice(0, 200));
+          deployOk + ' 成功 / ' + deployFailList.length + ' 失败 · ' + String(failDetail).slice(0, 200));
         totalFail += deployFailList.length;
       } else {
         ocdAddLog(3, '第 ' + batchNum + ' 批部署成功', 'ok', chunk.length + ' 台');

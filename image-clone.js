@@ -848,6 +848,16 @@
     var json = null;
     try { json = await resp.json(); } catch (e) {}
     if (!resp.ok) throw new Error('HTTP ' + resp.status + (json ? ' · ' + (json.msg || JSON.stringify(json)) : ''));
+    // 【v18r14 关键修复】必须检查业务码 code。
+    // 实测：/api/bigDeployLog/directDeployment 用 HMAC 三件套调用时返回 HTTP 200 + {"code":7,"msg":"未登录或非法访问"}
+    // —— 该接口只认 x-token JWT，不认 HMAC。旧代码只看 resp.ok（HTTP 200）就当成功，
+    // 导致日志谎报"已流转到服务中"，实际节点卡在"待配置"。
+    if (json && typeof json === 'object' && json.code !== undefined && json.code !== 0) {
+      var e7 = new Error('admin 业务码 ' + json.code + '：' + (json.msg || JSON.stringify(json).slice(0, 200)));
+      e7.adminCode = json.code;
+      e7.isAuthErr = (json.code === 7 || /未登录|非法访问|unauthorized|未授权/i.test(String(json.msg || '')));
+      throw e7;
+    }
     return json;
   }
 
@@ -876,18 +886,25 @@
         return await icAdminCallHmac(method, path, body);
       } catch (e) {
         hmacErr = e;
-        if (!icIsNetworkErr(e)) {
-          // 业务错（HTTP 4xx 但请求成功到达后端）→ 不 fallback，直接抛
+        // 【v18r14】除了网络/CORS 失败，鉴权失败（code=7 未登录/非法访问）也要 fallback。
+        // 实测 /api/bigDeployLog/directDeployment 不认 HMAC 三件套（只认 x-token JWT），
+        // 旧逻辑把 code=7 当"业务错"直接抛出 → 永远走不到 x-token 通道 → 状态流转永远失败。
+        if (!icIsNetworkErr(e) && !e.isAuthErr) {
+          // 真业务错（请求已到达后端且被正确处理）→ 不 fallback，直接抛
           throw e;
         }
-        // 网络/CORS 失败 → 继续往下走「浏览器直连 x-token」兜底
+        // 网络/CORS/鉴权失败 → 继续往下走「浏览器直连 x-token」兜底
       }
     }
     // ② 浏览器直连 admin.zhouyi.top（x-token 鉴权）— 绕开 supabase 区域出口被屏蔽
     var token = icGetAdminToken();
     if (!token) {
       if (hmacUsed && hmacErr) {
-        throw new Error('HMAC 通道因网络/CORS 失败（' + hmacErr.message + '），且未配置 x-token，无法回退。请在「绑定舟翼云」面板填 Token 或解决 admin CORS。');
+        // v18r14：区分「HMAC 鉴权被拒（该接口只认 x-token）」与「网络/CORS 失败」，提示更精准
+        var why = hmacErr.isAuthErr
+          ? ('HMAC 鉴权被拒（admin code=' + (hmacErr.adminCode || '?') + '，该接口只认 x-token JWT）')
+          : ('HMAC 通道网络/CORS 失败（' + hmacErr.message + '）');
+        throw new Error(why + '，且未配置 x-token，无法回退。请在「绑定舟翼云」面板填 admin Token（登录 admin.zhouyi.top 后从浏览器 localStorage 的 zy_admin_token 取）。');
       }
       throw new Error('未填写 admin Token 也未填 appId/ak/sk 三件套，请二选一');
     }
@@ -1761,7 +1778,14 @@
           });
           submitOk++;
           // 批量部署（directDeployment）：流转「待配置 → 服务中」
-          await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.nodeId });
+          // 【v18r14 关键修复】必须校验返回码。实测该接口不认 HMAC 三件套（只认 x-token JWT），
+          // 会返回 HTTP 200 + {"code":7,"msg":"未登录或非法访问"}；旧代码不校验 → 谎报"已流转"。
+          var dRes = await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.nodeId });
+          var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;
+          if (dCode !== null && dCode !== 0) {
+            throw new Error('directDeployment 返回业务码 ' + dCode + '：' + ((dRes && dRes.msg) || JSON.stringify(dRes).slice(0, 200)) +
+              '\n（该接口只认 x-token JWT，请确认「绑定舟翼云」面板已填 admin Token）');
+          }
           deployOk++;
           successList.push(m);
           log('<span style="color:#389e0d;">✅ ' + m.nodeId + ' 已流转到服务中（业务ID=' + m.businessId + '，SN来源=' + m.snSource + '）</span>');
@@ -1911,8 +1935,14 @@
       st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
       // 步骤 3: directDeployment（流转到「服务中」）
+      // 【v18r14 关键修复】校验业务码：该接口只认 x-token JWT（HMAC 会返回 code:7 未登录）
       st.innerHTML += '<div>🔄 3/3 directDeployment（流转到服务中）...</div>';
       var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId });
+      var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
+      if (c2 !== null && c2 !== 0) {
+        throw new Error('directDeployment 返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
+          '\n（该接口只认 x-token JWT，请确认已填 admin Token）');
+      }
       st.innerHTML += '<div style="color:#389e0d;">✅ directDeployment 成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 
       st.innerHTML += '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;color:#389e0d;font-weight:600;">🎉 ' + nodeId + '（业务ID=' + businessId + '）已流转到「服务中」！请去 admin 后台核对节点状态。</div>';

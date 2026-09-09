@@ -247,13 +247,20 @@ async function ocdSaveBizMap(nodeIds, businessId) {
   } catch (e) {}
 }
 
-/* 自动生成业务ID（参考 106.53：每个部署批次分配唯一业务标识，设备ID↔业务ID一一对应） */
+/* 自动生成业务ID：v18r13 改为真正的 IPES SN 76hex（38 字节随机 = 76 hex 字符），与黄金机业务ID 同格式同长度。
+ * 旧 BIZ+日期+4位 短码会让 admin 后台 businessId 字段丢失长度信息，破坏与机器 ipes 容器 bin/ipes_sn 的对应关系。
+ * 用 crypto.getRandomValues 保证与黄金机/已存在节点零冲突；fallback 用 Math.random。 */
 function ocdGenBusinessId() {
-  var d = new Date();
-  var p = function (n) { return String(n).padStart(2, '0'); };
-  var ymd = '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
-  var rand = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return 'BIZ' + ymd + rand; // 例 BIZ20260830K7Q2
+  try {
+    var bytes = new Uint8Array(38);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    var hex = '';
+    for (var i = 0; i < bytes.length; i++) hex += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+    if (hex.length === 76) return hex;
+  } catch (e) { /* fallback */ }
+  var s = '';
+  while (s.length < 76) s += Math.random().toString(16).slice(2);
+  return s.slice(0, 76);
 }
 function ocdRenderBizMap(filterIds) {
   var el = document.getElementById('ocdBizMap');

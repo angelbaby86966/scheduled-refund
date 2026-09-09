@@ -10,12 +10,22 @@
 
   // ====== 克隆批次业务ID映射（与 one-click-deploy 共享云端 ocd_biz_map 行，kind='clone'）======
   var IC_BIZ_MAP_KEY = 'wb_clone_biz_map';
+  // v18r13：业务ID 必须是真正的 IPES SN 76hex（与黄金机同格式），不再是 BIZ+日期+4位 短码。
+  // 短码写进 admin 后台的 businessId 字段会让 admin 业务ID 列丢失长度信息，破坏与机器 ipes 容器 bin/ipes_sn 的对应关系。
   function icGenBusinessId() {
-    var d = new Date();
-    var p = function (n) { return String(n).padStart(2, '0'); };
-    var ymd = '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
-    var rand = Math.random().toString(36).substring(2, 6).toUpperCase();
-    return 'BIZ' + ymd + rand;
+    // 38 字节随机 = 76 hex 字符 = IPES 业务ID 标准格式（与黄金机 b16390de… 业务ID 同长度同格式）。
+    // crypto.getRandomValues 在所有现代浏览器（含老 IE）都可用；fallback 用 Math.random 双保险。
+    try {
+      var bytes = new Uint8Array(38);
+      (window.crypto || window.msCrypto).getRandomValues(bytes);
+      var hex = '';
+      for (var i = 0; i < bytes.length; i++) hex += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+      if (hex.length === 76) return hex;
+    } catch (e) { /* fallback */ }
+    // 兜底：用 Math.random 拼 76 hex（极少触发，浏览器无 Web Crypto 才走这里）
+    var s = '';
+    while (s.length < 76) s += Math.random().toString(16).slice(2);
+    return s.slice(0, 76);
   }
   function icLoadCloneBizMap() {
     try { return JSON.parse(localStorage.getItem(IC_BIZ_MAP_KEY) || '{}'); } catch (e) { return {}; }
@@ -60,14 +70,20 @@
       return e || {};
     }).filter(function (e) { return e && e.instanceId; });
     if (!norm.length) return;
+    // v18r13：每台克隆机分配独立 IPES SN（76hex），而不是共用一个 biz。
+    // 共享参数 businessId 仅作兜底；如果 entries[i].businessId 已存在则优先使用。
+    norm.forEach(function (e) {
+      if (!e.businessId) e.businessId = businessId || icGenBusinessId();
+    });
     var local = icLoadCloneBizMap();
     var cloud = (window.OcdBizCloud) ? (await window.OcdBizCloud.load() || {}) : {};
     norm.forEach(function (e) {
       var id = e.instanceId;
+      var perBiz = e.businessId;  // 每台实例专属 IPES SN
       // 原值优先：仅当本次提供才覆盖，避免回填 deviceId 时清掉业务ID
       var cur = local[id] || {};
       local[id] = Object.assign({}, cur, {
-        businessId: (businessId != null ? businessId : (cur.businessId || '')),
+        businessId: (perBiz != null ? perBiz : (cur.businessId || '')),
         updatedAt: ts, kind: 'clone',
         region: (region || cur.region || ''), imageId: (imageId || cur.imageId || ''),
         publicIp: e.publicIp || cur.publicIp || '',
@@ -75,7 +91,7 @@
       });
       var cc = cloud[id] || {};
       cloud[id] = Object.assign({}, cc, {
-        businessId: (businessId != null ? businessId : (cc.businessId || '')),
+        businessId: (perBiz != null ? perBiz : (cc.businessId || '')),
         updatedAt: ts, kind: 'clone',
         region: (region || cc.region || ''), imageId: (imageId || cc.imageId || ''),
         publicIp: e.publicIp || cc.publicIp || '',
@@ -83,7 +99,7 @@
       });
       // 若已拿到设备ID，额外以 deviceId 为键建一条（便于按设备维度查业务）
       if (e.deviceId) {
-        cloud[e.deviceId] = { businessId: (businessId != null ? businessId : (cc.businessId || '')), updatedAt: ts, kind: 'clone', deviceId: e.deviceId, instanceId: id, region: region || cc.region || '' };
+        cloud[e.deviceId] = { businessId: (perBiz != null ? perBiz : (cc.businessId || '')), updatedAt: ts, kind: 'clone', deviceId: e.deviceId, instanceId: id, region: region || cc.region || '' };
       }
     });
     try { localStorage.setItem(IC_BIZ_MAP_KEY, JSON.stringify(local)); } catch (e) {}
@@ -633,10 +649,12 @@
         icLog('[镜像克隆] 开通 ' + ids.length + ' 台，但超时未全 Running，未生成业务ID', 'warn');
         return;
       }
-      var biz = icGenBusinessId();
-      var entries = wait.ids.map(function (id) { return { instanceId: id, publicIp: wait.publicIpMap[id] || '' }; });
-      await icSaveCloneBizMap(entries, biz, region, imageId);
-      st.innerHTML += '<div style="color:#389e0d;font-size:12px;margin-top:4px;">🔗 本批业务ID：<b>' + biz + '</b>（' + entries.length + ' 台已到服务中，已对应并云端持久化' + (wait.ids.length < ids.length ? '；' + (ids.length - wait.ids.length) + ' 台未就绪未计入' : '') + '）</div>';
+      var bizBatch = icGenBusinessId();  // 批次号（76hex，统一标记）
+      var entries = wait.ids.map(function (id) {
+        return { instanceId: id, publicIp: wait.publicIpMap[id] || '', businessId: icGenBusinessId() };  // 每台独立 IPES SN
+      });
+      await icSaveCloneBizMap(entries, bizBatch, region, imageId);
+      st.innerHTML += '<div style="color:#389e0d;font-size:12px;margin-top:4px;">🔗 本批业务ID：<b>' + bizBatch.slice(0, 12) + '…</b>（' + entries.length + ' 台已到服务中，每台分配独立 IPES SN 76hex，已云端持久化' + (wait.ids.length < ids.length ? '；' + (ids.length - wait.ids.length) + ' 台未就绪未计入' : '') + '）</div>';
       icLog('[镜像克隆] 已开通 ' + amount + ' 台，镜像=' + imageId + (autoPay ? ' 自动支付' : ' 待支付'), 'success');
     } catch (e) {
       st.innerHTML = '❌ 开通失败: ' + e.message;
@@ -1346,10 +1364,12 @@
         icLog('[镜像克隆] 全流程开通超时未全 Running，未生成业务ID', 'warn');
         return;
       }
-      var biz = icGenBusinessId();
-      var entries2 = wait2.ids.map(function (id) { return { instanceId: id, publicIp: wait2.publicIpMap[id] || '' }; });
-      await icSaveCloneBizMap(entries2, biz, region, newImageId);
-      step('🔗 本批业务ID：<b>' + biz + '</b>（' + entries2.length + ' 台已到服务中，已对应并云端持久化' + (wait2.ids.length < ids.length ? '；' + (ids.length - wait2.ids.length) + ' 台未就绪未计入' : '') + '）');
+      var bizBatch = icGenBusinessId();  // 批次号（76hex，统一标记）
+      var entries2 = wait2.ids.map(function (id) {
+        return { instanceId: id, publicIp: wait2.publicIpMap[id] || '', businessId: icGenBusinessId() };  // 每台独立 IPES SN
+      });
+      await icSaveCloneBizMap(entries2, bizBatch, region, newImageId);
+      step('🔗 本批业务ID：<b>' + bizBatch.slice(0, 12) + '…</b>（' + entries2.length + ' 台已到服务中，每台分配独立 IPES SN 76hex，已云端持久化' + (wait2.ids.length < ids.length ? '；' + (ids.length - wait2.ids.length) + ' 台未就绪未计入' : '') + '）');
       icLog('[镜像克隆] 全流程完成: ' + instId + ' → 镜像 ' + newImageId + ' → 开通 ' + amount + ' 台', 'success');
     } catch (e) {
       step('❌ 流程中断: ' + e.message);

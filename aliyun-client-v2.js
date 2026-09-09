@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.4 - 凭证云端同步(重试)+多ProductCode自动探测', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.5 - 删除命令前等待 invocation 全部结束', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -692,11 +692,89 @@
       return callAliyunApi(regionId, 'DeleteCommand', { RegionId: regionId, CommandId: commandId });
     },
 
+    /** 查询命令执行记录列表（按 CommandId 过滤），自动分页拉全。 */
+    async listCommandInvocations(regionId, commandId) {
+      var all = [];
+      var pageNum = 1;
+      var pageSize = 50;
+      // 防御性兜底 8 页（400 条），超出说明异常，直接跳出
+      while (pageNum <= 8) {
+        var res = await callAliyunApi(regionId, 'DescribeCommandInvocations', {
+          CommandId: commandId,
+          PageNumber: pageNum,
+          PageSize: pageSize,
+        });
+        var invs = (res && (res.Invocations || res.CommandInvocations)) || [];
+        for (var i = 0; i < invs.length; i++) all.push(invs[i]);
+        var total = (res && (res.TotalCount || res.Total)) || 0;
+        if (pageNum * pageSize >= total || invs.length === 0) break;
+        pageNum++;
+      }
+      return all;
+    },
+
+    /** 等待命令模板下所有 invocation 进入终态（Success / Failed / Stopped / StopFailed）。
+     *  Aliyun SWAS 的 DeleteCommand 会在还有 invocation 在 Pending/Running 时返回
+     *  "The specified commandId is in use by some running Invocation"，
+     *  所以删除前必须先把所有 invocation 等到结束。默认最多等 90s，每 3s 查一次。 */
+    async waitCommandInvocationsDone(regionId, commandId, opts) {
+      opts = opts || {};
+      var maxWait = (typeof opts.maxWaitMs === 'number' && opts.maxWaitMs > 0) ? opts.maxWaitMs : 90000;
+      var interval = (typeof opts.intervalMs === 'number' && opts.intervalMs > 0) ? opts.intervalMs : 3000;
+      var deadline = Date.now() + maxWait;
+      var terminal = { Success: 1, Failed: 1, Stopped: 1, StopFailed: 1 };
+      var emptyRound = 0;
+      while (Date.now() < deadline) {
+        try {
+          var invs = await this.listCommandInvocations(regionId, commandId);
+          if (!invs.length) {
+            emptyRound++;
+            // 连续 2 次查不到记录，说明模板无 invocation，可直接删
+            if (emptyRound >= 2) {
+              __runCommandLog('ℹ️ 命令模板 ' + commandId + ' 无 invocation 记录，可直接删除', 'info');
+              return true;
+            }
+          } else {
+            emptyRound = 0;
+            var pending = 0;
+            for (var i = 0; i < invs.length; i++) {
+              var st = invs[i].Status || invs[i].InvocationStatus || '';
+              if (!terminal[st]) pending++;
+            }
+            if (pending === 0) {
+              __runCommandLog('✅ 命令模板 ' + commandId + ' 的 ' + invs.length + ' 条 invocation 全部结束', 'info');
+              return true;
+            }
+            __runCommandLog('⏳ 命令模板 ' + commandId + ' 还有 ' + pending + '/' + invs.length + ' 条 invocation 在执行中，继续等待...', 'info');
+          }
+        } catch (qerr) {
+          __runCommandLog('⚠️ 查询 invocation 状态失败: ' + (qerr.message || qerr) + '，继续重试', 'warn');
+        }
+        await new Promise(function(r) { setTimeout(r, interval); });
+      }
+      __runCommandLog('⚠️ 命令模板 ' + commandId + ' 等待 invocation 结束超时（已等 ' + Math.round(maxWait / 1000) + 's），尝试强行删除', 'warn');
+      return false;
+    },
+
     /** 删除临时命令模板（带重试兜底）：自定义命令执行完必须清掉，避免残留到命令助手。
-     *  最多重试 3 次，每次退避 800ms；全部失败才放弃（仅打 warning，不影响主流程）。 */
-    async deleteCommandWithRetry(regionId, commandId, maxRetry) {
-      var retries = (typeof maxRetry === 'number' && maxRetry > 0) ? maxRetry : 3;
+     *  v2.5：删除前主动等待结束（处理"commandId is in use by some running Invocation"）。
+     *  最多重试 5 次，每次退避 1.5s；全部失败才放弃（仅打 warning，不影响主流程）。 */
+    async deleteCommandWithRetry(regionId, commandId, opts) {
+      opts = opts || {};
+      var retries = (typeof opts.maxRetry === 'number' && opts.maxRetry > 0) ? opts.maxRetry : 5;
       var lastErr = null;
+
+      // 1) 先等待所有 invocation 进入终态
+      try {
+        await this.waitCommandInvocationsDone(regionId, commandId, {
+          maxWaitMs: opts.waitMs || 90000,
+          intervalMs: opts.pollMs || 3000,
+        });
+      } catch (waitErr) {
+        __runCommandLog('⚠️ 等待 invocation 结束异常: ' + (waitErr.message || waitErr) + '，继续尝试删除', 'warn');
+      }
+
+      // 2) 重试删除
       for (var attempt = 1; attempt <= retries; attempt++) {
         try {
           await this.deleteCommand(regionId, commandId);
@@ -704,9 +782,16 @@
           return true;
         } catch (delErr) {
           lastErr = delErr;
-          __runCommandLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + (delErr.message || delErr), 'warn');
+          var msg = (delErr.message || String(delErr));
+          // 如果错误是 "in use" 类型，额外等待一波 invocation 再重试
+          if (/in use by some running Invocation|commandId is in use/i.test(msg) && attempt < retries) {
+            __runCommandLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + msg + '，等待 invocation 结束...', 'warn');
+            try { await this.waitCommandInvocationsDone(regionId, commandId, { maxWaitMs: 30000, intervalMs: 2000 }); } catch (e) {}
+          } else {
+            __runCommandLog('⚠️ 删除临时命令模板 ' + commandId + ' 失败（第 ' + attempt + '/' + retries + ' 次）: ' + msg, 'warn');
+          }
           if (attempt < retries) {
-            await new Promise(function(r) { setTimeout(r, 800 * attempt); });
+            await new Promise(function(r) { setTimeout(r, 1500 * attempt); });
           }
         }
       }

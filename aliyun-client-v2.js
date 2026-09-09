@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.6 - fire-and-forget 模板清理(不等 invocation)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.6.1 - 后台 cleanup 真清干净(等 invocation ≤3min + delete 12×2s)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -603,24 +603,54 @@
       return invokeRes;
     },
 
-    /** 后台异步清理命令模板：fire-and-forget，不阻塞调用方。
-     *  4 次快速重试，退避 300/600/900ms；失败就认（残留不影响命令执行）。 */
+    /** 后台异步清理命令模板：fire-and-forget，但真正"清干净"——先等到 invocation 结束，再持续重试 delete。
+     *  v2.6.1：上次只重试 4 次就认，会有残留。本次加重：后台等 invocation ≤3 分钟，delete 重试 12 次×2s。
+     *  主流程仍立即返回，不阻塞用户；删除逻辑丢到后台慢慢做。 */
     _commandCleanup(regionId, commandId) {
       var self = this;
+      // 启动错开：1s + 0~10s 随机，避免一次跑上千台时 cleanup 同时打 QPS
+      var initialDelay = 1000 + Math.floor(Math.random() * 10000);
       setTimeout(function() {
         (async function() {
-          for (var attempt = 1; attempt <= 4; attempt++) {
-            try {
-              await self.deleteCommand(regionId, commandId);
-              __runCommandLog('🗑️ 已清理命令模板 ' + commandId + '（后台）', 'info');
-              return;
-            } catch (e) {
-              if (attempt < 4) await new Promise(function(r) { setTimeout(r, 300 * attempt); });
+          try {
+            // 1) 后台等 invocation 全部进终态（最多 3 分钟）。这个过程不阻塞主流程。
+            var maxWaitMs = 180000;
+            var intervalMs = 3000;
+            var deadline = Date.now() + maxWaitMs;
+            var terminal = { Success: 1, Failed: 1, Stopped: 1, StopFailed: 1 };
+            while (Date.now() < deadline) {
+              var allDone = false;
+              try {
+                var invs = await self.listCommandInvocations(regionId, commandId);
+                if (!invs.length) { allDone = true; }
+                else {
+                  allDone = true;
+                  for (var i = 0; i < invs.length; i++) {
+                    var st = invs[i].Status || invs[i].InvocationStatus || '';
+                    if (!terminal[st]) { allDone = false; break; }
+                  }
+                }
+              } catch (qErr) {
+                // 查不到就视为结束，靠后面 delete 重试兜底
+                allDone = true;
+              }
+              if (allDone) break;
+              await new Promise(function(r) { setTimeout(r, intervalMs); });
             }
-          }
-          __runCommandLog('ℹ️ 命令模板 ' + commandId + ' 残留于云助手控制台（不影响命令执行，可忽略）', 'info');
-        })().catch(function() {});
-      }, 800);
+            // 2) 持续重试 deleteCommand 直到成功（最多 12 次×2s）
+            for (var attempt = 1; attempt <= 12; attempt++) {
+              try {
+                await self.deleteCommand(regionId, commandId);
+                __runCommandLog('🗑️ 已清理命令模板 ' + commandId + '（后台）', 'info');
+                return;
+              } catch (delErr) {
+                if (attempt < 12) await new Promise(function(r) { setTimeout(r, 2000); });
+              }
+            }
+            __runCommandLog('⚠️ 命令模板 ' + commandId + ' 后台 3 分钟仍残留，可手动清理', 'warn');
+          } catch (e) { /* 静默 */ }
+        })();
+      }, initialDelay);
     },
 
     /** 重启单台实例（走 Edge Function 代理） */

@@ -464,13 +464,16 @@ async function ocdStartDeploy() {
       totalSubmitOk += submitOk;
       if (submitFailList.length) continue; // 提交失败的批不再部署
 
-      // 步骤3：批量部署  →  POST /api/bigDeployLog/directDeployment（admin 前端"上机小助手-批量部署"真实接口）
+      // 步骤3：批量部署  →  状态流转（待配置 → 服务中）
+      // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）
       var deployPath = '/api/bigDeployLog/directDeployment';
       if (deployOverride) {
         try { deployOverride = JSON.parse(deployOverride); } catch (e) { ocdAddLog(3, '部署请求体 JSON 解析失败', 'error', e.message); throw e; }
       }
       var deployResults = await Promise.allSettled(chunk.map(function (id) {
-        var body = deployOverride || { nodeId: id };
+        // 自动从 clone biz map 或顶部 businessId 取值；如都没填则用 nodeId 占位（admin 会返回错误并提示）
+        var bid = cfg.businessId || (window.icLoadCloneBizMap && (function(){ var m = window.icLoadCloneBizMap()[id] || {}; return m.businessId || id; })()) || id;
+        var body = deployOverride || { nodeId: id, businessId: bid, status: '服务中' };
         return ocdCallAdmin(token, 'POST', deployPath, '', body);
       }));
       // 【v18r14 关键修复】不能只看 supabase 层的 ok（那只代表 HTTP 通了）。

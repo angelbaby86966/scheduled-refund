@@ -1845,14 +1845,23 @@
             bwNum: cfg.bwNum,
           });
           submitOk++;
-          // 批量部署（directDeployment）：流转「待配置 → 服务中」
-          // 【v18r14 关键修复】必须校验返回码。实测该接口不认 HMAC 三件套（只认 x-token JWT），
-          // 会返回 HTTP 200 + {"code":7,"msg":"未登录或非法访问"}；旧代码不校验 → 谎报"已流转"。
-          var dRes = await adminFn('POST', '/api/bigDeployLog/directDeployment', { nodeId: m.nodeId });
+          // 批量部署（状态流转）：待配置 → 服务中
+          // 【v18r16 关键修复】请求体必须含 { nodeId, businessId, status: "服务中" }（对齐 transition_to_service.sh 模板）。
+          // 旧代码只发 { nodeId } → admin 报 "未选择期望业务"（code:7）。
+          // 默认 endpoint = /api/bigDeployLog/directDeployment（已实测可被 x-token JWT 鉴权到业务层），如不通可在「高级部署请求体」覆盖 path
+          var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || '/api/bigDeployLog/directDeployment';
+          var deployBody;
+          if (cfg.deployBodyOverride) {
+            try { deployBody = JSON.parse(cfg.deployBodyOverride); } catch (e) { deployBody = null; }
+          }
+          if (!deployBody) {
+            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: '服务中' };
+          }
+          var dRes = await adminFn('POST', deployPath, deployBody);
           var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;
           if (dCode !== null && dCode !== 0) {
-            throw new Error('directDeployment 返回业务码 ' + dCode + '：' + ((dRes && dRes.msg) || JSON.stringify(dRes).slice(0, 200)) +
-              '\n（该接口只认 x-token JWT，请确认「绑定舟翼云」面板已填 admin Token）');
+            throw new Error('状态流转返回业务码 ' + dCode + '：' + ((dRes && dRes.msg) || JSON.stringify(dRes).slice(0, 200)) +
+              '（POST ' + deployPath + ' body=' + JSON.stringify(deployBody) + '）');
           }
           deployOk++;
           successList.push(m);
@@ -2006,16 +2015,16 @@
       });
       st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
-      // 步骤 3: directDeployment（流转到「服务中」）
-      // 【v18r14 关键修复】校验业务码：该接口只认 x-token JWT（HMAC 会返回 code:7 未登录）
-      st.innerHTML += '<div>🔄 3/3 directDeployment（流转到服务中）...</div>';
-      var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId });
+      // 步骤 3: 状态流转（待配置 → 服务中）
+      // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）
+      st.innerHTML += '<div>🔄 3/3 状态流转（流转到服务中）...</div>';
+      var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId, businessId: businessId, status: '服务中' });
       var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
       if (c2 !== null && c2 !== 0) {
-        throw new Error('directDeployment 返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
-          '\n（该接口只认 x-token JWT，请确认已填 admin Token）');
+        throw new Error('状态流转返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
+          '（POST /api/bigDeployLog/directDeployment body={nodeId, businessId, status:"服务中"}）');
       }
-      st.innerHTML += '<div style="color:#389e0d;">✅ directDeployment 成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
+      st.innerHTML += '<div style="color:#389e0d;">✅ 状态流转成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 
       st.innerHTML += '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;color:#389e0d;font-weight:600;">🎉 ' + nodeId + '（业务ID=' + businessId + '）已流转到「服务中」！请去 admin 后台核对节点状态。</div>';
       icLog('[镜像克隆] 已知 deviceCode 流转成功 ' + nodeId + ' → businessId=' + businessId, 'success');

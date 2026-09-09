@@ -30,6 +30,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 仅当脚本确实写出了状态文件时才提交（绝大多数轮次无退订 → 文件不存在 → 正常跳过，
+          # 之前用 git add 直接报 pathspec fatal，导致整轮被标记 failure）
+          if [ ! -f refund_state.json ]; then
+            echo "refund_state.json 不存在（本次无退订发生），跳过提交"
+            exit 0
+          fi
           git add refund_state.json
           if git diff --cached --quiet; then
             echo "refund_state.json 无变化，跳过提交"

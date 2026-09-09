@@ -42,9 +42,12 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ===================== 配置 =====================
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vgddxxgjcogxcpiycsej.supabase.co")
+# ⚠️ 2026-09-09 修复：必须与前端 cloud-store.js 使用同一个 Supabase 项目！
+# 之前默认指向旧项目 vgddxxgjcogxcpiycsej，而前端把 schedule_enabled/AK/SK
+# 写在 opauwtkivhjxlijfqaix —— 脚本读旧库永远读不到定时任务，导致「关浏览器就不退」。
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://opauwtkivhjxlijfqaix.supabase.co")
 SUPABASE_ANON_KEY = os.environ.get(
-    "SUPABASE_ANON_KEY", "sb_publishable_AqRbhxlzaDzPNR1nZTw-4A_c1VQ1Nch"
+    "SUPABASE_ANON_KEY", "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
 )
 REST_BASE = SUPABASE_URL.rstrip("/") + "/rest/v1"
 

@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.5 - 删除命令前等待 invocation 全部结束', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.6 - fire-and-forget 模板清理(不等 invocation)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -571,14 +571,16 @@
       return callAliyunApi(regionId, 'InvokeCommand', params);
     },
 
-    /** 批量在多台实例上执行自定义命令（SWAS：先 CreateCommand 创建模板拿到 CommandId，再 InvokeCommand 执行；单次最多 100 台，走 callAliyunApi 绕开 aliyun-proxy 的 action 白名单）。instanceIds 可为数组或单个字符串。 */
+    /** 批量在多台实例上执行自定义命令（SWAS：先 CreateCommand 创建模板拿到 CommandId，再 InvokeCommand 执行；单次最多 100 台）。
+     *  v2.6 极速版：不等 invocation 结束，模板清理改为 fire-and-forget。
+     *  SWAS InvokeCommand 强制要 CommandId 无法绕过；但"清理模板"这一步是辅助，可以异步、不阻塞、不退避重试。
+     *  调用方感受：1) CreateCommand → 2) InvokeCommand → 3) 返回 invoke 结果。一次调用从 ~100s 砍到 ~1s。 */
     async runCommandOnInstance(regionId, instanceIds, opts) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
       var ids = Array.isArray(instanceIds) ? instanceIds : [instanceIds];
       if (ids.length === 0) throw new Error('实例列表为空');
       if (ids.length > 100) throw new Error('SWAS InvokeCommand 单次最多 100 台，请分批调用');
-      // SWAS InvokeCommand 必须传 CommandId，不能直接用 CommandContent。先创建命令模板。
       var createParams = {
         name: opts.name || ('custom-' + Date.now()),
         type: opts.type || 'RunShellScript',
@@ -590,20 +592,35 @@
       var cmdRes = await this.createCommand(regionId, createParams);
       var commandId = cmdRes && cmdRes.CommandId;
       if (!commandId) throw new Error('CreateCommand 未返回 CommandId');
-      __runCommandLog('📝 创建临时命令模板 CommandId=' + commandId, 'info');
+      __runCommandLog('📝 创建命令模板 CommandId=' + commandId + '（' + ids.length + ' 台）', 'info');
 
-      try {
-        var invokeRes = await this.invokeCommand(regionId, commandId, ids);
-        // 稍等再删，确保 InvokeCommand 已落盘
-        await new Promise(function(r) { setTimeout(r, 1000); });
-        await this.deleteCommandWithRetry(regionId, commandId);
-        return invokeRes;
-      } catch (invokeErr) {
-        // 即使 invoke 失败也尝试清理模板（带重试兜底）
-        await new Promise(function(r) { setTimeout(r, 200); });
-        await this.deleteCommandWithRetry(regionId, commandId);
-        throw invokeErr;
-      }
+      // v2.6：后台异步清理（不等 invocation 结束，调用方立即返回；模板残留在云助手控制台不影响业务）
+      this._commandCleanup(regionId, commandId);
+
+      // 直接 invoke，立即返回结果
+      var invokeRes = await this.invokeCommand(regionId, commandId, ids);
+      __runCommandLog('📡 ' + ids.length + ' 台已下发，模板后台清理中', 'info');
+      return invokeRes;
+    },
+
+    /** 后台异步清理命令模板：fire-and-forget，不阻塞调用方。
+     *  4 次快速重试，退避 300/600/900ms；失败就认（残留不影响命令执行）。 */
+    _commandCleanup(regionId, commandId) {
+      var self = this;
+      setTimeout(function() {
+        (async function() {
+          for (var attempt = 1; attempt <= 4; attempt++) {
+            try {
+              await self.deleteCommand(regionId, commandId);
+              __runCommandLog('🗑️ 已清理命令模板 ' + commandId + '（后台）', 'info');
+              return;
+            } catch (e) {
+              if (attempt < 4) await new Promise(function(r) { setTimeout(r, 300 * attempt); });
+            }
+          }
+          __runCommandLog('ℹ️ 命令模板 ' + commandId + ' 残留于云助手控制台（不影响命令执行，可忽略）', 'info');
+        })().catch(function() {});
+      }, 800);
     },
 
     /** 重启单台实例（走 Edge Function 代理） */

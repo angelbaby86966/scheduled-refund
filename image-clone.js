@@ -1190,8 +1190,9 @@
       if (reusedExisting) step('✅ 复用已有镜像，直接进入开通环节');
       var lastInfo = '';
       var scannedRegions = {};  // 跨地域扫描结果
+      var crossScanDone = false;  // 跨地域扫描已做过一次（命中/未命中都不再重复，等主地域先出现）
       for (var i = 0; i < 90; i++) {
-        await icSleep(10000);
+        await icSleep(5000);  // 【加速】10s → 5s 轮询间隔（最多 7.5 分钟）
         var lr;
         try {
           lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
@@ -1230,43 +1231,50 @@
           if (i === 0 || (i + 1) % 10 === 0) {
             step('🔍 [' + region + '] ListImages 返回前 3 个：' + JSON.stringify(imgs.slice(0, 3)).slice(0, 600));
           }
-          // 跨地域扫描：主地域一直空时（每 3 轮一次），9 个地域挨个查一遍
-          // 因为阿里云 SWAS 镜像有时会路由到创建实例所在地域（不一定等于 RegionId 参数）
-          if (i > 0 && i % 3 === 0 && imgs.length === 0) {
-            step('🌐 主地域 [' + region + '] 一直空，开始跨地域扫描（9 个地域）...');
-            for (var ri = 0; ri < allRegions.length; ri++) {
-              var rid = allRegions[ri];
-              if (rid === region) continue;
-              try {
-                var lrx = await AliyunClient.callCentralApi('ListImages', { RegionId: rid, ImageType: 'custom' });
-                var imgsx = icParseImgs(lrx);
-                scannedRegions[rid] = imgsx.length;
-                var hit = imgsx.filter(function (im) {
+          // 【加速】跨地域扫描：只在主地域持续空时做一次（命中或不命中都不重复），并发查所有其他地域
+          // 实测 SWAS CreateCustomImage 通常在创建地域，跨地域是兜底防御 —— 做一次够用。
+          if (i >= 4 && !crossScanDone && imgs.length === 0) {
+            crossScanDone = true;
+            step('🌐 主地域 [' + region + '] 一直空，并发扫描其他 8 个地域...');
+            try {
+              var crossResults = await Promise.all(allRegions.filter(function (rid) { return rid !== region; }).map(function (rid) {
+                return Promise.race([
+                  AliyunClient.callCentralApi('ListImages', { RegionId: rid, ImageType: 'custom' })
+                    .then(function (lrx) { return { rid: rid, imgs: icParseImgs(lrx), err: null }; })
+                    .catch(function (ex) { return { rid: rid, imgs: [], err: ex.message }; }),
+                  // 8 秒兜底超时：防 supabase aliyun-proxy Edge Function 自己 30-60s 超时拖死整轮
+                  new Promise(function (resolve) { setTimeout(function () { resolve({ rid: rid, imgs: [], err: 'timeout8s' }); }, 8000); })
+                ]);
+              }));
+              crossResults.forEach(function (r) { scannedRegions[r.rid] = r.imgs.length; });
+              step('📊 跨地域扫描结果：' + Object.keys(scannedRegions).map(function (k) { return k + '=' + scannedRegions[k]; }).join(' / '));
+              var hit = null;
+              crossResults.forEach(function (r) {
+                if (hit) return;
+                var cand = r.imgs.filter(function (im) {
                   var iid = (im.ImageId || '').replace(/^m-/, '');
                   return (nid && iid === nid) || im.ImageName === imageName;
                 })[0];
-                if (hit) {
-                  var s2 = (hit.Status || hit.status || hit.ImageStatus || '').toString();
-                  step('🎯 跨地域命中！实际 RegionId=' + rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
-                  if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
-                    region = rid; newImageId = hit.ImageId || newImageId; ready = true;
-                    step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/90 轮）');
-                    break;
-                  }
-                  if (/fail|error/i.test(s2)) {
-                    step('❌ 镜像创建失败（跨地域找到）：' + JSON.stringify(hit).slice(0, 400));
-                    return;
-                  }
-                  // 找到但未就绪：切换到该 region 继续轮询
-                  region = rid;
-                  step('🔄 已切换轮询 region 到 ' + rid + '，继续等待就绪...');
+                if (cand) hit = { rid: r.rid, img: cand };
+              });
+              if (hit) {
+                var s2 = (hit.img.Status || hit.img.status || hit.img.ImageStatus || '').toString();
+                step('🎯 跨地域命中！实际 RegionId=' + hit.rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
+                if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
+                  region = hit.rid; newImageId = hit.img.ImageId || newImageId; ready = true;
+                  step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/90 轮）');
+                  break;
                 }
-              } catch (ex) {
-                /* 该地域无权限或报错，跳过 */
+                if (/fail|error/i.test(s2)) {
+                  step('❌ 镜像创建失败（跨地域找到）：' + JSON.stringify(hit.img).slice(0, 400));
+                  return;
+                }
+                region = hit.rid;
+                step('🔄 已切换轮询 region 到 ' + hit.rid + '，继续等待就绪...');
               }
+            } catch (ex2) {
+              step('⚠️ 跨地域扫描整体异常：' + ex2.message);
             }
-            if (ready) break;
-            step('📊 跨地域扫描结果：' + Object.keys(scannedRegions).map(function (k) { return k + '=' + scannedRegions[k]; }).join(' / '));
           }
         }
       }

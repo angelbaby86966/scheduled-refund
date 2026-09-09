@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>admin 状态流转接口探测</title>
+<style>body{font-family:monospace;padding:20px;max-width:900px;margin:0 auto}
+button{padding:8px 16px;background:#1677ff;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:4px}
+input{padding:6px;width:100%;font-family:monospace;font-size:12px;margin:4px 0}
+pre{background:#f5f5f5;padding:10px;border-radius:4px;font-size:11px;white-space:pre-wrap;word-break:break-all;margin:4px 0}
+.row{border-bottom:1px solid #eee;padding:8px 0}
+.ok{color:#389e0d}.err{color:#cf1322}</style>
+</head><body>
+<h3>🔍 admin 状态流转接口探测</h3>
+<p>填入 admin Token + 目标 nodeId + businessId（IPES SN），逐个试常见 endpoint path。</p>
+<label>admin Token (x-token)</label><input id="tok" placeholder="eyJ...">
+<label>nodeId (32hex 舟翼云设备ID)</label><input id="node" value="6d35207bd995198c027531cc08c29b3">
+<label>businessId (76hex IPES SN)</label><input id="biz" value="a4dc0c2717743cc6bbfafe31735bdfb7b491f5779767b2ddf1bdc1d31b94ed0e8fe4c5be270c">
+<label>ownerId</label><input id="own" value="3666">
+<button onclick="probe()">🚀 开始探测</button>
+<div id="out"></div>
+<script>
+async function probe() {
+  const tok = document.getElementById('tok').value.trim();
+  const nodeId = document.getElementById('node').value.trim();
+  const businessId = document.getElementById('biz').value.trim();
+  const ownerId = document.getElementById('own').value.trim();
+  if (!tok) { alert('请先填 admin Token'); return; }
+  const out = document.getElementById('out');
+  out.innerHTML = '<div>⏳ 探测中（5 个候选）...</div>';
+  const probes = [
+    ['POST', '/api/bigDeployLog/directDeployment', { nodeId, businessId, status: '服务中' }],
+    ['POST', '/api/edgeNode/directDeployment', { nodeId, businessId, status: '服务中' }],
+    ['POST', '/api/edgeNode/transitionToService', { nodeId, businessId, status: '服务中' }],
+    ['POST', '/api/edgeNode/changeStatus', { nodeId, businessId, status: '服务中' }],
+    ['POST', '/api/edgeNode/directTransition', { nodeId, businessId, status: '服务中' }],
+  ];
+  const results = [];
+  for (const [method, path, body] of probes) {
+    try {
+      const r = await fetch('https://admin.zhouyi.top' + path, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'x-token': tok, 'ownerId': ownerId, 'X-Owner-Id': ownerId },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json().catch(() => null);
+      const code = j ? (j.code !== undefined ? j.code : (j.status !== undefined ? j.status : '?')) : '?';
+      const ok = code === 0 || code === '0';
+      const cls = ok ? 'ok' : 'err';
+      results.push(`<div class="row"><b class="${cls}">${ok?'✅':'❌'} ${method} ${path}</b><br>HTTP ${r.status} code=${code}<br><pre>${JSON.stringify(j).slice(0,400)}</pre></div>`);
+    } catch (e) {
+      results.push(`<div class="row err">❌ ${method} ${path} → ERR: ${e.message}</div>`);
+    }
+  }
+  out.innerHTML = results.join('') + '<div style="margin-top:16px;color:#999;font-size:12px">📌 把 ✅ 那一行的 endpoint path（POST …）复制给我，我直接修代码</div>';
+}
+</script>
+</body></html>

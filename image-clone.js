@@ -39,27 +39,95 @@
     var rows = ids.map(function (id) {
       var b = map[id];
       var dev = b.deviceId ? ('<span style="color:#389e0d;">' + b.deviceId + '</span>') : '<span style="color:#bbb;">—</span>';
-      return '<tr>' +
-        '<td style="padding:4px 8px;font-family:monospace;border-top:1px solid #eee;">' + id + '</td>' +
-        '<td style="padding:4px 8px;font-weight:600;color:#0050b3;border-top:1px solid #eee;">' + b.businessId + '</td>' +
-        '<td style="padding:4px 8px;font-family:monospace;color:#666;font-size:12px;border-top:1px solid #eee;">' + (b.publicIp || '—') + '</td>' +
-        '<td style="padding:4px 8px;border-top:1px solid #eee;">' + dev + '</td>' +
-        '<td style="padding:4px 8px;color:#888;font-size:12px;border-top:1px solid #eee;">' + (b.region || '') + '</td>' +
-        '<td style="padding:4px 8px;color:#999;font-size:12px;border-top:1px solid #eee;">' + (b.updatedAt || '') + '</td>' +
+      // 转义 attr 防 XSS
+      var safeId = String(id).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+      return '<tr data-iid="' + safeId + '">' +
+        '<td style="padding:3px 6px;border-top:1px solid #eee;"><input type="checkbox" class="ic-biz-chk" data-iid="' + safeId + '" onchange="window.icBizUpdateBar && icBizUpdateBar()" /></td>' +
+        '<td style="padding:3px 6px;font-family:monospace;border-top:1px solid #eee;font-size:12px;">' + id + '</td>' +
+        '<td style="padding:3px 6px;font-weight:600;color:#0050b3;border-top:1px solid #eee;font-size:12px;">' + b.businessId + '</td>' +
+        '<td style="padding:3px 6px;font-family:monospace;color:#666;font-size:11px;border-top:1px solid #eee;">' + (b.publicIp || '—') + '</td>' +
+        '<td style="padding:3px 6px;border-top:1px solid #eee;font-size:12px;">' + dev + '</td>' +
+        '<td style="padding:3px 6px;color:#888;font-size:11px;border-top:1px solid #eee;">' + (b.region || '') + '</td>' +
+        '<td style="padding:3px 6px;color:#999;font-size:11px;border-top:1px solid #eee;">' + (b.updatedAt || '') + '</td>' +
         '</tr>';
     }).join('');
-    el.innerHTML = '<div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:10px;margin-top:10px;">' +
-      '<div style="font-weight:600;font-size:13px;margin-bottom:8px;">🔗 克隆实例ID ↔ 业务ID 一一对应（共 ' + ids.length + ' 台）</div>' +
-      '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
-      '<thead><tr style="background:#e6f7ff;">' +
-      '<th style="padding:4px 8px;text-align:left;">实例ID (swas)</th>' +
-      '<th style="padding:4px 8px;text-align:left;">业务ID</th>' +
-      '<th style="padding:4px 8px;text-align:left;">公网IP</th>' +
-      '<th style="padding:4px 8px;text-align:left;">设备ID(舟翼云)</th>' +
-      '<th style="padding:4px 8px;text-align:left;">地域</th>' +
-      '<th style="padding:4px 8px;text-align:left;">更新时间</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody></table>' +
+    el.innerHTML = '<div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:8px;margin-top:10px;">' +
+      // 工具栏：全选 + 删除 + 选中数
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;">' +
+        '<label style="cursor:pointer;user-select:none;"><input type="checkbox" id="icBizChkAll" onchange="window.icBizToggleAll(this.checked)" /> 全选</label>' +
+        '<button type="button" onclick="window.icBizDeleteSelected()" ' +
+          'style="background:#ff4d4f;color:#fff;border:0;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px;" ' +
+          'id="icBizDelBtn" disabled>🗑️ 删除选中</button>' +
+        '<span id="icBizSelCount" style="color:#888;">共 ' + ids.length + ' 台</span>' +
+      '</div>' +
+      // 滚动容器：max-height 220px（约 5 行），超出滚动
+      '<div style="max-height:220px;overflow-y:auto;border:1px solid #e8e8e8;border-radius:4px;background:#fff;">' +
+        '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+        '<thead><tr style="background:#e6f7ff;position:sticky;top:0;z-index:1;">' +
+        '<th style="padding:4px 6px;width:28px;"></th>' +
+        '<th style="padding:4px 6px;text-align:left;">实例ID (swas)</th>' +
+        '<th style="padding:4px 6px;text-align:left;">业务ID</th>' +
+        '<th style="padding:4px 6px;text-align:left;">公网IP</th>' +
+        '<th style="padding:4px 6px;text-align:left;">设备ID(舟翼云)</th>' +
+        '<th style="padding:4px 6px;text-align:left;">地域</th>' +
+        '<th style="padding:4px 6px;text-align:left;">更新时间</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table>' +
+      '</div>' +
       '<div style="font-size:11px;color:#999;margin-top:6px;">绑定舟翼云后，按公网IP 自动回填「设备ID(舟翼云)」并写入克隆机 /usr/local/edge/business_id；同一业务ID 也会在「🚀 一键部署」标签以 kind=deploy 对应节点设备ID。</div></div>';
+  }
+
+  // ====== 表格多选辅助函数（v18r15）======
+  // 全选/取消全选
+  function icBizToggleAll(checked) {
+    document.querySelectorAll('#icBizMap .ic-biz-chk').forEach(function (cb) { cb.checked = checked; });
+    icBizUpdateBar();
+  }
+  // 刷新工具栏：删除按钮启用状态 + 选中数
+  function icBizUpdateBar() {
+    var checks = document.querySelectorAll('#icBizMap .ic-biz-chk');
+    var sel = 0;
+    checks.forEach(function (cb) { if (cb.checked) sel++; });
+    var btn = document.getElementById('icBizDelBtn');
+    var cnt = document.getElementById('icBizSelCount');
+    var all = document.getElementById('icBizChkAll');
+    if (btn) btn.disabled = (sel === 0);
+    if (cnt) cnt.textContent = '共 ' + checks.length + ' 台，已选 ' + sel + ' 台';
+    if (all) all.checked = (sel === checks.length && checks.length > 0);
+  }
+  // 批量删除选中行（localStorage + 云端 OcdBizCloud）
+  async function icBizDeleteSelected() {
+    var checks = document.querySelectorAll('#icBizMap .ic-biz-chk:checked');
+    if (!checks.length) return;
+    var ids = Array.from(checks).map(function (cb) { return cb.getAttribute('data-iid'); });
+    if (!confirm('确定要删除选中的 ' + ids.length + ' 条克隆映射？\n\n' +
+        '⚠️ 仅删除本地缓存 + 云端 ocd_biz_map 中 kind=clone 的映射行；\n' +
+        '不会影响 admin 后台节点、阿里云实例、机器 IPES 业务。\n\n实例列表：\n' + ids.slice(0, 5).join('\n') + (ids.length > 5 ? '\n…（还有 ' + (ids.length - 5) + ' 条）' : ''))) return;
+    var local = icLoadCloneBizMap();
+    var removed = 0;
+    ids.forEach(function (id) {
+      if (local[id]) { delete local[id]; removed++; }
+    });
+    try { localStorage.setItem(IC_BIZ_MAP_KEY, JSON.stringify(local)); } catch (e) {}
+    // 云端同步删：OcdBizCloud.upsertMerge 是整份替换（不是 patch），所以要 load → 本地删 → upsert
+    if (window.OcdBizCloud && window.OcdBizCloud.load && window.OcdBizCloud.upsertMerge) {
+      try {
+        var cloud = (await window.OcdBizCloud.load()) || {};
+        var cloudChanged = false;
+        // 按 instanceId 删
+        ids.forEach(function (id) {
+          if (cloud[id] && cloud[id].kind === 'clone') { delete cloud[id]; cloudChanged = true; }
+        });
+        // 按 deviceId 索引的克隆行也清（防孤儿）
+        Object.keys(cloud).forEach(function (k) {
+          if (cloud[k] && cloud[k].kind === 'clone' && cloud[k].instanceId && ids.indexOf(cloud[k].instanceId) >= 0) {
+            delete cloud[k]; cloudChanged = true;
+          }
+        });
+        if (cloudChanged) await window.OcdBizCloud.upsertMerge(cloud);
+      } catch (e) { /* 云端失败不影响本地 */ }
+    }
+    icRenderCloneBizMap();
+    try { icLog('[image-clone] 已删除克隆映射 ' + removed + ' 条', 'info'); } catch (e) {}
   }
   // entries: [{instanceId, publicIp?, deviceId?}]  或退化为 string[]（旧调用兼容）
   async function icSaveCloneBizMap(entries, businessId, region, imageId) {
@@ -1826,6 +1894,10 @@
   window.icBindAndDeploy = icBindAndDeploy;
   window.icBindToggleAll = icBindToggleAll;
   window.icQueryEdgeDetail = icQueryEdgeDetail;   // 查 admin 后端节点详情（含 businessId）
+  // v18r15：克隆映射表多选/删除/全选辅助函数
+  window.icBizToggleAll = icBizToggleAll;
+  window.icBizUpdateBar = icBizUpdateBar;
+  window.icBizDeleteSelected = icBizDeleteSelected;
   // 手动指定 nodeId 查详情（默认填 f670e4ea965c392ef44dca557b320a43）
   async function icQuerySelectedEdgeDetail() {
     var st = document.getElementById('icBindStatus');

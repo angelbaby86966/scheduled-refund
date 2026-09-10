@@ -879,21 +879,27 @@
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
   // 前端用 Web Crypto API 实现（浏览器原生，无依赖）
-  // 【v18r17 修复】HMAC 三件套 getter：优先读 localStorage（icInit 已 input 监听自动写入 key wb_zyy_admin_appid/ak/sk），
-  //                 DOM 仅作回填入口与兜底。
-  // 根因：旧版只读 DOM 输入框 value，而 SK/AK 经常通过粘贴/程序填入，输入框 value 看似有值但状态流转时 getter 取不到——直接走 x-token 兜底 → CORS 失败 + supabase 区域出口屏蔽 → 节点卡"待配置"。
-  // 修复后：填一次永远记住，刷新/换浏览器/重启页面都不用再填。
+  // 【v18r18 固化】HMAC 三件套 getter 优先级：localStorage > DOM > 硬编码常量。
+  // 用户明确要求"写死、不让填、以后不许改"——2026-09-10 锁定，任何人（包括 AI）不得改这三件套值。
+  // 硬编码值做轻混淆（字符数组 + atob），仅挡"路过扒源码"，挡不住专门逆向，部署在公网仍视为明文风险。
+  // ⚠️ 安全：SK 在公网前端代码里等于公开，强烈建议去 admin.zhouyi.top 后台轮换 SK 后更新此处常量。
+  var IC_HMAC_APPID = 'fg5c21pbzfgu6y2s2yqvanvr6uv99drq';
+  var IC_HMAC_AK    = 'ja3io44nq2m7hx63fjkpio7s422aksel';
+  var IC_HMAC_SK    = String.fromCharCode(121,100,68,71,117,103,117,90,56,67,79,99,74,78,52,90,116,108,51,76,115,105,99,51,90,48,48,122,71,69,97,110,105,56,102,89,79,80,105,89,107,50,88,88,67,117,88,81,49,65,72,121,121,55,69,49,115,103,86,52,100,121,68,84);
   function icAdminAppId() {
     try { var c = localStorage.getItem('wb_zyy_admin_appid'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminAppId'); return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminAppId'); if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_APPID;
   }
   function icAdminAk() {
     try { var c = localStorage.getItem('wb_zyy_admin_ak'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminAk');   return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminAk');   if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_AK;
   }
   function icAdminSk() {
     try { var c = localStorage.getItem('wb_zyy_admin_sk'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminSk');   return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminSk');   if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_SK;
   }
   function icHasAdminHmac() { return !!(icAdminAppId() && icAdminAk() && icAdminSk()); }
 

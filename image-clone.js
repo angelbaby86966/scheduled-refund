@@ -875,6 +875,10 @@
   var IC_DEFAULT_IS_TRANS_PROV = true;      // 跨省调度：跨省（2026-09-10 用户按截图改 true，test.sh 原 false 不再生效）
   var IC_DEFAULT_USBW = 200;                // 单条上行：200 Mbps
   var IC_DEFAULT_BW_NUM = 1;                // 线路数量：1
+  // ============ admin「编辑」页提交接口 + 截图额外字段（test.sh + 用户 2026-09-10 截图写死）============
+  var IC_DEFAULT_NOMINAL_PATH = '/api/edgeNode/updateEdgeNominalInfo';  // 提交带宽/业务接口（test.sh 1024 行实测此路径，非 updateEdgeRemark）
+  var IC_DEFAULT_EXPECTED_BIZ = '自研Q2';    // 期望业务（截图：自研Q2；admin 字段名 expectedBiz，见 icQueryEdgeDetail 解析）
+  var IC_DEFAULT_IP_SCHEDULE_TYPE = 0;       // IP调度：根据插件V4和V6是否存在来调度（截图；字段名暂按 ipScheduleType，待 admin 实际回包确认）
   // ============ 状态流转固定值（用户 2026-09-10 明确写死，以后不许改）============
   var IC_DEFAULT_DEPLOY_STATUS = '服务中';   // 状态流转目标：服务中
   var IC_DEFAULT_DEPLOY_PATH = '/api/bigDeployLog/directDeployment';  // 状态流转接口
@@ -1690,7 +1694,7 @@
     // ⚠️ 【6 步流程写死】用户明确要求"按截图走 + 以后不要改"：下面 4 步调用参数全部固化，任何人（含 AI）不得改动。
     //   步骤 1：下发 zyy_init 绑定命令（带 ak/sk/isp）
     //   步骤 2：SSH 读 device_code（前端预生成 76hex 新 SN 写入 ipes 容器，避让黄金机 SN 冲突）
-    //   步骤 3：updateEdgeRemark 提交带宽业务（6 字段全部从 IC_DEFAULT_* 读，对齐截图）
+    //   步骤 3：updateEdgeNominalInfo 提交带宽业务（7 字段 + expectedBiz/ipScheduleType 全部从 IC_DEFAULT_* 读，对齐 test.sh + 截图）
     //   步骤 4：directDeployment 状态流转 → "服务中"（业务ID = 76hex IPES SN）
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
@@ -1844,7 +1848,7 @@
     if (!matched.length) { log('⚠️ 没有读到任何 device_code，停止流转。请确认机器已装 zyy agent 且 /usr/local/edge_zycloud/device_code 或 /etc/.mac 存在'); return; }
     log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 device_code，开始调 admin 后台流转</b>');
 
-    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeRemark + directDeployment
+    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + directDeployment
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
     // 【v18r16】早期校验：状态流转必须有 HMAC 三件套。
     // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect timeout 110），
@@ -1869,10 +1873,11 @@
           // 把新设备SN填入业务ID（同步到 one-click-deploy 面板展示）
           var bizEl = document.getElementById('ocdBusinessId');
           if (bizEl) bizEl.value = m.businessId;
-          // 批量提交（updateEdgeRemark）
+          // 批量提交（updateEdgeNominalInfo —— test.sh 实测接口，提交带宽/业务；非 updateEdgeRemark）
           //   nodeId    = 32hex edge_client 节点ID（admin 用它识别节点）
           //   businessId = 76hex IPES SN（admin 业务字段，关联到黄金机 d8891866... 同格式）
-          await adminFn('POST', '/api/edgeNode/updateEdgeRemark', {
+          //   expectedBiz / ipScheduleType = 用户 2026-09-10 截图「编辑」页字段，写死
+          await adminFn('POST', IC_DEFAULT_NOMINAL_PATH, {
             nodeId: m.nodeId,
             businessId: m.businessId,
             vendorSuggestCustomers: cfg.vendorSuggestCustomers,
@@ -1882,6 +1887,8 @@
             isTransProv: cfg.isTransProv,
             usbw: cfg.usbw,
             bwNum: cfg.bwNum,
+            expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
+            ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
           });
           submitOk++;
           // 批量部署（状态流转）：待配置 → 服务中
@@ -1980,12 +1987,12 @@
   }
   window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
-  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeRemark（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
+  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeNominalInfo（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
   // 业务ID = IPES SN（76hex，从 `docker exec ipes cat bin/ipes_sn` 读），不是 nodeId（32hex，edge_client device_code）
   // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，一键把业务ID 填到 admin 并流转
   // 流程：
   //   1) SWAS RunCommand（实例内 docker exec ipes cat bin/ipes_sn）+ DescribeCommandInvocations → 拿 76hex IPES SN
-  //   2) POST /api/edgeNode/updateEdgeRemark  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
+  //   2) POST /api/edgeNode/updateEdgeNominalInfo  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
   //   3) POST /api/bigDeployLog/directDeployment  body={nodeId}
   async function icDirectDeployByNodeId() {
     if (!icGuard()) return;
@@ -2011,7 +2018,7 @@
       alert('请二选一填写：admin 鉴权\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
       return;
     }
-    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeRemark：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1\n3) admin directDeployment：流转「待配置 → 服务中」\n\n确认执行？')) return;
+    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin directDeployment：流转「待配置 → 服务中」\n\n确认执行？')) return;
 
     st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
     var cfg = {
@@ -2040,9 +2047,9 @@
       if (!businessId) throw new Error('未读到 IPES SN（机器可能未运行 docker ipes）');
       st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID）= <code style="color:#cf1322;">' + businessId + '</code></div>';
 
-      // 步骤 2: updateEdgeRemark（写业务ID = IPES SN）
-      st.innerHTML += '<div>📝 2/3 updateEdgeRemark（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
-      var r1 = await icAdminCall('POST', '/api/edgeNode/updateEdgeRemark', {
+      // 步骤 2: updateEdgeNominalInfo（写业务ID = IPES SN + 带宽/业务参数；test.sh 实测接口）
+      st.innerHTML += '<div>📝 2/3 updateEdgeNominalInfo（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
+      var r1 = await icAdminCall('POST', IC_DEFAULT_NOMINAL_PATH, {
         nodeId: nodeId,
         businessId: businessId,
         vendorSuggestCustomers: cfg.vendorSuggestCustomers,
@@ -2052,8 +2059,10 @@
         isTransProv: cfg.isTransProv,
         usbw: cfg.usbw,
         bwNum: cfg.bwNum,
+        expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
+        ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
       });
-      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
+      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
       // 步骤 3: 状态流转（待配置 → 服务中）
       // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）

@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v99 已加载 - 全功能统一9地域+批量凭证多选下拉 + 修复多账号并发导致密钥错配（InstanceId does not exist）→ 改为逐账号串行，账号内保持地域并行+50台/批', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v106 已加载 - 全功能统一9地域+批量凭证多选下拉 + 修复多账号并发导致密钥错配（InstanceId does not exist）→ 改为逐账号串行，账号内保持地域并行+50台/批 + 修复批量重启弹窗只显示单凭证实例数误导用户 → 弹窗前对每个凭证轻探 totalCount 汇总真实总台数', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -4004,6 +4004,45 @@ async function collectInstancesFromSelectedRegions() {
   return groups;
 }
 
+/**
+ * 轻探：每个凭证 × 每个所选地域，用 pageSize=1 拿 TotalCount，汇总真实"多凭证合计"实例数。
+ * AliyunClient 单例 → 凭证切换必须串行；每个 (凭证, 地域) 仅 1 次 API 调用。
+ * 返回 { totalCount, regionCount, perProfile: { profName: count } }。
+ */
+async function probeAllProfilesCount(selected) {
+  var regionIds = Array.from(state.selectedRegions);
+  if (!regionIds.length) return { totalCount: 0, regionCount: 0, perProfile: {} };
+  var totalCount = 0;
+  var regionHit = {};   // regionId -> true（任一凭证下有实例就算"命中"）
+  var perProfile = {};
+  for (var i = 0; i < selected.length; i++) {
+    var pname = selected[i];
+    AliyunClient.useProfile(pname);
+    var pCount = 0;
+    for (var j = 0; j < regionIds.length; j++) {
+      var rid = regionIds[j];
+      try {
+        var data = await AliyunClient.listInstances(rid, { pageSize: 1, pageNumber: 1 });
+        var tc = (data && (data.TotalCount || (data.Instances && data.Instances.length))) || 0;
+        // 状态过滤：Deleted/Released/Expired/Deleting/Releasing 不计入"会重启的台数"
+        // pageSize=1 拿不到完整列表，只能看当前这 1 台状态；保守取 TotalCount 不再细分。
+        pCount += tc;
+        if (tc > 0) regionHit[rid] = true;
+      } catch (err) {
+        log('  ⚠️ 轻探 [' + pname + ' / ' + REGION_INFO[rid] + '] 失败: ' + err.message, 'warn');
+      }
+    }
+    perProfile[pname] = pCount;
+    totalCount += pCount;
+    log('  🔎 轻探 [' + pname + ']：' + pCount + ' 台', 'info');
+  }
+  return {
+    totalCount: totalCount,
+    regionCount: Object.keys(regionHit).length,
+    perProfile: perProfile
+  };
+}
+
 async function batchRebootSelectedRegions() {
   var btn = null;
   try {
@@ -4017,22 +4056,35 @@ async function batchRebootSelectedRegions() {
       return;
     }
 
-    // 探一下：在 active 凭证下确认是否有实例，避免对空账号弹确认窗
+    // 准备：保存原 active 凭证（探查和执行过程中会切换凭证）
     var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
-    var probeName = (originalActive && selected.indexOf(originalActive) >= 0) ? originalActive : selected[0];
-    AliyunClient.useProfile(probeName);
-    var probeGroups;
-    try { probeGroups = await collectInstancesFromSelectedRegions(); }
-    catch (err) { log('⚠️ ' + err.message, 'warn'); return; }
-    if (probeGroups.length === 0) {
-      log('⚠️ 所选地域暂无云主机（凭证 ' + probeName + ' 下拉取为空，其他凭证实例数会单独统计）', 'warn');
-      // 不直接 return，继续走多账号并发：单账号空不算空
+
+    // 探一下：对每个所选凭证 × 所选地域，做 pageSize=1 的轻探拿 TotalCount，
+    // 真实反映出"6 个凭证合计"的实例数，避免弹窗只显示单凭证的台数误导用户。
+    // AliyunClient 是单例 → 凭证切换必须串行。
+    var probeStats;
+    try {
+      probeStats = await probeAllProfilesCount(selected);
+    } catch (err) {
+      log('⚠️ 轻探失败: ' + err.message + '，已切换到单凭证探测降级', 'warn');
+      var probeName = (originalActive && selected.indexOf(originalActive) >= 0) ? originalActive : selected[0];
+      AliyunClient.useProfile(probeName);
+      var probeGroupsFallback = await collectInstancesFromSelectedRegions();
+      probeStats = { totalCount: probeGroupsFallback.length, regionCount: new Set(probeGroupsFallback.map(function(g){return g.regionId;})).size, perProfile: { [probeName]: probeGroupsFallback.length } };
     }
-    var probeRegionCount = new Set(probeGroups.map(function(g){return g.regionId;})).size;
-    var confirmMsg = '确定要重启「' + probeRegionCount + ' 个地域、共 ' + probeGroups.length + ' 台云主机」吗？\n\n' +
+    if (probeStats.totalCount === 0) {
+      log('⚠️ 所选地域全部凭证下均为空（合计 0 台），无需重启', 'warn');
+      return;
+    }
+    // 详情字符串：按凭证分行展示实际台数
+    var perProfileLines = selected.map(function(p){
+      var c = probeStats.perProfile[p] || 0;
+      return '  ' + p + '：' + c + ' 台';
+    }).join('\n');
+    var confirmMsg = '确定要重启「' + probeStats.regionCount + ' 个地域、共 ' + probeStats.totalCount + ' 台云主机」吗？\n\n' +
       '• 操作系统会重启，连接会短暂中断\n' +
       '• 数据不会丢失\n' +
-      '• 凭证范围（' + selected.length + ' 个账号，逐账号执行）：\n  ' + selected.join('\n  ') + '\n' +
+      '• 凭证范围（' + selected.length + ' 个账号，逐账号串行执行）：\n' + perProfileLines + '\n' +
       '• 每账号每批 50 台并发执行（无数量限制）';
     if (!confirm(confirmMsg)) return;
 
@@ -4040,7 +4092,7 @@ async function batchRebootSelectedRegions() {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 重启中...'; }
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('🔁 开始批量重启：' + selected.length + ' 个凭证 × ' + probeRegionCount + ' 个地域（已探测凭证 ' + probeName + ' 共 ' + probeGroups.length + ' 台）', 'info');
+    log('🔁 开始批量重启：' + selected.length + ' 个凭证 × ' + probeStats.regionCount + ' 个地域（合计 ' + probeStats.totalCount + ' 台，按凭证：' + Object.keys(probeStats.perProfile).map(function(p){return p+' '+probeStats.perProfile[p]+'台';}).join(' / ') + '）', 'info');
 
     var CONCURRENCY = 50;
     var grandTotalSuccess = 0, grandTotalFail = 0;

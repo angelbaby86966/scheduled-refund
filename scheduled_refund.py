@@ -289,8 +289,20 @@ def swas_endpoint(region_id):
     return f"https://swas.{region_id}.aliyuncs.com/"
 
 
+# ===================== 黄金机硬保护 =====================
+# 与 image-clone.js / aliyun-client-v2.js / fc/index.py 中同款的权威常量。
+# 黄金机（118.178.193.66）是基准镜像源机，任何情况下都不得退订 / 释放 / 重置。
+# 双保险：既按实例 ID 过滤，也按公网 IP 过滤（IP 可能被重新绑定给别的实例）。
+GOLDEN_INSTANCE_IDS = {"9f2adaf7f4d9467aa42982db05ff77fc"}
+GOLDEN_PUBLIC_IPS = {"118.178.193.66"}
+
+
+def is_golden(instance_id, public_ip=None):
+    return (instance_id in GOLDEN_INSTANCE_IDS) or (public_ip and public_ip in GOLDEN_PUBLIC_IPS)
+
+
 def list_instances(ak, sk, region_id):
-    """分页列出某地域全部实例，返回 [{regionId, instanceId}, ...]"""
+    """分页列出某地域全部实例，返回 [{regionId, instanceId}, ...]（已剔除黄金机）"""
     out = []
     page = 1
     while True:
@@ -301,8 +313,12 @@ def list_instances(ak, sk, region_id):
         insts = data.get("Instances") or []
         for it in insts:
             iid = it.get("InstanceId")
-            if iid:
-                out.append({"regionId": region_id, "instanceId": iid})
+            if not iid:
+                continue
+            if is_golden(iid, it.get("PublicIpAddress")):
+                log(f"\U0001f6d1 跳过黄金机 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
+                continue
+            out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0
         if not insts or len(out) >= total:
             break
@@ -480,7 +496,11 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
             break
 
         # 2) 有界并发退订：线程池封顶 + 令牌桶限 QPS + 限流自动退避重试
-        targets = [(it["regionId"], it["instanceId"]) for it in all_instances]
+        # 退订前再过滤一次黄金机（双保险：列出时已过滤，这里兜底）
+        targets = [(it["regionId"], it["instanceId"]) for it in all_instances
+                   if not is_golden(it["instanceId"])]
+        if len(targets) != len(all_instances):
+            log(f"\U0001f6d1 已剔除 {len(all_instances) - len(targets)} 台黄金机，绝不退订", "WARN")
         round_success = 0
         regions_seen = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:

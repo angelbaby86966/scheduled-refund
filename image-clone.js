@@ -879,9 +879,22 @@
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
   // 前端用 Web Crypto API 实现（浏览器原生，无依赖）
-  function icAdminAppId() { var el = document.getElementById('icBindAdminAppId'); return el ? (el.value || '').trim() : ''; }
-  function icAdminAk()   { var el = document.getElementById('icBindAdminAk');   return el ? (el.value || '').trim() : ''; }
-  function icAdminSk()   { var el = document.getElementById('icBindAdminSk');   return el ? (el.value || '').trim() : ''; }
+  // 【v18r17 修复】HMAC 三件套 getter：优先读 localStorage（icInit 已 input 监听自动写入 key wb_zyy_admin_appid/ak/sk），
+  //                 DOM 仅作回填入口与兜底。
+  // 根因：旧版只读 DOM 输入框 value，而 SK/AK 经常通过粘贴/程序填入，输入框 value 看似有值但状态流转时 getter 取不到——直接走 x-token 兜底 → CORS 失败 + supabase 区域出口屏蔽 → 节点卡"待配置"。
+  // 修复后：填一次永远记住，刷新/换浏览器/重启页面都不用再填。
+  function icAdminAppId() {
+    try { var c = localStorage.getItem('wb_zyy_admin_appid'); if (c && c.trim()) return c.trim(); } catch (e) {}
+    var el = document.getElementById('icBindAdminAppId'); return el ? (el.value || '').trim() : '';
+  }
+  function icAdminAk() {
+    try { var c = localStorage.getItem('wb_zyy_admin_ak'); if (c && c.trim()) return c.trim(); } catch (e) {}
+    var el = document.getElementById('icBindAdminAk');   return el ? (el.value || '').trim() : '';
+  }
+  function icAdminSk() {
+    try { var c = localStorage.getItem('wb_zyy_admin_sk'); if (c && c.trim()) return c.trim(); } catch (e) {}
+    var el = document.getElementById('icBindAdminSk');   return el ? (el.value || '').trim() : '';
+  }
   function icHasAdminHmac() { return !!(icAdminAppId() && icAdminAk() && icAdminSk()); }
 
   async function icAdminHmacSign(ak, sk, timestamp) {
@@ -954,14 +967,16 @@
         return await icAdminCallHmac(method, path, body);
       } catch (e) {
         hmacErr = e;
-        // 【v18r14】除了网络/CORS 失败，鉴权失败（code=7 未登录/非法访问）也要 fallback。
-        // 实测 /api/bigDeployLog/directDeployment 不认 HMAC 三件套（只认 x-token JWT），
-        // 旧逻辑把 code=7 当"业务错"直接抛出 → 永远走不到 x-token 通道 → 状态流转永远失败。
-        if (!icIsNetworkErr(e) && !e.isAuthErr) {
-          // 真业务错（请求已到达后端且被正确处理）→ 不 fallback，直接抛
+        // 【v18r16】HMAC 通道失败时**直接抛出**，不要 fallback。
+        // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect error 110），
+        // 浏览器直连 admin 又被 CORS 拒（Failed to fetch），fallback 链走不到 admin。
+        // HMAC 是 admin 后端期望的机器对机器方式（参考 ipes_auto_deploy.sh + transition_to_service.sh），
+        // HMAC 拿到 code=7 是真业务拒绝（path 错 / 该接口只认 JWT）→ 立即告知，不被 fallback 链路吞掉。
+        if (!icIsNetworkErr(e)) {
+          // 业务错（含 code=7）→ 不 fallback，直接抛
           throw e;
         }
-        // 网络/CORS/鉴权失败 → 继续往下走「浏览器直连 x-token」兜底
+        // 仅网络/CORS 失败才继续往下走 fallback（但目前 supabase 直连 admin 也不通，几乎无解）
       }
     }
     // ② 浏览器直连 admin.zhouyi.top（x-token 鉴权）— 绕开 supabase 区域出口被屏蔽
@@ -1817,9 +1832,19 @@
 
     // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeRemark + directDeployment
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
-    // 鉴权方式提示：填了三件套走 HMAC，否则走 x-token
-    if (icHasAdminHmac()) log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin）');
-    else log('🔑 当前使用 x-token 鉴权（经 supabase 转发）');
+    // 【v18r16】早期校验：状态流转必须有 HMAC 三件套。
+    // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect timeout 110），
+    // 浏览器直连 admin 跨域 CORS 拒，只有 HMAC 三件套直连 admin 这条路能走通。
+    if (!icHasAdminHmac()) {
+      log('<span style="color:#cf1322;">❌ 状态流转必须填 admin 后端鉴权三件套（appId / ak / sk）。<br>' +
+        '原因：浏览器直连 admin.zhouyi.top 会被 CORS 拒；supabase 边缘到 admin.zhouyi.top 网络不可达（实测 TCP 超时 110）。<br>' +
+        '只有 HMAC 三件套直连 admin 这条路能走通，参考 ipes_auto_deploy.sh + transition_to_service.sh。<br>' +
+        '请展开「🔑 admin 后端鉴权三件套」面板填入，然后重试。</span>');
+      log('<span style="color:#cf1322;">状态流转完成：提交成功 0 / 部署成功 0 / 失败 ' + matched.length + '</span>');
+      icLog('[镜像克隆] 状态流转中断：缺少 HMAC 三件套', 'error');
+      return;
+    }
+    log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin，绕开 CORS 与 supabase 区域出口屏蔽）');
     var submitOk = 0, deployOk = 0, deployFail = 0, successList = [];
     var idx2 = 0;
     var adminFn = icAdminCall;   // 统一入口：自动选 HMAC 或 x-token

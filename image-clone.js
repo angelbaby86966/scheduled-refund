@@ -1846,7 +1846,17 @@
     for (var rw = 0; rw < Math.min(10, ids.length); rw++) rcPoolArr.push(rcPool());
     await Promise.all(rcPoolArr);
     if (!matched.length) { log('⚠️ 没有读到任何 device_code，停止流转。请确认机器已装 zyy agent 且 /usr/local/edge_zycloud/device_code 或 /etc/.mac 存在'); return; }
-    log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 device_code，开始调 admin 后台流转</b>');
+    // 【业务ID 写死校验 - 用户 2026-09-10】业务ID 必须 76hex IPES SN，与 admin 业务字段、ipes 容器 bin/ipes_sn 一致。
+    //   短于 76hex（兜底 32hex edge_client）的机器一律禁止流转，与"业务ID 写死为 76hex"规则冲突。
+    var matchedValid = matched.filter(function (m) { return /^[a-f0-9]{76}$/i.test(m.businessId); });
+    var matchedInvalid = matched.filter(function (m) { return !/^[a-f0-9]{76}$/i.test(m.businessId); });
+    if (matchedInvalid.length) {
+      log('<span style="color:#fa8c16;">⚠️ ' + matchedInvalid.length + ' 台机器业务ID不是76hex（可能是老机器/无 ipes 容器），【业务ID=76hex IPES SN】规则不允许流转，已过滤：</span>');
+      matchedInvalid.forEach(function (m) { log('  ⛔ ' + m.instanceId + ' nodeId=' + m.nodeId + ' businessId(长度=' + m.businessId.length + ')=' + m.businessId.slice(0, 12) + '…'); });
+    }
+    if (!matchedValid.length) { log('⚠️ 没有机器业务ID符合76hex规则，全部禁止流转。'); return; }
+    matched = matchedValid;
+    log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 76hex 业务ID，开始调 admin 后台流转</b>');
 
     // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + directDeployment
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
@@ -2045,7 +2055,9 @@
         if (m) businessId = m[0];
       } catch (e) { throw new Error('读 IPES SN 失败: ' + e.message); }
       if (!businessId) throw new Error('未读到 IPES SN（机器可能未运行 docker ipes）');
-      st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID）= <code style="color:#cf1322;">' + businessId + '</code></div>';
+      // 【业务ID 写死校验】必须 76hex（admin 与 ipes 容器 bin/ipes_sn 一致）。短于 76hex 会破坏与机器的对应关系，禁止继续。
+      if (!/^[a-f0-9]{76}$/i.test(businessId)) throw new Error('读到的 IPES SN 不是 76hex：' + businessId + '（长度=' + businessId.length + '），拒绝流转。');
+      st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID，76hex）= <code style="color:#cf1322;">' + businessId + '</code></div>';
 
       // 步骤 2: updateEdgeNominalInfo（写业务ID = IPES SN + 带宽/业务参数；test.sh 实测接口）
       st.innerHTML += '<div>📝 2/3 updateEdgeNominalInfo（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
@@ -2065,13 +2077,16 @@
       st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
       // 步骤 3: 状态流转（待配置 → 服务中）
-      // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）
-      st.innerHTML += '<div>🔄 3/3 状态流转（流转到服务中）...</div>';
-      var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId, businessId: businessId, status: '服务中' });
+      // 【状态流转写死 - 用户 2026-09-10 明确】目标 = IC_DEFAULT_DEPLOY_STATUS（"服务中"）；业务ID = IPES SN（76hex）
+      //   body = { nodeId, businessId(IPES SN), status: "服务中" }，对齐 admin 后台「更多 → 状态流转」弹窗
+      //   businessId 不允许手填、不允许传空、不允许短于 76hex
+      //   任何人（含 AI）不得改这一段，除非用户明确解封
+      st.innerHTML += '<div>🔄 3/3 状态流转（流转到【' + IC_DEFAULT_DEPLOY_STATUS + '】，业务ID=' + businessId + '）...</div>';
+      var r2 = await icAdminCall('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, businessId: businessId, status: IC_DEFAULT_DEPLOY_STATUS });
       var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
       if (c2 !== null && c2 !== 0) {
         throw new Error('状态流转返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
-          '（POST /api/bigDeployLog/directDeployment body={nodeId, businessId, status:"服务中"}）');
+          '（POST ' + IC_DEFAULT_DEPLOY_PATH + ' body={nodeId, businessId, status:"' + IC_DEFAULT_DEPLOY_STATUS + '"}）');
       }
       st.innerHTML += '<div style="color:#389e0d;">✅ 状态流转成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 

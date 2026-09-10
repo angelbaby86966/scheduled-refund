@@ -870,11 +870,14 @@
   // 这些值是 admin 后端业务参数，对齐 test.sh 行为；用户在「绑定舟翼云」面板无需填写
   var IC_DEFAULT_VENDOR_CUSTOMERS = 41;     // vendorSuggestCustomers
   var IC_DEFAULT_TRANS_MODE = 1;            // transMode
-  var IC_DEFAULT_IS_CROSS_NETWORK = false;
+  var IC_DEFAULT_IS_CROSS_NETWORK = false;  // 是否异网：非异网（截图一致）
   var IC_DEFAULT_CROSS_NETWORK_ISP = null;
-  var IC_DEFAULT_IS_TRANS_PROV = false;
-  var IC_DEFAULT_USBW = 200;
-  var IC_DEFAULT_BW_NUM = 1;
+  var IC_DEFAULT_IS_TRANS_PROV = true;      // 跨省调度：跨省（2026-09-10 用户按截图改 true，test.sh 原 false 不再生效）
+  var IC_DEFAULT_USBW = 200;                // 单条上行：200 Mbps
+  var IC_DEFAULT_BW_NUM = 1;                // 线路数量：1
+  // ============ 状态流转固定值（用户 2026-09-10 明确写死，以后不许改）============
+  var IC_DEFAULT_DEPLOY_STATUS = '服务中';   // 状态流转目标：服务中
+  var IC_DEFAULT_DEPLOY_PATH = '/api/bigDeployLog/directDeployment';  // 状态流转接口
 
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
@@ -1683,7 +1686,12 @@
     // 鉴权方式二选一：admin Token（x-token 走 supabase 转发）OR appId/ak/sk（HMAC 直连 admin）
     var token = icGetAdminToken();
     if (!token && !icHasAdminHmac()) { alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）'); return; }
-    // vendor / transMode 等业务参数已写死（IC_DEFAULT_* 常量，对齐 test.sh），无需用户输入
+    // vendor / transMode 等业务参数已写死（IC_DEFAULT_* 常量，对齐 test.sh + 用户 2026-09-10 截图），无需用户输入
+    // ⚠️ 【6 步流程写死】用户明确要求"按截图走 + 以后不要改"：下面 4 步调用参数全部固化，任何人（含 AI）不得改动。
+    //   步骤 1：下发 zyy_init 绑定命令（带 ak/sk/isp）
+    //   步骤 2：SSH 读 device_code（前端预生成 76hex 新 SN 写入 ipes 容器，避让黄金机 SN 冲突）
+    //   步骤 3：updateEdgeRemark 提交带宽业务（6 字段全部从 IC_DEFAULT_* 读，对齐截图）
+    //   步骤 4：directDeployment 状态流转 → "服务中"（业务ID = 76hex IPES SN）
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     var ownerId = (document.getElementById('icBindOwnerId').value || '').trim();
@@ -1880,13 +1888,14 @@
           // 【v18r16 关键修复】请求体必须含 { nodeId, businessId, status: "服务中" }（对齐 transition_to_service.sh 模板）。
           // 旧代码只发 { nodeId } → admin 报 "未选择期望业务"（code:7）。
           // 默认 endpoint = /api/bigDeployLog/directDeployment（已实测可被 x-token JWT 鉴权到业务层），如不通可在「高级部署请求体」覆盖 path
-          var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || '/api/bigDeployLog/directDeployment';
+          var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || IC_DEFAULT_DEPLOY_PATH;
           var deployBody;
           if (cfg.deployBodyOverride) {
             try { deployBody = JSON.parse(cfg.deployBodyOverride); } catch (e) { deployBody = null; }
           }
           if (!deployBody) {
-            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: '服务中' };
+            // 【6 步流程写死】状态流转目标写死为"服务中"+ 业务ID = 76hex IPES SN
+            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: IC_DEFAULT_DEPLOY_STATUS };
           }
           var dRes = await adminFn('POST', deployPath, deployBody);
           var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;

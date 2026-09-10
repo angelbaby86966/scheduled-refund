@@ -556,8 +556,8 @@
                     <label style="font-size:12px;" data-page-node-id="usgaLPlGaj4O75g8i2AmgL">属主 ID (ownerId) <span style="color:#999;" data-page-node-id="DqyF7KeBd10FgOnDp00UPa">（可选；填则只匹配该属主节点，提高「待配置→服务中」匹配准确度；留空=全量）</span></label>
                     <input type="text" id="icBindOwnerId" class="input" placeholder="如 7546（留空则匹配全部在线节点）" style="width:100%;" data-page-node-id="Ep0jjkBON2DCDX1Lfz8NEm" />
                   </div>
-                  <details style="margin-bottom:12px;" data-page-node-id="ghiOrvJ7f1xcN32lLc2jCv">
-                    <summary style="font-size:12px;cursor:pointer;color:#888;" data-page-node-id="DOnyoWB5QKxxAmJIfxteTB">🔐 admin 后端鉴权三件套（appId / ak / sk）<span style="color:#999;font-weight:400;" data-page-node-id="dAyD5YLdRXRIOfw1djvqgY">（备用通道，admin 开启 CORS 后自动启用；当前仍走 x-token 鉴权）</span></summary>
+                  <details open style="margin-bottom:12px;border:1px solid #ffa39e;background:#fff1f0;padding:8px 10px;border-radius:6px;" data-page-node-id="ghiOrvJ7f1xcN32lLc2jCv">
+                    <summary style="font-size:13px;cursor:pointer;color:#cf1322;font-weight:bold;" data-page-node-id="DOnyoWB5QKxxAmJIfxteTB">🔑 admin 后端鉴权三件套（appId / ak / sk）<span style="color:#cf1322;font-weight:bold;">【必填，不填无法流转】</span><span style="color:#999;font-weight:400;" data-page-node-id="dAyD5YLdRXRIOfw1djvqgY"> 填一次后自动 localStorage 永久缓存，刷新/换浏览器都不用重填</span></summary>
                     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end;margin-top:10px;" data-page-node-id="HwW5rIhUCyLpLkSl8F2QNk">
                       <div class="form-group" style="margin:0;" data-page-node-id="e2bKKiCXEWvNWJs5OxYVPq">
                         <label style="font-size:12px;" data-page-node-id="eTwOzsFmuYBXz3NujFLBn3">appId</label>

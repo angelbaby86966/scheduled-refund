@@ -1912,7 +1912,11 @@
           }
           if (!deployBody) {
             // 【6 步流程写死】状态流转目标写死为"服务中"+ 业务ID = 76hex IPES SN
-            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: IC_DEFAULT_DEPLOY_STATUS };
+            // 【v18r22 补全】FormatQiYinInstallCodeForEcache 需要"运营商"字段。
+            //   字段名猜 vendorCustomer（与 updateEdgeNominalInfo 的 vendorSuggestCustomers 同源）；
+            //   值 = IC_DEFAULT_VENDOR_CUSTOMERS = 41（同 updateEdgeNominalInfo）。
+            //   如还报"未知运营商"，请把 F12 Network 里 /api/bigDeployLog/directDeployment 的真实请求 body 截图发我看，确认字段名到底是 vendorCustomer / vendor / isp 哪个。
+            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: IC_DEFAULT_DEPLOY_STATUS, vendorCustomer: cfg.vendorSuggestCustomers };
           }
           var dRes = await adminFn('POST', deployPath, deployBody);
           var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;
@@ -2080,9 +2084,12 @@
       // 【状态流转写死 - 用户 2026-09-10 明确】目标 = IC_DEFAULT_DEPLOY_STATUS（"服务中"）；业务ID = IPES SN（76hex）
       //   body = { nodeId, businessId(IPES SN), status: "服务中" }，对齐 admin 后台「更多 → 状态流转」弹窗
       //   businessId 不允许手填、不允许传空、不允许短于 76hex
+      // 【v18r22 补全】FormatQiYinInstallCodeForEcache 需要"运营商"字段。
+      //   字段名猜 vendorCustomer；值 = cfg.vendorSuggestCustomers = 41（同 updateEdgeNominalInfo）。
+      //   如还报"未知运营商"，请把 F12 Network 里 /api/bigDeployLog/directDeployment 的真实请求 body 截图发我看。
       //   任何人（含 AI）不得改这一段，除非用户明确解封
       st.innerHTML += '<div>🔄 3/3 状态流转（流转到【' + IC_DEFAULT_DEPLOY_STATUS + '】，业务ID=' + businessId + '）...</div>';
-      var r2 = await icAdminCall('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, businessId: businessId, status: IC_DEFAULT_DEPLOY_STATUS });
+      var r2 = await icAdminCall('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, businessId: businessId, status: IC_DEFAULT_DEPLOY_STATUS, vendorCustomer: cfg.vendorSuggestCustomers });
       var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
       if (c2 !== null && c2 !== 0) {
         throw new Error('状态流转返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +

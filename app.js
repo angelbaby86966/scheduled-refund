@@ -4062,20 +4062,42 @@ async function batchRebootSelectedRegions() {
           var arr = byRegion[rid];
           return (async function() {
             log('  ▶ [' + pname + ' / ' + REGION_INFO[rid] + '] 重启 ' + arr.length + ' 台...', 'info');
+            var failed = [];   // 收集失败项，整轮跑完后统一重试（此时网关压力已释放，成功率最高）
             for (var i=0; i<arr.length; i+=CONCURRENCY) {
               var slice = arr.slice(i, i+CONCURRENCY);
               var rs = await Promise.all(slice.map(function(g) {
                 return AliyunClient.rebootInstance(g.regionId, g.instance.InstanceId).then(function() {
                   return { ok: true, id: g.instance.InstanceId };
                 }).catch(function(err) {
-                  return { ok: false, id: g.instance.InstanceId, err: (err && err.message) || String(err) };
+                  return { ok: false, id: g.instance.InstanceId, regionId: g.regionId, err: (err && err.message) || String(err) };
                 });
               }));
               rs.forEach(function(r) {
                 if (r.ok) pTotalSuccess++;
-                else { pTotalFail++; log('    ❌ ' + pname + ' / ' + r.id + ' 失败: ' + r.err, 'error'); }
+                else failed.push(r);
               });
               if (i + CONCURRENCY < arr.length) await new Promise(function(r){ setTimeout(r, 200); });
+            }
+            // 失败项串行重试一轮：AbortError / Failed to fetch 多为并发打爆网关所致，
+            // 主批跑完后单台重发几乎都能成功。
+            if (failed.length > 0) {
+              log('  ♻️ [' + pname + ' / ' + REGION_INFO[rid] + '] ' + failed.length + ' 台失败，冷却 3s 后重试一轮…', 'warn');
+              await new Promise(function(r){ setTimeout(r, 3000); });
+              var stillFailed = [];
+              for (var k = 0; k < failed.length; k++) {
+                try {
+                  await AliyunClient.rebootInstance(failed[k].regionId, failed[k].id);
+                  pTotalSuccess++;
+                } catch (e2) {
+                  stillFailed.push({ id: failed[k].id, err: (e2 && e2.message) || String(e2) });
+                }
+                await new Promise(function(r){ setTimeout(r, 250); });
+              }
+              stillFailed.forEach(function(f) {
+                pTotalFail++;
+                log('    ❌ ' + pname + ' / ' + f.id + ' 失败: ' + f.err, 'error');
+              });
+              if (stillFailed.length === 0) log('  ✨ [' + pname + ' / ' + REGION_INFO[rid] + '] 重试全部成功', 'success');
             }
             log('  ✅ [' + pname + ' / ' + REGION_INFO[rid] + '] 完成', 'success');
           })();

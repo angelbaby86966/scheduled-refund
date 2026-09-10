@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.6.1 - 后台 cleanup 真清干净(等 invocation ≤3min + delete 12×2s)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.7 - proxy 并发闸门6+40s超时+网络错误重试3次(修 AbortError 整批失败)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -217,6 +217,86 @@
   }
 
   // ====== 核心：阿里云 RPC AK 签名 + API 调用 ======
+  // ====== Edge Function 代理统一请求层（v2.7） ======
+  // 背景：批量重启 50 台并发直打 aliyun-proxy，Supabase / 网关在压力下会直接断连，
+  // 浏览器抛 "AbortError: The signal has been aborted"，整批机器被误判失败。
+  // 对策：1) 全局并发闸门（限制同时在飞的请求数，别把网关打爆）
+  //       2) 单请求 40s 超时主动 abort（不再傻等 46s 才报错）
+  //       3) 网络类错误指数退避重试 3 次（业务错误 InvalidInstanceId 等不重试）
+  var __proxyInFlight = 0;
+  var __proxyMaxInFlight = 6;
+  var __proxyWaitQueue = [];
+  function __proxyAcquire() {
+    if (__proxyInFlight < __proxyMaxInFlight) { __proxyInFlight++; return Promise.resolve(); }
+    // 排队等待；被唤醒时名额已由 __proxyRelease 直接过户，这里不再 ++（否则计数虚高、闸门失效）
+    return new Promise(function(resolve) { __proxyWaitQueue.push(resolve); });
+  }
+  function __proxyRelease() {
+    if (__proxyWaitQueue.length > 0) {
+      var next = __proxyWaitQueue.shift();
+      next();            // 名额直接过户给队首等待者，inFlight 保持不变
+    } else {
+      __proxyInFlight--; // 没人排队，真正归还名额
+    }
+  }
+  /** 是否可重试：只认网络/网关类错误，业务错误不重试 */
+  function __isRetryableNetErr(err, status) {
+    if (status === 429 || status === 502 || status === 503 || status === 504) return true;
+    var n = (err && err.name) || '';
+    var m = (err && err.message) || '';
+    if (n === 'AbortError' || n === 'TimeoutError') return true;
+    // 注意：只匹配明确的断连措辞。不要写裸 "network"——阿里云业务错误里
+    // 有 InvalidNetworkType / NetworkNotFound 之类，会被误判成网络错误白重试 3 次。
+    if (/Failed to fetch|NetworkError|Load failed|signal has been aborted|请求超时|ERR_NETWORK_CHANGED/i.test(m)) return true;
+    return false;
+  }
+  /** 统一 aliyun-proxy 调用：并发闸门 + 超时 + 网络错误重试 */
+  async function __proxyRequest(payload, opts) {
+    opts = opts || {};
+    var retries = (typeof opts.retries === 'number') ? opts.retries : 3;
+    var timeoutMs = opts.timeoutMs || 40000;
+    await __proxyAcquire();
+    try {
+      var lastErr = null;
+      for (var attempt = 1; attempt <= retries; attempt++) {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { try { controller.abort(); } catch (e) {} }, timeoutMs);
+        try {
+          var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          });
+          var j = await resp.json();
+          clearTimeout(timer);   // 等 JSON 解析完再清，body 卡住也能被超时打断
+          if (!j.success) {
+            var be = new Error(j.error || ('HTTP ' + resp.status));
+            be.httpStatus = resp.status;
+            if (__isRetryableNetErr(be, resp.status) && attempt < retries) {
+              lastErr = be;
+              await new Promise(function(r) { setTimeout(r, 1000 * attempt); });
+              continue;
+            }
+            throw be;
+          }
+          return j.data;
+        } catch (e) {
+          clearTimeout(timer);
+          lastErr = e;
+          if (attempt < retries && __isRetryableNetErr(e, 0)) {
+            await new Promise(function(r) { setTimeout(r, 1000 * attempt); });
+            continue;
+          }
+          throw e;
+        }
+      }
+      throw lastErr || new Error('proxy 请求失败');
+    } finally {
+      __proxyRelease();
+    }
+  }
+
   async function callAliyunApi(regionId, action, params) {
     const accessKeyId = getAccessKeyId();
     const accessKeySecret = getAccessKeySecret();
@@ -272,13 +352,39 @@
     const endpoint = `https://swas.${regionId}.aliyuncs.com/`;
     console.log('[aliyun-client]', action, regionId);
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: finalQuery,
-    });
+    // v2.7：超时 + 网络/限流类错误重试。
+    // 50 台并发时浏览器链路会偶发断连抛 AbortError / Failed to fetch —— 这类错误请求
+    // 并未真正送达阿里云，重试是安全的；业务错误（InvalidInstanceId 等）不重试。
+    const MAX_NET_RETRY = 3;
+    let response = null;
+    for (let attempt = 1; attempt <= MAX_NET_RETRY; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(function () { try { controller.abort(); } catch (e) {} }, 40000);
+      try {
+        response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: finalQuery,
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        // 网关限流（429 / 503）退避后重试
+        if ((response.status === 429 || response.status === 503) && attempt < MAX_NET_RETRY) {
+          await new Promise(function (r) { setTimeout(r, 1000 * attempt); });
+          continue;
+        }
+        break;
+      } catch (e) {
+        clearTimeout(timer);
+        if (attempt < MAX_NET_RETRY && __isRetryableNetErr(e, 0)) {
+          await new Promise(function (r) { setTimeout(r, 800 * attempt); });
+          continue;
+        }
+        throw e;
+      }
+    }
 
     if (!response.ok) {
       const text = await response.text();
@@ -653,23 +759,18 @@
       }, initialDelay);
     },
 
-    /** 重启单台实例（走 Edge Function 代理） */
+    /** 重启单台实例（走 Edge Function 代理）
+     *  v2.7：改走 __proxyRequest（并发闸门 + 40s 超时 + 网络错误自动重试 3 次），
+     *  修复 50 台并发时网关断连抛 AbortError 导致整批误判失败的问题。 */
     async rebootInstance(regionId, instanceId) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
-      var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'rebootInstance',
-          ak_id: ak,
-          ak_secret: sk,
-          params: { RegionId: regionId, InstanceId: instanceId }
-        })
-      });
-      var j = await resp.json();
-      if (!j.success) throw new Error(j.error || ('HTTP ' + resp.status));
-      return j.data;
+      return await __proxyRequest({
+        action: 'rebootInstance',
+        ak_id: ak,
+        ak_secret: sk,
+        params: { RegionId: regionId, InstanceId: instanceId }
+      }, { retries: 3, timeoutMs: 40000 });
     },
 
     /** 重置实例系统（重装系统为指定镜像；SWAS 端会自动先停机）
@@ -680,19 +781,12 @@
     async resetSystem(regionId, instanceId, imageId) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
-      var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'ResetSystem',
-          ak_id: ak,
-          ak_secret: sk,
-          params: { RegionId: regionId, InstanceId: instanceId, ImageId: imageId }
-        })
-      });
-      var j = await resp.json();
-      if (!j.success) throw new Error(j.error || ('HTTP ' + resp.status));
-      return j.data;
+      return await __proxyRequest({
+        action: 'ResetSystem',
+        ak_id: ak,
+        ak_secret: sk,
+        params: { RegionId: regionId, InstanceId: instanceId, ImageId: imageId }
+      }, { retries: 3, timeoutMs: 40000 });
     },
 
     /** 创建防火墙模板 */
@@ -871,28 +965,20 @@
     async listPlans(regionId) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
-      var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'listPlans', ak_id: ak, ak_secret: sk, regionId: regionId })
-      });
-      var j = await resp.json();
-      if (!j.success) throw new Error(j.error || 'listPlans 失败');
-      return j.data;
+      return await __proxyRequest(
+        { action: 'listPlans', ak_id: ak, ak_secret: sk, regionId: regionId },
+        { retries: 3, timeoutMs: 30000 }
+      );
     },
 
     /** 查询镜像列表（按地域）——走 Edge Function 代理，避开 CORS */
     async listImages(regionId) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
-      var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'listImages', ak_id: ak, ak_secret: sk, regionId: regionId })
-      });
-      var j = await resp.json();
-      if (!j.success) throw new Error(j.error || 'listImages 失败');
-      return j.data;
+      return await __proxyRequest(
+        { action: 'listImages', ak_id: ak, ak_secret: sk, regionId: regionId },
+        { retries: 3, timeoutMs: 30000 }
+      );
     },
 
     /**

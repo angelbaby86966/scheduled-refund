@@ -1330,9 +1330,13 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds, lockedSp
 
     // 1) 本账号已有 → 直接复用，并把它的规则采集进 lockedSpecs，供后续缺模板的账号复制
     if (mine && mine.id) {
-      if (mine.rules && mine.rules.length > 0 && (!lockedSpecs[want] || !lockedSpecs[want].rules || lockedSpecs[want].rules.length === 0)) {
-        lockedSpecs[want] = { description: mine.description, rules: mine.rules };
-        log('  📌 [凭证 ' + pname + '] 采集到模板「' + want + '」规则 ' + mine.rules.length + ' 条，供缺模板的账号复用', 'info');
+      var needSpec = !lockedSpecs[want] || !lockedSpecs[want].rules || lockedSpecs[want].rules.length === 0;
+      if (needSpec) {
+        var gotRules = (mine.rules && mine.rules.length) ? mine.rules : fwRulesAcrossRegions(tplMap, want);
+        if (gotRules && gotRules.length) {
+          lockedSpecs[want] = { description: mine.description || '', rules: gotRules };
+          log('  📌 [凭证 ' + pname + '] 采集到模板「' + want + '」规则 ' + gotRules.length + ' 条，供缺模板的账号复用', 'info');
+        }
       }
       continue;
     }
@@ -1454,6 +1458,8 @@ function fwRuleLite(r) {
 
 // 从「已同步的模板列表」里取出所选模板的规则，作为跨账号自动创建的依据。
 // 返回 { 模板名: { description, rules: [...] } }
+// 规则查找优先用「同地域」那份；同地域没有就回退用同名模板在其它地域的规则
+// （同名模板的定义本来就一致，只是每个地域各存一份，跨地域回退能显著提高锁定成功率）
 function captureLockedFwSpecs(regionSelections) {
   var specs = {};
   var tpls = state.allTemplates || [];
@@ -1463,11 +1469,31 @@ function captureLockedFwSpecs(regionSelections) {
     for (var i = 0; i < tpls.length; i++) {
       var t = tpls[i];
       if (t.name !== want) continue;
-      var rules = ((t.rulesByRegion && t.rulesByRegion[rid]) || []).map(fwRuleLite);
+      var rb = t.rulesByRegion || {};
+      var rules = (rb[rid] && rb[rid].length ? rb[rid] : fwFirstNonEmptyRules(rb)).map(fwRuleLite);
       if (rules.length > 0) { specs[want] = { description: t.description || '', rules: rules }; break; }
     }
   });
   return specs;
+}
+
+// 从 { regionId: rules[] } 里取第一份非空规则
+function fwFirstNonEmptyRules(rb) {
+  var keys = Object.keys(rb || {});
+  for (var i = 0; i < keys.length; i++) {
+    if (rb[keys[i]] && rb[keys[i]].length) return rb[keys[i]];
+  }
+  return [];
+}
+
+// 从当前凭证的 tplMap({regionId:{name:{id,rules}}}) 里，跨地域找同名模板的规则
+function fwRulesAcrossRegions(tplMap, name) {
+  var rids = Object.keys(tplMap || {});
+  for (var i = 0; i < rids.length; i++) {
+    var m = tplMap[rids[i]] || {};
+    if (m[name] && m[name].rules && m[name].rules.length) return m[name].rules;
+  }
+  return null;
 }
 
 // ====== 命令助手 ======

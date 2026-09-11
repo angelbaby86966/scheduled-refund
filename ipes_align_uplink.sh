@@ -13,7 +13,10 @@
 #      好节点系统盘已在线扩容（20G→30G），差节点没扩，缓存少 → 供量天然偏低。
 #   4) 出向 tc 硬限速（htb/tbf）会直接卡死上行。
 #
-# 【本脚本做什么】幂等、可重复执行；全程保留 SN(设备身份) 与 /data 缓存：
+# 【本脚本做什么】幂等、可重复执行；全程保留 SN(设备身份)、/data 缓存，且【绝不停止业务原有保活】：
+#   - 不 systemctl disable 任何业务看门狗/systemd 服务（仅操作防火墙服务 firewalld/iptables）
+#   - 重建容器前先 bash -n 校验 docker_run，且只在原启动命令上最小注入挂载，绝不替换 entrypoint/环境变量
+#   - 容器重建沿用原 docker_run 的 --restart=always，被改写的也只是镜像 tag，保活机制原样保留
 #   0/6 对齐前快照：入向 UDP 包率、UDP 校验错误、上行速率、NAT 类型、缓存容量
 #   1/6 主机防火墙全量放行 TCP+UDP 1-65535（iptables/ip6tables/nft + 关 firewalld，开机持久化）
 #   2/6 内核 NAT/conntrack 对齐（rp_filter=0、UDP 映射超时拉长、conntrack 上限拉高）
@@ -422,8 +425,8 @@ align_ipes(){
   if [ "$cur_happ" -lt "$TARGET_HAPP" ] 2>/dev/null; then
     warn "happ 数低于目标（$cur_happ < $TARGET_HAPP）。注意：实际实例数最终由平台按本机 SN 下发决定。"
     if [ "$ALIGN_HAPP" = "1" ]; then
-      log "ALIGN_HAPP=1 → 补齐 happ 目录结构并按标准模板重写 docker_run"
-      local i base xbi mounts="" j
+      log "ALIGN_HAPP=1 → 补齐 happ 目录结构，并【在原始 docker_run 上最小注入缺失挂载】（不重写启动命令，保留业务原保活）"
+      local i base xbi
       for i in $(seq 0 $((TARGET_HAPP-1))); do
         base=/data/happ/happ.$i
         mkdir -p "$base/hdata/cache" "$base/hdata/config" 2>/dev/null || true
@@ -435,20 +438,26 @@ align_ipes(){
           touch "$xbi" 2>/dev/null || warn "创建 $xbi 失败"
         fi
       done
-      for j in $(seq 0 $((TARGET_HAPP-1))); do
-        mounts="$mounts -v /data/happ/happ.$j/hdata/cache:/data/happ/happ.$j/hdata/cache"
-        mounts="$mounts -v /data/happ/happ.$j/hdata/config:/data/happ/happ.$j/hdata/config"
-        mounts="$mounts -v /data/happ/happ.$j/xycould_base_info:/data/happ/happ.$j/xycould_base_info"
-      done
+      # 关键保活约束：只在原 docker_run 的「镜像引用前」插入缺失的 happ 挂载，
+      #   绝不替换原启动命令 / entrypoint / 环境变量 —— 业务原有的保活机制
+      #   （容器自带看门狗、自定义 entrypoint、外部 supervisor 等）原样保留。
       cp -a "$DR" "${DR}.bak.$(date +%s)" 2>/dev/null || true
-      cat > "$DR" <<EOF
-#!/bin/bash
-# 由 ipes_align_uplink.sh 生成: 目标镜像 $TARGET_IMG, happ=$TARGET_HAPP
-docker run -itd --restart=always --name=$C --network=host$mounts -v /opt/ipes/var/db/ipes/happ-conf/custom.yml:/app/ipes/var/db/ipes/happ-conf/custom.yml $TARGET_IMG sh -c '/app/ipes/bin/ipes start && tail -f /dev/null'
-EOF
-      chmod +x "$DR"
-      need=1
-      log "docker_run 已按标准模板重写（原文件备份 ${DR}.bak.*），SN 与缓存不受影响"
+      local newmounts="" j
+      for j in $(seq 0 $((TARGET_HAPP-1))); do
+        grep -q "/data/happ/happ.$j/hdata/cache" "$DR" 2>/dev/null && continue
+        newmounts="$newmounts -v /data/happ/happ.$j/hdata/cache:/data/happ/happ.$j/hdata/cache -v /data/happ/happ.$j/hdata/config:/data/happ/happ.$j/hdata/config -v /data/happ/happ.$j/xycould_base_info:/data/happ/happ.$j/xycould_base_info"
+      done
+      if [ -n "$newmounts" ]; then
+        # 锚点：镜像引用 token；在其前插入挂载，其余一切（含 --restart=always / 启动命令）不动
+        if sed -i -E "s#(ccr\.ccs\.tencentyun\.com/zyy_cloud/ipes-linux-amd64-youkai-latest:[A-Za-z0-9._-]+)#$newmounts \1#" "$DR" 2>/dev/null; then
+          need=1
+          log "已在原始 docker_run 上注入缺失的 happ 挂载（原文件备份 ${DR}.bak.*），启动命令未改动"
+        else
+          warn "注入挂载失败，保留原始 docker_run 不动（不重建，避免破坏业务保活）"
+        fi
+      else
+        log "原始 docker_run 已含全部 happ 挂载，无需改动"
+      fi
     else
       warn "默认不改写 docker_run（改动风险高）。确认要补 happ 再重跑： ALIGN_HAPP=1 bash ipes_align_uplink.sh"
     fi
@@ -480,7 +489,14 @@ EOF
     fi
   fi
 
-  log "重建容器（保留 /data/happ 缓存与设备身份 SN，业务中断约数秒）..."
+  # 保活约束：重建前必须先校验 docker_run 语法，避免用写坏的文件把 IPES 弄宕机
+  if ! bash -n "$DR" >/dev/null 2>&1; then
+    warn "docker_run 语法校验失败，放弃重建（保留现有运行中容器，不破坏业务保活）"
+    return 0
+  fi
+  # 备份当前运行态，便于极端情况下复原
+  docker inspect "$C" >"/var/log/ipes_container_bak_$(date +%s).json" 2>/dev/null || true
+  log "重建容器（保留 /data/happ 缓存与设备身份 SN，业务中断约数秒；原容器快照已备份）..."
   docker rm -f "$C" >/dev/null 2>&1 || true
   if bash "$DR" >/dev/null 2>&1; then
     local k

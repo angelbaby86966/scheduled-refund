@@ -66,6 +66,7 @@ TARGET_IMG="${IMG_BASE}:${TARGET_TAG}"
 FORCE_CLEAR_TC="${FORCE_CLEAR_TC:-0}"
 SKIP_IPES="${SKIP_IPES:-0}"
 ALIGN_HAPP="${ALIGN_HAPP:-1}"
+ALIGN_IMG="${ALIGN_IMG:-1}"
 
 [[ $EUID -eq 0 ]] || { err "请使用 root 执行（云助手默认 root）"; exit 1; }
 command -v curl >/dev/null 2>&1 || timeout 60 yum -y -q install curl >/dev/null 2>&1 || true
@@ -508,6 +509,10 @@ align_ipes(){
 
   if docker image inspect "$TARGET_IMG" >/dev/null 2>&1; then
     log "本地已有目标镜像，跳过拉取"
+  elif [ "$ALIGN_IMG" != "1" ]; then
+    log "ALIGN_IMG!=1，跳过镜像对齐/拉取（happ 由 custom.yml 决定，不依赖镜像 tag，省时）"
+  elif [ -n "$cur_img" ] && docker image inspect "$cur_img" >/dev/null 2>&1 && docker tag "$cur_img" "$TARGET_IMG" 2>/dev/null; then
+    log "本地已有等价镜像($cur_img)，tag 为目标镜像，跳过网络拉取（省时）"
   else
     log "拉取 $TARGET_IMG ..."
     if ! timeout 300 docker pull "$TARGET_IMG" >/dev/null 2>&1; then
@@ -560,8 +565,8 @@ final_report(){
   nat=$(ipes_nat_summary)
   [ -n "$nat" ] && log "NAT类型: $(echo "$nat" | tr '\n' ' ')"
 
-  log "采样 10 秒复测..."
-  local snap_after; snap_after=$(sample_net 10)
+  log "采样 5 秒复测..."
+  local snap_after; snap_after=$(sample_net 5)
   echo "$snap_after" | sed 's/^/    /'
 
   local b_up a_up b_in a_in

@@ -1253,6 +1253,40 @@
     return imgs;
   }
 
+  // 🔁 舟翼云设备注册命令生成器（带 code:-20「设备联网异常」重试）
+  // 背景（2026-09-11 上机实证）：克隆机身份刚被重置就发起注册，平台必然回 `code:-20 设备联网异常`；
+  //   而 zyy_init_max.sh 自带的 3 次重试只间隔 2 秒 → 3 次全失败后直接退出 →
+  //   节点 isp / province / city / channel_id / ownerId 全空 → 后台格式化安装码报「未知运营商」。
+  //   黄金机自己的历史日志给出标准样本：21:57:24 首次 -20 失败 → 21:58:54（90 秒后）重试即成功。
+  // 策略：先等 preWait 秒让设备在舟翼云上线；每轮跑完校验 /usr/local/edge/registration_info 是否出现
+  //   「注册状态: 成功」，未成功则等 gap 秒重试，最多 attempts 轮（默认 6 轮 × 40s ≈ 3.5 分钟窗口）。
+  function icZyyRegisterCmd(zAk, zSk, zIsp, opts) {
+    opts = opts || {};
+    var attempts = opts.attempts || 6;
+    var gap = opts.gap || 40;
+    var preWait = opts.preWait || 0;
+    if (!zAk || !zSk) return 'echo "未配置舟翼云 ak/sk，跳过自动绑定"';
+    var url = 'https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh';
+    var runOnce = 'curl -s ' + url + ' | bash -s -- --ak ' + zAk + ' --sk ' + zSk + ' --isp ' + (zIsp || '电信') + ' || true';
+    var seq = [];
+    for (var i = 1; i <= attempts; i++) seq.push(i);
+    return [
+      '# 🔁 舟翼云设备注册（含 -20「设备联网异常」重试，等设备上线后再注册）',
+      'ZYY_REG=FAIL',
+      preWait > 0
+        ? 'echo "[zyy] 等待 ' + preWait + 's 让新身份在舟翼云上线后再注册..."; sleep ' + preWait
+        : 'true',
+      'for _zyy_i in ' + seq.join(' ') + '; do',
+      '  echo "[zyy] 设备注册尝试 $_zyy_i/' + attempts + ' ..."',
+      '  ' + runOnce,
+      '  if grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then ZYY_REG=OK; echo "[zyy] ✅ 舟翼云注册成功"; break; fi',
+      '  echo "[zyy] ⚠️ 注册未成功（多为 code:-20 设备联网异常），' + gap + 's 后重试"',
+      '  if [ "$_zyy_i" -lt ' + attempts + ' ]; then sleep ' + gap + '; fi',
+      'done',
+      'echo "[zyy] 舟翼云注册最终结果: $ZYY_REG"'
+    ].join('\n');
+  }
+
   // 生成黄金主机标准化 bash 脚本
   function icBuildStandardizeScript() {
     // 读取已记住的舟翼云凭证，固化进首启脚本实现克隆机开机自动绑定
@@ -1361,7 +1395,7 @@
       'fi',
       'systemctl disable ipes-firstboot',
       '# 自动绑定舟翼云（换设备身份后自动注册，克隆机开机即上线，无需手动点按钮）',
-      (zAk && zSk ? 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + zAk + ' --sk ' + zSk + ' --isp ' + (zIsp || '电信') + ' || true' : 'echo "未配置舟翼云 ak/sk，跳过自动绑定"'),
+      icZyyRegisterCmd(zAk, zSk, zIsp, { preWait: 30, attempts: 6, gap: 40 }),
       'echo "首启完成: $NEW_HOST"',
       'IPESSCRIPT',
       'chmod +x /usr/local/bin/ipes-firstboot.sh',
@@ -1869,7 +1903,7 @@
       ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
       : '';
     // 基础绑定命令（不含业务ID）；业务ID 在 worker 里按实例单独追加写入克隆机本地
-    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
+    var cmd = pre + icZyyRegisterCmd(ak, sk, isp, { preWait: 0, attempts: 6, gap: 40 });
 
     var st = document.getElementById('icBindStatus');
     var prog = document.getElementById('icBindProgress');
@@ -1996,7 +2030,7 @@
     var pre = cleanMac
       ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
       : '';
-    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
+    var cmd = pre + icZyyRegisterCmd(ak, sk, isp, { preWait: 0, attempts: 6, gap: 40 });
     var done = 0, ok = 0, fail = 0, idx = 0;
     function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
     async function worker() {

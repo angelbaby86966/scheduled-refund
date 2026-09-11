@@ -1072,6 +1072,80 @@
     }
   }
 
+  // ============ 【v18r29】建设带宽提交：状态降级 + 读回校验 + 自动重试 ============
+  // 实证根因（2026-09-11，3 台克隆机 usbw=40 事故复盘）：
+  //   ① updateEdgeNominalInfo 对 inService(服务中) / waitAudit(交付中) 节点**一律拒绝**：
+  //        code:7「设备处于服务中或交付中状态，不允许修改设备信息」
+  //      → 必须先 stateflow 回到 configured(待配置) 才能改建设带宽，改完再流回 inService。
+  //   ② 「接口返回 code:0 但数据根本没落库」确实存在（同族接口 PUT /edgeNode/bw 实测如此）
+  //      → 提交后**必须读回 nominalInfo.usbw 校验**，不符就重试，不能只看返回码。
+  // 返回 { ok, usbw, attempts, unverified }
+  //   ok=false  → 确实读回 usbw 与期望不符（调用方应中止流转，避免"带宽没写进去却流转成功"）
+  //   unverified → 读回通道本身异常（查询失败），属于"无法校验"，放行但告警，避免误杀
+  function icSleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  async function icAdminFindNode(fn, nodeId) {
+    // GET 不能带 body（浏览器规范禁止），query 直接拼进 path
+    var res = await fn('GET', '/api/edgeNode/findEdgeNode?nodeId=' + encodeURIComponent(nodeId), null);
+    return (res && res.data) || null;
+  }
+  async function icSubmitNominalVerified(fn, m, cfg, say) {
+    say = say || function () {};
+    var want = Number(cfg.usbw);
+    var attempts = 3, lastGot = null, mismatch = 0, verifyErr = 0;
+
+    for (var i = 1; i <= attempts; i++) {
+      // ① 前置降级：服务中/交付中不允许改建设带宽 → 先 stateflow 回「待配置」
+      try {
+        var d0 = await icAdminFindNode(fn, m.nodeId);
+        var st0 = d0 && d0.stage;
+        if (st0 === 'inService' || st0 === 'waitAudit') {
+          say('↺ 节点当前为「' + (st0 === 'inService' ? '服务中' : '交付中') + '」，先降级到「待配置」再改建设带宽', 'warn');
+          await fn('POST', IC_DEFAULT_STATEFLOW_PATH, {
+            nodes: [m.nodeId], hostname: m.businessId || '', stage: 'configured'
+          });
+          await icSleep(1200);
+        }
+      } catch (e) { /* 查询/降级失败不阻断，按原流程继续提交 */ }
+
+      // ② 提交建设带宽/业务（参数保持写死的 IC_DEFAULT_* 语义不变）
+      await fn('POST', IC_DEFAULT_NOMINAL_PATH, {
+        nodeId: m.nodeId,
+        businessId: m.businessId,
+        vendorSuggestCustomers: cfg.vendorSuggestCustomers,
+        transMode: cfg.transMode,
+        isCrossNetwork: cfg.isCrossNetwork,
+        crossNetworkIsp: cfg.crossNetworkIsp,
+        isTransProv: cfg.isTransProv,
+        usbw: cfg.usbw,
+        bwNum: cfg.bwNum,
+        expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
+        ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
+      });
+
+      // ③ 读回校验：code:0 ≠ 已落库
+      await icSleep(1500);
+      try {
+        var d1 = await icAdminFindNode(fn, m.nodeId);
+        var ni = (d1 && d1.nodeInfo) || {};
+        lastGot = ni.usbw;
+        if (Number(ni.usbw) === want) {
+          say('✅ 建设带宽已写入并校验通过：usbw=' + ni.usbw + '（第 ' + i + ' 次提交）', 'ok');
+          return { ok: true, usbw: ni.usbw, attempts: i };
+        }
+        mismatch++;
+        say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回 usbw=' + ni.usbw + '（期望 ' + want + '）' +
+          (i < attempts ? '，稍后重试…' : '，仍未生效'), 'warn');
+      } catch (e) {
+        verifyErr++;
+        say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回校验失败：' + e.message +
+          (i < attempts ? '，稍后重试…' : ''), 'warn');
+      }
+      if (i < attempts) await icSleep(1500);
+    }
+    // 只有"确实读到过不符"才算失败；全程读回异常 → 视为无法校验，放行
+    return { ok: (mismatch === 0), unverified: (mismatch === 0 && verifyErr > 0), usbw: lastGot, attempts: attempts };
+  }
+
   async function icAdminHmacSign(ak, sk, timestamp) {
     var signStr = ak + ':' + timestamp;
     var enc = new TextEncoder();
@@ -2196,19 +2270,19 @@
           //   nodeId    = 32hex edge_client 节点ID（admin 用它识别节点）
           //   businessId = 76hex IPES SN（admin 业务字段，关联到黄金机 d8891866... 同格式）
           //   expectedBiz / ipScheduleType = 用户 2026-09-10 截图「编辑」页字段，写死
-          await adminFn('POST', IC_DEFAULT_NOMINAL_PATH, {
-            nodeId: m.nodeId,
-            businessId: m.businessId,
-            vendorSuggestCustomers: cfg.vendorSuggestCustomers,
-            transMode: cfg.transMode,
-            isCrossNetwork: cfg.isCrossNetwork,
-            crossNetworkIsp: cfg.crossNetworkIsp,
-            isTransProv: cfg.isTransProv,
-            usbw: cfg.usbw,
-            bwNum: cfg.bwNum,
-            expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
-            ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
+          // 【v18r29】改走 icSubmitNominalVerified：内部自动「服务中→待配置」降级 + 提交后读回 usbw 校验 + 重试。
+          //   背景：3 台克隆机曾出现"接口返回成功、实际 usbw 只有 40"（节点已是服务中被静默拒绝）。
+          //   校验不通过 → 中止本台流转，避免"带宽没写进去却流转到服务中"被漏过。
+          var sub = await icSubmitNominalVerified(adminFn, m, cfg, function (msg, lv) {
+            log('<span style="color:' + (lv === 'warn' ? '#fa8c16' : '#389e0d') + ';">' + msg + '</span>');
           });
+          if (!sub.ok) {
+            throw new Error('建设带宽提交后校验未通过：读回 usbw=' + sub.usbw + '（期望 ' + cfg.usbw +
+              '，已重试 ' + sub.attempts + ' 次），已中止流转以免带宽缺失被漏过');
+          }
+          if (sub.unverified) {
+            log('<span style="color:#fa8c16;">⚠️ ' + m.nodeId + ' 建设带宽「无法校验」（读回接口异常），已按成功继续，请稍后到 admin 后台人工核对 usbw</span>');
+          }
           submitOk++;
           // 批量部署（状态流转）：待配置 → 服务中
           // 【v18r27 纠正】改用后台真实接口 /api/edgeNode/stateflow，body = {nodes, hostname(业务ID), stage:'inService'}
@@ -2372,21 +2446,17 @@
       st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID，76hex）= <code style="color:#cf1322;">' + businessId + '</code></div>';
 
       // 步骤 2: updateEdgeNominalInfo（写业务ID = IPES SN + 带宽/业务参数；test.sh 实测接口）
-      st.innerHTML += '<div>📝 2/3 updateEdgeNominalInfo（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
-      var r1 = await icAdminCall('POST', IC_DEFAULT_NOMINAL_PATH, {
-        nodeId: nodeId,
-        businessId: businessId,
-        vendorSuggestCustomers: cfg.vendorSuggestCustomers,
-        transMode: cfg.transMode,
-        isCrossNetwork: cfg.isCrossNetwork,
-        crossNetworkIsp: cfg.crossNetworkIsp,
-        isTransProv: cfg.isTransProv,
-        usbw: cfg.usbw,
-        bwNum: cfg.bwNum,
-        expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
-        ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
+      // 【v18r29】改走 icSubmitNominalVerified：服务中/交付中会自动先降级到「待配置」，
+      //   提交后读回 nominalInfo.usbw 校验（code:0 ≠ 已落库），不符则重试，仍不符则中止流转。
+      st.innerHTML += '<div>📝 2/3 updateEdgeNominalInfo（自动 upsert 节点 + 写业务ID + 业务参数，含读回校验）...</div>';
+      var sub = await icSubmitNominalVerified(icAdminCall, { nodeId: nodeId, businessId: businessId }, cfg, function (msg, lv) {
+        st.innerHTML += '<div style="color:' + (lv === 'warn' ? '#fa8c16' : '#389e0d') + ';">' + msg + '</div>';
       });
-      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
+      if (!sub.ok) {
+        throw new Error('建设带宽提交后校验未通过：读回 usbw=' + sub.usbw + '（期望 ' + cfg.usbw +
+          '，已重试 ' + sub.attempts + ' 次），已中止流转以免带宽缺失被漏过');
+      }
+      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功并校验通过：usbw=' + sub.usbw + '（第 ' + sub.attempts + ' 次提交）</div>';
 
       // 步骤 3: 状态流转（待配置 → 服务中）
       // 【v18r27 纠正】走后台真实接口 /api/edgeNode/stateflow：

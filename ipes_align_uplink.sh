@@ -53,7 +53,7 @@ head1(){ echo; echo -e "\033[1;36m===================== $* =====================
 MODE="run"
 case "${1:-}" in
   --check|-c|check) MODE="check" ;;
-  --help|-h) sed -n '2,45p' "$0" 2>/dev/null; exit 0 ;;
+  --help|-h) [ -f "$0" ] && sed -n '2,45p' "$0"; exit 0 ;;
 esac
 
 TARGET_HAPP="${TARGET_HAPP:-9}"
@@ -522,13 +522,12 @@ final_report(){
   a_in=$(echo "$snap_after" | awk -F= '/^UDP_IN_PPS=/{print $2}')
 
   echo
-  echo -e "\033[1;36m┌──────────────────────── 对齐结果对照表 ────────────────────────┐\033[0m"
-  printf  "│ %-22s %14s %14s │\n" "指标" "对齐前" "对齐后"
-  printf  "│ %-22s %14s %14s │\n" "上行速率 (MB/s)"     "${b_up:-?}"  "${a_up:-?}"
-  printf  "│ %-22s %14s %14s │\n" "入向UDP (包/秒)"     "${b_in:-?}"  "${a_in:-?}"
-  printf  "│ %-22s %14s %14s │\n" "happ"               "-"           "${happ}/${TARGET_HAPP}"
-  printf  "│ %-22s %14s %14s │\n" "缓存占用 (MB)"       "-"           "${cache}"
-  echo -e "\033[1;36m└────────────────────────────────────────────────────────────────┘\033[0m"
+  echo -e "\033[1;36m==================== 对齐结果对照表 ====================\033[0m"
+  echo -e "  上行速率   : ${b_up:-?} MB/s   ->  \033[1;32m${a_up:-?} MB/s\033[0m"
+  echo -e "  入向UDP    : ${b_in:-?} 包/秒  ->  \033[1;32m${a_in:-?} 包/秒\033[0m"
+  echo -e "  happ       : -              ->  ${happ}/${TARGET_HAPP}"
+  echo -e "  缓存占用   : -              ->  ${cache} MB"
+  echo -e "\033[1;36m========================================================\033[0m"
 
   # 判定：入向 UDP 是否为 0 是「能不能被连进来」的直接证据
   local verdict

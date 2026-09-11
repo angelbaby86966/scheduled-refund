@@ -1006,9 +1006,22 @@
   var IC_DEFAULT_NOMINAL_PATH = '/api/edgeNode/updateEdgeNominalInfo';  // 提交带宽/业务接口（test.sh 1024 行实测此路径，非 updateEdgeRemark）
   var IC_DEFAULT_EXPECTED_BIZ = '自研Q2';    // 期望业务（截图：自研Q2；admin 字段名 expectedBiz，见 icQueryEdgeDetail 解析）
   var IC_DEFAULT_IP_SCHEDULE_TYPE = 0;       // IP调度：根据插件V4和V6是否存在来调度（截图；字段名暂按 ipScheduleType，待 admin 实际回包确认）
-  // ============ 状态流转固定值（用户 2026-09-10 明确写死，以后不许改）============
+  // ============ 状态流转固定值（用户 2026-09-10 写死；2026-09-11 r27 用户点名纠正接口）============
   var IC_DEFAULT_DEPLOY_STATUS = '服务中';   // 状态流转目标：服务中
-  var IC_DEFAULT_DEPLOY_PATH = '/api/bigDeployLog/directDeployment';  // 状态流转接口
+  // 【v18r27 关键纠正｜实证来源：反查 admin 前端 bundle】
+  //   状态流转的真实接口 = POST /api/edgeNode/stateflow
+  //     证据1 edge.C3aujRsP.js：`c=d=>e({url:"/edgeNode/stateflow",method:"post",data:d})`
+  //     证据2 edge.BLOTNJY5.js「状态流转」弹窗模板：设备ID→nodes、业务ID→**hostname**、流转状态→stage
+  //           stage 取值：''=请选择 / 'configured'=待配置 / 'inService'=服务中
+  //   旧用的 /api/bigDeployLog/directDeployment 其实是后台「强制提交」/「再次提交」按钮：
+  //     `R({ nodeId:e.nodeID, isFormat:l })` —— body 只有 {nodeId,isFormat}，内部会跑
+  //     FormatQiYIInstallCodeForEcache 生成爱奇艺安装码 → 节点没有「业务线运营商」就报“未知运营商”。
+  //     （r22 往它 body 里加 vendorCustomer:41 属于误判，该接口不吃这个字段。）
+  //   ⚠️ stateflow 的「业务ID」在请求体里就叫 hostname，不是笔误，是后台约定。
+  var IC_DEFAULT_STATEFLOW_PATH = '/api/edgeNode/stateflow';
+  var IC_DEFAULT_STATEFLOW_STAGE = 'inService';
+  // 仅当 stateflow 路由缺失（HTTP 404/405）时的兜底老接口，正常流程不再使用
+  var IC_DEFAULT_DEPLOY_PATH = '/api/bigDeployLog/directDeployment';
 
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
@@ -1036,6 +1049,28 @@
     return IC_HMAC_SK;
   }
   function icHasAdminHmac() { return !!(icAdminAppId() && icAdminAk() && icAdminSk()); }
+
+  // 【v18r27】状态流转统一入口（后台真实接口 = stateflow）
+  //   body = { nodes:[nodeId], hostname:<业务ID=IPES SN>, stage:'inService' }
+  //   ⚠️「业务ID」在后台的字段名就叫 hostname（见 admin 前端 edge 页状态流转弹窗模板）
+  //   call 可传调用方自己的 adminFn（保持各自的鉴权通道不变）
+  //   仅当 stateflow 路由缺失（HTTP 404/405）才兜底老的 directDeployment（body={nodeId,isFormat:false}）
+  async function icStateFlow(nodeId, businessId, call) {
+    var fn = call || icAdminCall;
+    try {
+      return await fn('POST', IC_DEFAULT_STATEFLOW_PATH, {
+        nodes: [nodeId],
+        hostname: businessId,
+        stage: IC_DEFAULT_STATEFLOW_STAGE,
+      });
+    } catch (e) {
+      var msg = String((e && e.message) || '');
+      var routeMissing = /HTTP\s*(404|405)/.test(msg) || /404 page not found|no route|not found/i.test(msg);
+      if (!routeMissing) throw e;
+      icLog('[镜像克隆] stateflow 路由缺失，回退 directDeployment 兜底', 'warn');
+      return await fn('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, isFormat: false });
+    }
+  }
 
   async function icAdminHmacSign(ak, sk, timestamp) {
     var signStr = ak + ':' + timestamp;
@@ -1935,7 +1970,7 @@
     //   步骤 1：下发 zyy_init 绑定命令（带 ak/sk/isp）
     //   步骤 2：SSH 读 device_code（前端预生成 76hex 新 SN 写入 ipes 容器，避让黄金机 SN 冲突）
     //   步骤 3：updateEdgeNominalInfo 提交带宽业务（7 字段 + expectedBiz/ipScheduleType 全部从 IC_DEFAULT_* 读，对齐 test.sh + 截图）
-    //   步骤 4：directDeployment 状态流转 → "服务中"（业务ID = 76hex IPES SN）
+    //   步骤 4：stateflow 状态流转 → "服务中"（业务ID = 76hex IPES SN）【v18r27：原写 directDeployment，后端实为「强制提交」，已纠正】
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     var ownerId = (document.getElementById('icBindOwnerId').value || '').trim();
@@ -2098,7 +2133,7 @@
     matched = matchedValid;
     log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 76hex 业务ID，开始调 admin 后台流转</b>');
 
-    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + directDeployment
+    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + stateflow（v18r27 纠正）
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
     // 【v18r16】早期校验：状态流转必须有 HMAC 三件套。
     // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect timeout 110），
@@ -2142,27 +2177,26 @@
           });
           submitOk++;
           // 批量部署（状态流转）：待配置 → 服务中
-          // 【v18r16 关键修复】请求体必须含 { nodeId, businessId, status: "服务中" }（对齐 transition_to_service.sh 模板）。
-          // 旧代码只发 { nodeId } → admin 报 "未选择期望业务"（code:7）。
-          // 默认 endpoint = /api/bigDeployLog/directDeployment（已实测可被 x-token JWT 鉴权到业务层），如不通可在「高级部署请求体」覆盖 path
-          var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || IC_DEFAULT_DEPLOY_PATH;
+          // 【v18r27 纠正】改用后台真实接口 /api/edgeNode/stateflow，body = {nodes, hostname(业务ID), stage:'inService'}
+          //   证据见文件顶部 IC_DEFAULT_STATEFLOW_* 常量段注释（反查 admin 前端 bundle）。
+          //   旧的 directDeployment 只是兜底（路由缺失时），不再默认使用。
           var deployBody;
           if (cfg.deployBodyOverride) {
             try { deployBody = JSON.parse(cfg.deployBodyOverride); } catch (e) { deployBody = null; }
           }
-          if (!deployBody) {
-            // 【6 步流程写死】状态流转目标写死为"服务中"+ 业务ID = 76hex IPES SN
-            // 【v18r22 补全】FormatQiYinInstallCodeForEcache 需要"运营商"字段。
-            //   字段名猜 vendorCustomer（与 updateEdgeNominalInfo 的 vendorSuggestCustomers 同源）；
-            //   值 = IC_DEFAULT_VENDOR_CUSTOMERS = 41（同 updateEdgeNominalInfo）。
-            //   如还报"未知运营商"，请把 F12 Network 里 /api/bigDeployLog/directDeployment 的真实请求 body 截图发我看，确认字段名到底是 vendorCustomer / vendor / isp 哪个。
-            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: IC_DEFAULT_DEPLOY_STATUS, vendorCustomer: cfg.vendorSuggestCustomers };
+          var dRes;
+          if (deployBody) {
+            // 「高级部署请求体」手工覆盖：完全按用户填的发（保持原能力）
+            var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || IC_DEFAULT_STATEFLOW_PATH;
+            dRes = await adminFn('POST', deployPath, deployBody);
+          } else {
+            dRes = await icStateFlow(m.nodeId, m.businessId, adminFn);
+            deployBody = { nodes: [m.nodeId], hostname: m.businessId, stage: IC_DEFAULT_STATEFLOW_STAGE };
           }
-          var dRes = await adminFn('POST', deployPath, deployBody);
           var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;
           if (dCode !== null && dCode !== 0) {
             throw new Error('状态流转返回业务码 ' + dCode + '：' + ((dRes && dRes.msg) || JSON.stringify(dRes).slice(0, 200)) +
-              '（POST ' + deployPath + ' body=' + JSON.stringify(deployBody) + '）');
+              '（POST ' + IC_DEFAULT_STATEFLOW_PATH + ' body=' + JSON.stringify(deployBody) + '）');
           }
           deployOk++;
           successList.push(m);
@@ -2241,13 +2275,13 @@
   }
   window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
-  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeNominalInfo（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
+  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeNominalInfo（写业务ID/期望业务/带宽）+ stateflow（流转到服务中；v18r27 纠正）
   // 业务ID = IPES SN（76hex，从 `docker exec ipes cat bin/ipes_sn` 读），不是 nodeId（32hex，edge_client device_code）
   // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，一键把业务ID 填到 admin 并流转
   // 流程：
   //   1) SWAS RunCommand（实例内 docker exec ipes cat bin/ipes_sn）+ DescribeCommandInvocations → 拿 76hex IPES SN
   //   2) POST /api/edgeNode/updateEdgeNominalInfo  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
-  //   3) POST /api/bigDeployLog/directDeployment  body={nodeId}
+  //   3) POST /api/edgeNode/stateflow  body={nodes:[nodeId], hostname:<业务ID>, stage:"inService"}
   async function icDirectDeployByNodeId() {
     if (!icGuard()) return;
     var st = document.getElementById('icBindStatus');
@@ -2272,7 +2306,7 @@
       alert('请二选一填写：admin 鉴权\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
       return;
     }
-    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin directDeployment：流转「待配置 → 服务中」\n\n确认执行？')) return;
+    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin stateflow：流转「待配置 → 服务中」（body={nodes,hostname,stage}）\n\n确认执行？')) return;
 
     st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
     var cfg = {
@@ -2321,19 +2355,16 @@
       st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
 
       // 步骤 3: 状态流转（待配置 → 服务中）
-      // 【状态流转写死 - 用户 2026-09-10 明确】目标 = IC_DEFAULT_DEPLOY_STATUS（"服务中"）；业务ID = IPES SN（76hex）
-      //   body = { nodeId, businessId(IPES SN), status: "服务中" }，对齐 admin 后台「更多 → 状态流转」弹窗
+      // 【v18r27 纠正】走后台真实接口 /api/edgeNode/stateflow：
+      //   body = { nodes:[nodeId], hostname:<业务ID=IPES SN>, stage:'inService' }
+      //   （「业务ID」在后台字段名就叫 hostname；旧 directDeployment 是「强制提交」，会报未知运营商）
       //   businessId 不允许手填、不允许传空、不允许短于 76hex
-      // 【v18r22 补全】FormatQiYinInstallCodeForEcache 需要"运营商"字段。
-      //   字段名猜 vendorCustomer；值 = cfg.vendorSuggestCustomers = 41（同 updateEdgeNominalInfo）。
-      //   如还报"未知运营商"，请把 F12 Network 里 /api/bigDeployLog/directDeployment 的真实请求 body 截图发我看。
-      //   任何人（含 AI）不得改这一段，除非用户明确解封
       st.innerHTML += '<div>🔄 3/3 状态流转（流转到【' + IC_DEFAULT_DEPLOY_STATUS + '】，业务ID=' + businessId + '）...</div>';
-      var r2 = await icAdminCall('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, businessId: businessId, status: IC_DEFAULT_DEPLOY_STATUS, vendorCustomer: cfg.vendorSuggestCustomers });
+      var r2 = await icStateFlow(nodeId, businessId, icAdminCall);
       var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
       if (c2 !== null && c2 !== 0) {
         throw new Error('状态流转返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
-          '（POST ' + IC_DEFAULT_DEPLOY_PATH + ' body={nodeId, businessId, status:"' + IC_DEFAULT_DEPLOY_STATUS + '"}）');
+          '（POST ' + IC_DEFAULT_STATEFLOW_PATH + ' body={nodes:[' + nodeId + '], hostname:' + businessId + ', stage:"' + IC_DEFAULT_STATEFLOW_STAGE + '"}）');
       }
       st.innerHTML += '<div style="color:#389e0d;">✅ 状态流转成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 

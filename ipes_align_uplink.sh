@@ -575,6 +575,9 @@ final_report(){
   echo -e "  上行速率   : ${b_up:-?} MB/s   ->  \033[1;32m${a_up:-?} MB/s\033[0m"
   echo -e "  入向UDP    : ${b_in:-?} 包/秒  ->  \033[1;32m${a_in:-?} 包/秒\033[0m"
   echo -e "  happ       : -              ->  ${happ}/${TARGET_HAPP}"
+  if [ "${happ:-0}" -lt "$TARGET_HAPP" ] 2>/dev/null; then
+    warn "复测时 happ=${happ} < ${TARGET_HAPP}：容器刚重建，happ worker 仍在初始化（通常需 30s+ 才上报），请稍后在本机执行 ./bin/ipes health 复核是否到 ${TARGET_HAPP}（配置层已对齐，不必重跑本脚本）"
+  fi
   echo -e "  缓存占用   : -              ->  ${cache} MB"
   echo -e "\033[1;36m========================================================\033[0m"
 

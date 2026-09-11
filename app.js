@@ -943,8 +943,10 @@ async function loadAllRegionTemplatesSilent() {
     results.forEach(function(r) {
       if (!r.success) return;
       r.templates.forEach(function(t) {
-        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {} };
+        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {}, rulesByRegion: {} };
         nameMap[t.Name].regionTemplates[r.regionId] = t.FirewallTemplateId;
+        // 顺手记下规则：其它账号缺同名模板时用这份规则自动创建（DescribeFirewallTemplates 会带回 FirewallTemplateRules）
+        nameMap[t.Name].rulesByRegion[r.regionId] = t.FirewallTemplateRules || [];
       });
     });
     state.allTemplates = Object.values(nameMap);
@@ -1141,8 +1143,10 @@ async function loadAllRegionTemplates() {
     results.forEach(function(r) {
       if (!r.success) return;
       r.templates.forEach(function(t) {
-        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {} };
+        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {}, rulesByRegion: {} };
         nameMap[t.Name].regionTemplates[r.regionId] = t.FirewallTemplateId;
+        // 顺手记下规则：其它账号缺同名模板时用这份规则自动创建（DescribeFirewallTemplates 会带回 FirewallTemplateRules）
+        nameMap[t.Name].rulesByRegion[r.regionId] = t.FirewallTemplateRules || [];
       });
     });
     state.allTemplates = Object.values(nameMap);
@@ -1210,7 +1214,7 @@ function onFwRegionTemplateChange(regionId) {
 
 async function batchApplyAllTemplates() {
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('🛡️ 开始批量执行防火墙模板...', 'info');
+  log('🛡️ 开始批量执行防火墙模板（目标账号缺模板 → 按锁定规则自动创建，不跳过）...', 'info');
 
   try {
     if (!state.allTemplates || state.allTemplates.length === 0) {
@@ -1244,21 +1248,36 @@ async function batchApplyAllTemplates() {
     log('📋 已选择模板的地域：' + Object.keys(regionSelections).map(function(r) { return REGION_INFO[r]; }).join('、'), 'info');
     log('👥 凭证（' + credList.length + ' 个，逐账号串行执行）：' + credList.join('、'), 'info');
 
+    // 🔒 锁定所选模板的「名称+描述+规则」：切换凭证后某账号没有同名模板时，用这份规则自动创建，不再跳过
+    //    规则来源：点击「同步阿里云模板」时缓存的 FirewallTemplateRules（DescribeFirewallTemplates 自带）
+    var lockedSpecs = captureLockedFwSpecs(regionSelections);
+    var lockedNames = Object.keys(lockedSpecs);
+    if (lockedNames.length === 0) {
+      log('⚠️ 没能读到所选模板的规则 —— 若目标账号缺模板将无法自动创建。请先用「有该模板的账号」点一次「🔄 同步阿里云模板」再执行', 'warn');
+    } else {
+      lockedNames.forEach(function(nm) {
+        log('🔒 已锁定模板「' + nm + '」的规则（' + lockedSpecs[nm].rules.length + ' 条）：' +
+          lockedSpecs[nm].rules.map(function(r) { return (r.RuleProtocol || '?') + ' ' + (r.Port || '?'); }).join('、'), 'info');
+      });
+      log('✅ 目标账号缺模板时，将按上述规则自动创建后再应用（不会再跳过）', 'success');
+    }
+
     var btn = document.getElementById('fwApplyBtn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 应用中...'; }
 
     // 多账号串行执行（单例客户端签名实时读 active 凭证，并行会密钥错配）
     var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
-    var grand = { ok: 0, fail: 0 };
+    var grand = { ok: 0, fail: 0, tplCreated: 0 };
     for (var ci = 0; ci < credList.length; ci++) {
       var pname = credList[ci];
       log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-      log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始应用防火墙模板…', 'warn');
+      log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始应用防火墙模板（缺模板自动创建）…', 'warn');
       try {
         AliyunClient.useProfile(pname);
-        var st = await runFwApplyForProfile(pname, regionSelections, regionIds);
+        var st = await runFwApplyForProfile(pname, regionSelections, regionIds, lockedSpecs);
         grand.ok += st.ok;
         grand.fail += st.fail;
+        grand.tplCreated += (st.tplCreated || 0);
       } catch (e) {
         log('❌ [凭证 ' + pname + '] 执行异常: ' + (e && e.message || e), 'error');
       }
@@ -1269,39 +1288,77 @@ async function batchApplyAllTemplates() {
     renderCredMultiFor(fwApplyCredMulti);
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('🏆 防火墙模板批量执行全部完成（' + credList.length + ' 个凭证）: 成功 ' + grand.ok + ' 批, 失败 ' + grand.fail + ' 批', grand.fail === 0 ? 'success' : 'warn');
-    if (btn) { btn.disabled = false; btn.textContent = '🚀 应用到所有云主机'; }
+    log('🏆 防火墙模板批量执行全部完成（' + credList.length + ' 个凭证）: 自动创建模板 ' + grand.tplCreated + ' 个, 成功 ' + grand.ok + ' 批, 失败 ' + grand.fail + ' 批', grand.fail === 0 ? 'success' : 'warn');
+    if (btn) { btn.disabled = false; btn.textContent = '🚀 应用到所有云主机（缺模板自动创建）'; }
   } catch (err) {
     log('❌ 严重错误: ' + err.message, 'error');
     console.error(err);
   }
 }
 
-// 单凭证：加载全部实例 → 3 遍应用各地域所选模板（10台/批）
-async function runFwApplyForProfile(pname, regionSelections, regionIds) {
+// 单凭证：模板「有则复用、缺则按锁定规则自动创建」→ 加载全部实例 → 3 遍应用（10台/批）
+async function runFwApplyForProfile(pname, regionSelections, regionIds, lockedSpecs) {
   var selectedRegionIds = regionIds.filter(function(r) { return regionSelections[r]; });
+  lockedSpecs = lockedSpecs || {};
 
   // 🔄 模板ID是账号级的：切换凭证后必须用当前账号重新同步模板，否则拿别的账号的
   //    TemplateId 去应用会报 "The specified parameter FirewallTemplateId value is not valid"
-  var tplMap = {};   // regionId -> { 模板名: 模板ID }（当前凭证的）
+  //    tplMap[regionId][模板名] = { id, description, rules }
+  var tplMap = {};
   await Promise.all(selectedRegionIds.map(async function(rid) {
     try {
       var lst = await AliyunClient.listFirewallTemplates(rid);
       var m = {};
-      ((lst && lst.FirewallTemplates) || []).forEach(function(t) { m[t.Name] = t.FirewallTemplateId; });
+      ((lst && lst.FirewallTemplates) || []).forEach(function(t) {
+        m[t.Name] = { id: t.FirewallTemplateId, description: t.Description || '', rules: (t.FirewallTemplateRules || []).map(fwRuleLite) };
+      });
       tplMap[rid] = m;
     } catch (e) {
       tplMap[rid] = {};
       log('⚠️ [' + REGION_INFO[rid] + '] 同步模板失败: ' + (e.message || e), 'warn');
     }
   }));
-  // 缺失检查：当前账号没有所选模板的地域跳过（可用「创建防火墙」弹窗一键补建+应用）
-  selectedRegionIds.forEach(function(rid) {
-    var want = regionSelections[rid];
-    if (want && !(tplMap[rid] && tplMap[rid][want])) {
-      log('⚠️ [凭证 ' + pname + '] [' + REGION_INFO[rid] + '] 该账号下没有模板「' + want + '」，跳过该地域（可用「创建防火墙」弹窗批量执行自动补建）', 'warn');
+
+  // ✅ 缺模板 → 自动创建（不再跳过）。规则优先用「锁定规则」，其次用本账号/其它账号已采到的规则。
+  var tplCreated = 0;
+  for (var ei = 0; ei < selectedRegionIds.length; ei++) {
+    var erid = selectedRegionIds[ei];
+    var want = regionSelections[erid];
+    if (!want) continue;
+    if (!tplMap[erid]) tplMap[erid] = {};
+    var mine = tplMap[erid][want];
+
+    // 1) 本账号已有 → 直接复用，并把它的规则采集进 lockedSpecs，供后续缺模板的账号复制
+    if (mine && mine.id) {
+      if (mine.rules && mine.rules.length > 0 && (!lockedSpecs[want] || !lockedSpecs[want].rules || lockedSpecs[want].rules.length === 0)) {
+        lockedSpecs[want] = { description: mine.description, rules: mine.rules };
+        log('  📌 [凭证 ' + pname + '] 采集到模板「' + want + '」规则 ' + mine.rules.length + ' 条，供缺模板的账号复用', 'info');
+      }
+      continue;
     }
-  });
+
+    // 2) 缺模板 → 自动创建（这一步就是原来「跳过该地域」的位置）
+    var spec = lockedSpecs[want];
+    if (!spec || !spec.rules || spec.rules.length === 0) {
+      log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 无模板「' + want + '」且没有可复制的规则 → 无法自动创建。请先用「有该模板的账号」点一次「🔄 同步阿里云模板」后重试', 'error');
+      continue;
+    }
+    try {
+      var cr = await AliyunClient.createFirewallTemplate(erid, want, spec.description || '', spec.rules);
+      var nid = cr && cr.FirewallTemplateId;
+      if (nid) {
+        tplMap[erid][want] = { id: nid, description: spec.description || '', rules: spec.rules };
+        tplCreated++;
+        log('  🆕 [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 该账号无模板「' + want + '」→ 已按锁定规则自动创建（' +
+          spec.rules.length + ' 条）：' + spec.rules.map(function(r) { return (r.RuleProtocol || '?') + ' ' + (r.Port || '?'); }).join('、') + ' → ' + nid, 'success');
+      } else {
+        log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 创建模板「' + want + '」未返回模板ID', 'error');
+      }
+    } catch (ce) {
+      log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 自动创建模板「' + want + '」失败: ' + (ce && ce.message || ce), 'error');
+    }
+    await new Promise(function(r) { setTimeout(r, 200); });
+  }
 
   // 加载所有地域的全部实例（带翻页，不限 100 台上限）
   log('🔄 [凭证 ' + pname + '] 加载全部实例...', 'info');
@@ -1341,9 +1398,10 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
       var templateName = regionSelections[rid3];
       if (!templateName) return;
 
-      // 用当前凭证的模板映射按名取ID（跨账号旧ID无效，必须用刚同步的 tplMap）
-      var templateId = tplMap[rid3] ? tplMap[rid3][templateName] : null;
-      if (!templateId) { log('⚠️ [' + REGION_INFO[rid3] + '] 无模板「' + templateName + '」，跳过', 'warn'); return; }
+      // 用当前凭证的模板映射按名取ID（跨账号旧ID无效，必须用刚同步/刚自动创建的 tplMap）
+      var td = tplMap[rid3] ? tplMap[rid3][templateName] : null;
+      var templateId = td && td.id;
+      if (!templateId) { log('⚠️ [' + REGION_INFO[rid3] + '] 无模板「' + templateName + '」（自动创建也失败），跳过', 'warn'); return; }
 
       var rd = state.regionData[rid3];
       var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
@@ -1380,8 +1438,36 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
     }
   }
 
-  log('🏁 [凭证 ' + pname + '] 完成: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
-  return { ok: totalSuccess, fail: totalFail };
+  log('🏁 [凭证 ' + pname + '] 完成: 自动创建模板 ' + tplCreated + ' 个, 应用成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
+  return { ok: totalSuccess, fail: totalFail, tplCreated: tplCreated };
+}
+
+// 规则精简：只保留创建模板需要的字段（DescribeFirewallTemplates 与创建接口的字段名一致）
+function fwRuleLite(r) {
+  return {
+    RuleProtocol: r.RuleProtocol || '',
+    Port: r.Port || '',
+    SourceCidrIp: r.SourceCidrIp || '0.0.0.0/0',
+    Remark: r.Remark || ''
+  };
+}
+
+// 从「已同步的模板列表」里取出所选模板的规则，作为跨账号自动创建的依据。
+// 返回 { 模板名: { description, rules: [...] } }
+function captureLockedFwSpecs(regionSelections) {
+  var specs = {};
+  var tpls = state.allTemplates || [];
+  Object.keys(regionSelections).forEach(function(rid) {
+    var want = regionSelections[rid];
+    if (!want || specs[want]) return;   // 同名模板规则一致，取一次即可
+    for (var i = 0; i < tpls.length; i++) {
+      var t = tpls[i];
+      if (t.name !== want) continue;
+      var rules = ((t.rulesByRegion && t.rulesByRegion[rid]) || []).map(fwRuleLite);
+      if (rules.length > 0) { specs[want] = { description: t.description || '', rules: rules }; break; }
+    }
+  });
+  return specs;
 }
 
 // ====== 命令助手 ======

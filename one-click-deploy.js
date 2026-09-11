@@ -1,11 +1,22 @@
 /* ============================================================
- * one-click-deploy.js  v9  —  对齐 admin 真实接口版
+ * one-click-deploy.js  v16  —  对齐 admin 真实接口 + 带宽写入校验版
  * 一键部署：节点就绪 → 批量提交 → 批量部署
  *
  * 真实接口（来自 admin.zhouyi.top 前端源码）：
  *   抓取节点：GET  /api/edgeNode/getEdgeNodeList
- *   批量提交：POST /api/edgeNode/updateEdgeRemark
- *   批量部署：POST /api/bigDeployLog/directDeployment
+ *   批量提交：POST /api/edgeNode/updateEdgeNominalInfo   ← v16 纠正
+ *   状态流转：POST /api/edgeNode/stateflow
+ *   （/api/bigDeployLog/directDeployment 是后台「强制提交/再次提交」按钮，不是状态流转，仅兜底）
+ *
+ * v16 关键变更（用户 2026-09-11 点名解封）：
+ *   ① 批量提交接口纠正：updateEdgeRemark → updateEdgeNominalInfo
+ *      （image-clone.js 早在 r20 就查明真接口是 updateEdgeNominalInfo；
+ *        updateEdgeRemark 对带宽/业务字段静默无效 —— 一键部署这条路一直是白提交的）
+ *   ② 提交前若节点已是「服务中/交付中」，自动 stateflow 降级到「待配置」
+ *      （后台规则：建设带宽只能在待配置阶段提交，否则返回 code:7 拒绝）
+ *   ③ 提交后读回 nominalInfo.usbw 校验，不符则重试 3 次；确实不符则中止该台流转
+ *      （code:0 ≠ 已落库，杜绝「带宽没写进去却流转成功」）
+ *   ④ 请求体补齐 expectedBiz / ipScheduleType（与 image-clone.js 契约一致）
  *
  * v9 关键变更：
  *   在「待配置 → 服务中」流转（部署成功）时，把每台设备的 device_id
@@ -294,6 +305,9 @@ async function ocdCallAdmin(token, method, path, query, body) {
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OCD_ANON_KEY },
     body: JSON.stringify({
       token: token,
+      // 【v16】多通道注入 token：读接口（findEdgeNode 等）在转发器只认 x-token 头，
+      //   POST 多传这几个 header 无副作用（与 ocdFetchOwnerNodes 保持一致）。
+      headers: { Authorization: token, 'X-Token': token, 'x-token': token, Token: token },
       method: method || 'POST',
       path: path,
       query: query || '',
@@ -307,6 +321,95 @@ async function ocdCallAdmin(token, method, path, query, body) {
     throw new Error('HTTP ' + resp.status + (detail ? ' · ' + detail : '') + '（上游接口返回非 2xx，请检查 token 是否失效）');
   }
   return json;
+}
+
+/* ---------- 节点状态读取 / 建设带宽提交（v16 新增，与 image-clone.js r29 同契约） ---------- */
+
+// 提交建设带宽接口 + 状态流转接口（写死，来自 admin 前端 bundle 反查）
+var OCD_NOMINAL_PATH = '/api/edgeNode/updateEdgeNominalInfo';
+var OCD_STATEFLOW_PATH = '/api/edgeNode/stateflow';
+var OCD_EXPECTED_BIZ = '自研Q2';
+var OCD_IP_SCHEDULE_TYPE = 0;
+
+// 从 ocdCallAdmin 的返回里取出 admin 响应体的内层 data
+//   ocdCallAdmin 返回 { ok, data }；data = admin 响应体 { code, data, msg }
+function ocdUnwrapAdmin(resp) {
+  var d = resp && resp.data;
+  if (d && d.data !== undefined) return d.data;
+  return d || null;
+}
+
+// 读取单个节点（stage / nodeInfo）
+async function ocdReadNode(token, nodeId) {
+  var resp = await ocdCallAdmin(token, 'GET', '/api/edgeNode/findEdgeNode', 'nodeId=' + encodeURIComponent(nodeId), null);
+  var inner = ocdUnwrapAdmin(resp);
+  var code = resp && resp.data && resp.data.code;
+  if (code !== undefined && code !== 0) {
+    throw new Error('findEdgeNode 返回业务码 ' + code + '：' + ((resp.data && resp.data.msg) || ''));
+  }
+  return inner || {};
+}
+
+// 提交建设带宽（含：前置降级 + 提交 + 读回校验重试）
+//   m = { nodeId, businessId }；cfg = ocdGetConfig()；say = function(msg, level)
+//   返回 { ok, usbw, attempts, unverified }
+//     ok=false        → 确实读到 usbw 不符（校验失败，调用方应中止该台流转）
+//     unverified=true → 读回通道本身异常，属"无法校验"，放行但告警
+async function ocdSubmitNominalVerified(token, m, cfg, say) {
+  say = say || function () {};
+  var want = Number(cfg.usbw);
+  var attempts = 3, lastGot = null, mismatch = 0, verifyErr = 0, lastResp = null;
+
+  for (var i = 1; i <= attempts; i++) {
+    // ① 前置降级：服务中/交付中不允许改建设带宽 → 先 stateflow 回「待配置」
+    try {
+      var d0 = await ocdReadNode(token, m.nodeId);
+      var st0 = d0 && d0.stage;
+      if (st0 === 'inService' || st0 === 'waitAudit') {
+        say('↺ 节点当前为「' + (st0 === 'inService' ? '服务中' : '交付中') + '」，先降级到「待配置」再改建设带宽', 'warn');
+        await ocdCallAdmin(token, 'POST', OCD_STATEFLOW_PATH, '', {
+          nodes: [m.nodeId], hostname: m.businessId || '', stage: 'configured'
+        });
+        await ocdSleep(1200);
+      }
+    } catch (e) { /* 查询/降级失败不阻断，按原流程继续提交 */ }
+
+    // ② 提交建设带宽/业务（接口已纠正为 updateEdgeNominalInfo）
+    lastResp = await ocdCallAdmin(token, 'POST', OCD_NOMINAL_PATH, '', {
+      nodeId: m.nodeId,
+      businessId: m.businessId,
+      vendorSuggestCustomers: cfg.vendorSuggestCustomers,
+      transMode: cfg.transMode,
+      isCrossNetwork: cfg.isCrossNetwork,
+      crossNetworkIsp: cfg.crossNetworkIsp,
+      isTransProv: cfg.isTransProv,
+      usbw: cfg.usbw,
+      bwNum: cfg.bwNum,
+      expectedBiz: OCD_EXPECTED_BIZ,
+      ipScheduleType: OCD_IP_SCHEDULE_TYPE,
+    });
+
+    // ③ 读回校验：code:0 ≠ 已落库
+    await ocdSleep(1500);
+    try {
+      var d1 = await ocdReadNode(token, m.nodeId);
+      var ni = (d1 && d1.nodeInfo) || {};
+      lastGot = ni.usbw;
+      if (Number(ni.usbw) === want) {
+        say('✅ 建设带宽已写入并校验通过：usbw=' + ni.usbw + '（第 ' + i + ' 次提交）', 'ok');
+        return { ok: true, usbw: ni.usbw, attempts: i, resp: lastResp };
+      }
+      mismatch++;
+      say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回 usbw=' + ni.usbw + '（期望 ' + want + '）' +
+        (i < attempts ? '，稍后重试…' : '，仍未生效'), 'warn');
+    } catch (e) {
+      verifyErr++;
+      say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回校验失败：' + (e.message || e) +
+        (i < attempts ? '，稍后重试…' : ''), 'warn');
+    }
+    if (i < attempts) await ocdSleep(1500);
+  }
+  return { ok: (mismatch === 0), unverified: (mismatch === 0 && verifyErr > 0), usbw: lastGot, attempts: attempts, resp: lastResp };
 }
 
 /* ---------- 配置参数默认值 ---------- */
@@ -391,7 +494,7 @@ async function ocdStartDeploy() {
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ 部署中...'; }
   if (stEl && !extracted) stEl.innerHTML = '';
 
-  ocdAddLog(0, '一键部署启动（真实接口 /api/edgeNode/updateEdgeRemark + /api/edgeNode/stateflow）', 'info',
+  ocdAddLog(0, '一键部署启动（真实接口 /api/edgeNode/updateEdgeNominalInfo + /api/edgeNode/stateflow）', 'info',
     '节点 ' + nodeIds.length + ' 台 · ' + cfg.usbw + 'Mbps × ' + cfg.bwNum + '条线 · ' + (cfg.isTransProv ? '跨省' : '不跨省') +
     (extracted ? ' · 属主 ' + cfg.ownerId + ' 自动抓取' : ' · 手动粘贴'));
 
@@ -417,25 +520,34 @@ async function ocdStartDeploy() {
       var batchNum = idx + 1;
       ocdAddLog(2, '第 ' + batchNum + '/' + chunks.length + ' 批', 'info', '节点 ' + chunk.length + ' 台');
 
-      // 步骤2：批量提交  →  POST /api/edgeNode/updateEdgeRemark（admin 前端"上机小助手-批量提交"真实接口）
-      // 该接口按节点逐个调用（参考 setupAssistant 源码 e.map(e=>_(l))），这里批内并发对齐手动。
-      var submitPath = '/api/edgeNode/updateEdgeRemark';
+      // 步骤2：批量提交  →  POST /api/edgeNode/updateEdgeNominalInfo
+      //   【v16 接口纠正，用户 2026-09-11 点名解封】
+      //   ⚠️ 旧代码用的是 /api/edgeNode/updateEdgeRemark（名称来自"上机小助手-批量提交"），
+      //      但 image-clone.js 在 r20 已实测查明：真正写带宽/业务的是 updateEdgeNominalInfo；
+      //      updateEdgeRemark 对本流程要写的字段静默无效 —— 一键部署的带宽提交一直是空转的。
+      //   ✅ 现改为每台走 ocdSubmitNominalVerified：服务中/交付中自动先降级到「待配置」
+      //      → 提交 → 读回 nominalInfo.usbw 校验（不符重试 3 次；确实不符则中止该台，不进流转）。
+      //      批内并发，对齐手动操作。
       if (submitOverride) {
         try { submitOverride = JSON.parse(submitOverride); } catch (e) { ocdAddLog(2, '提交请求体 JSON 解析失败', 'error', e.message); throw e; }
       }
       var submitResults = await Promise.allSettled(chunk.map(function (id) {
-        var body = submitOverride || {
-          nodeId: id,
-          businessId: cfg.businessId || id,
-          vendorSuggestCustomers: cfg.vendorSuggestCustomers,
-          transMode: cfg.transMode,
-          isCrossNetwork: cfg.isCrossNetwork,
-          crossNetworkIsp: cfg.crossNetworkIsp,
-          isTransProv: cfg.isTransProv,
-          usbw: cfg.usbw,
-          bwNum: cfg.bwNum,
-        };
-        return ocdCallAdmin(token, 'POST', submitPath, '', body);
+        // 高级覆盖模式：完全按用户填的发（保持原能力，不做校验）
+        if (submitOverride) {
+          return ocdCallAdmin(token, 'POST', OCD_NOMINAL_PATH, '', submitOverride);
+        }
+        var m = { nodeId: id, businessId: cfg.businessId || id };
+        return ocdSubmitNominalVerified(token, m, cfg, function (msg, lv) {
+          ocdAddLog(2, '节点 ' + String(id).slice(0, 12) + '…', lv === 'warn' ? 'warn' : 'ok', msg);
+        }).then(function (v) {
+          if (!v.ok) {
+            throw new Error('建设带宽读回校验失败：usbw=' + v.usbw + '（期望 ' + cfg.usbw + '），已中止该台流转');
+          }
+          if (v.unverified) {
+            ocdAddLog(2, '节点 ' + String(id).slice(0, 12) + '…', 'warn', '读回校验通道异常，无法确认带宽是否落库（已放行）');
+          }
+          return v.resp; // 保持 r.value = { ok, data } 结构，下方判定逻辑不变
+        });
       }));
       // 【v18r14】同样按 admin 业务码 data.code 判定，不只看 supabase 层 ok
       var submitOk = submitResults.filter(function (r) {

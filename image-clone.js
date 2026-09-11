@@ -673,6 +673,33 @@
     throw lastErr || new Error('CreateOrder 调用失败');
   }
 
+  /**
+   * 【v18r26】逐台串行下单 —— 保证「填几台就生成几台」
+   *
+   * 背景（2026-09-11 用户反馈「要买 2 台，为啥只买了一台」）：
+   *   排查结论（实测三组对照）：
+   *     ① 直连阿里云 SWAS CreateOrder + Commodity.Amount=2 → 订单 Quantity=2（80 元）✅ 接口本身支持多台
+   *     ② 走线上 Supabase 代理 createOrder + Amount=2   → 订单 Quantity=2（80 元）✅ 代理也正常
+   *     ③ 用户实际生成的订单（OrderId 2003552603620989）→ Quantity=1（40 元）❌ 数量在链路上丢了
+   *   即：接口与代理都没问题，但用户实际链路（旧版前端缓存 / 旧版代理）会把 Commodity.Amount 吞掉，
+   *   后端按默认 Amount=1 下单。
+   *
+   *   由于前端无法回查订单数量做校验（代理未提供 QueryOrders/GetOrderDetail 接口），
+   *   唯一 100% 可控的办法就是「逐台调用、每单只买 1 台」：
+   *   无论 Amount 参数是否生效，最终台数都严格等于用户填写数量。
+   * 代价：生成 amount 个待支付订单 —— 阿里云「费用中心→订单管理」可勾选后批量支付。
+   */
+  async function icCreateOrdersOneByOne(region, imageId, planId, amount, period, onProgress) {
+    var orderIds = [];
+    for (var i = 0; i < amount; i++) {
+      if (i > 0) await icSleep(400);   // 轻微间隔，避免触发 SWAS 限流
+      var one = await icCreateOrder(region, imageId, planId, 1, period);
+      orderIds.push(one.OrderId);
+      if (onProgress) { try { onProgress(i + 1, amount, one.OrderId); } catch (e) { /* 忽略回调异常 */ } }
+    }
+    return orderIds;
+  }
+
   /** [合并自本地旧版] 删除当前选中的自定义镜像（无参包装，供按钮直接调用） */
   async function icDeleteSelectedImage() {
     var sel = document.getElementById('icImageSelect');
@@ -722,10 +749,18 @@
                                     : '下单已提交，请到阿里云控制台查看实例');
       } else {
         // 不扣费路径：SWAS CreateOrder，只生成待支付订单
-        var ord = await icCreateOrder(region, imageId, planId, amount, period);
-        st.innerHTML = '✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）';
-        res.innerHTML = '📋 订单号：<code>' + ord.OrderId + '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。';
-        icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + ord.OrderId, 'success');
+        // 【v18r26】改为逐台下单，保证台数 == 用户填写数量（详见 icCreateOrdersOneByOne 注释）
+        st.innerHTML = '⏳ 正在逐台生成待支付订单（目标 ' + amount + ' 台）...';
+        var orderIds = await icCreateOrdersOneByOne(region, imageId, planId, amount, period,
+          function (n, total, oid) {
+            st.innerHTML = '⏳ 下单进度 <b>' + n + '/' + total + '</b>（最新订单 ' + oid + '）';
+          });
+        var shown = orderIds.slice(0, 10).join('</code><br><code>') +
+          (orderIds.length > 10 ? '</code><br>… 其余 ' + (orderIds.length - 10) + ' 个见控制台订单管理' : '');
+        st.innerHTML = '✅ 已生成 <b>' + orderIds.length + '</b> 个待支付订单（每单 1 台，<b style="color:#389e0d;">不扣费</b>）';
+        res.innerHTML = '📋 订单号（共 ' + orderIds.length + ' 个）：<br><code>' + shown + '</code><br>' +
+          '请到阿里云控制台「费用中心 - 订单管理」把这些订单<b>勾选后一起支付</b>，支付完成再回来绑定。';
+        icLog('[镜像克隆] 已生成 ' + orderIds.length + ' 个待支付订单，镜像=' + imageId + ' 订单=' + orderIds.join(','), 'success');
         return;
       }
       if (!ids.length) return;
@@ -1649,10 +1684,17 @@
           (ids.length ? ('<br><code>' + ids.join('</code><br><code>') + '</code>') : '，请到阿里云控制台查看实例'));
       } else {
         // 不扣费路径：SWAS CreateOrder，只生成待支付订单
-        var ord = await icCreateOrder(region, newImageId, planId, amount, period);
-        step('✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）：<code>' + ord.OrderId +
-          '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。');
-        icLog('[镜像克隆] 全流程已生成待支付订单，镜像=' + newImageId + ' 订单=' + ord.OrderId, 'success');
+        // 【v18r26】改为逐台下单，保证台数 == 用户填写数量（详见 icCreateOrdersOneByOne 注释）
+        step('⏳ 正在逐台生成待支付订单（目标 ' + amount + ' 台）...');
+        var orderIds = await icCreateOrdersOneByOne(region, newImageId, planId, amount, period,
+          function (n, total, oid) {
+            if (n === total || n % 5 === 0) step('   下单进度 ' + n + '/' + total + '（最新订单 ' + oid + '）');
+          });
+        var shown = orderIds.slice(0, 10).join('</code><br><code>') +
+          (orderIds.length > 10 ? '</code><br>… 其余 ' + (orderIds.length - 10) + ' 个见控制台订单管理' : '');
+        step('✅ 已生成 <b>' + orderIds.length + '</b> 个待支付订单（每单 1 台，<b style="color:#389e0d;">不扣费</b>）：<br><code>' +
+          shown + '</code><br>请到阿里云控制台「费用中心 - 订单管理」把这些订单<b>勾选后一起支付</b>。');
+        icLog('[镜像克隆] 全流程已生成 ' + orderIds.length + ' 个待支付订单，镜像=' + newImageId + ' 订单=' + orderIds.join(','), 'success');
         return;
       }
       if (!ids.length) return;

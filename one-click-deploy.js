@@ -391,7 +391,7 @@ async function ocdStartDeploy() {
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ 部署中...'; }
   if (stEl && !extracted) stEl.innerHTML = '';
 
-  ocdAddLog(0, '一键部署启动（真实接口 /api/edgeNode/updateEdgeRemark + /api/bigDeployLog/directDeployment）', 'info',
+  ocdAddLog(0, '一键部署启动（真实接口 /api/edgeNode/updateEdgeRemark + /api/edgeNode/stateflow）', 'info',
     '节点 ' + nodeIds.length + ' 台 · ' + cfg.usbw + 'Mbps × ' + cfg.bwNum + '条线 · ' + (cfg.isTransProv ? '跨省' : '不跨省') +
     (extracted ? ' · 属主 ' + cfg.ownerId + ' 自动抓取' : ' · 手动粘贴'));
 
@@ -464,16 +464,23 @@ async function ocdStartDeploy() {
       totalSubmitOk += submitOk;
       if (submitFailList.length) continue; // 提交失败的批不再部署
 
-      // 步骤3：批量部署  →  状态流转（待配置 → 服务中）
-      // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）
-      var deployPath = '/api/bigDeployLog/directDeployment';
+      // 步骤3：状态流转（待配置 → 服务中）
+      // 【v18r28 接口纠正，用户 2026-09-11 点名解封】
+      //   ⚠️ /api/bigDeployLog/directDeployment 不是状态流转！它在后台是「强制提交 / 再次提交」按钮，
+      //      body 只有 { nodeId, isFormat }，内部会跑 FormatQiYIInstallCodeForEcache 生成爱奇艺安装码，
+      //      节点没有「业务线运营商」时直接报「未知运营商」。
+      //   ✅ 真状态流转 = POST /api/edgeNode/stateflow
+      //      body = { nodes:[nodeId], hostname:<业务ID>, stage:'inService' }
+      //      （后台「状态流转」弹窗把「业务ID」绑到 hostname 这个 key；stage: configured=待配置 / inService=服务中）
+      //   与 image-clone.js 的 icStateFlow()（r27）保持同一契约。
+      var deployPath = '/api/edgeNode/stateflow';
       if (deployOverride) {
         try { deployOverride = JSON.parse(deployOverride); } catch (e) { ocdAddLog(3, '部署请求体 JSON 解析失败', 'error', e.message); throw e; }
       }
       var deployResults = await Promise.allSettled(chunk.map(function (id) {
-        // 自动从 clone biz map 或顶部 businessId 取值；如都没填则用 nodeId 占位（admin 会返回错误并提示）
-        var bid = cfg.businessId || (window.icLoadCloneBizMap && (function(){ var m = window.icLoadCloneBizMap()[id] || {}; return m.businessId || id; })()) || id;
-        var body = deployOverride || { nodeId: id, businessId: bid, status: '服务中' };
+        // 业务ID：优先取顶部填写值 / clone biz map；没有则传空串（后台允许，实测 code:0 正常流转）
+        var bid = cfg.businessId || (window.icLoadCloneBizMap && (function(){ var m = window.icLoadCloneBizMap()[id] || {}; return m.businessId || ''; })()) || '';
+        var body = deployOverride || { nodes: [id], hostname: bid, stage: 'inService' };
         return ocdCallAdmin(token, 'POST', deployPath, '', body);
       }));
       // 【v18r14 关键修复】不能只看 supabase 层的 ok（那只代表 HTTP 通了）。

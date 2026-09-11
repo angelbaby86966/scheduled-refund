@@ -404,6 +404,26 @@
     return n;
   }
 
+  // 【v18r25】按名字查自定义镜像（带 ImageType 过滤 + 不带过滤双查，防 SWAS 过滤差异漏查）
+  async function icFindImageByName(region, name) {
+    if (!name) return null;
+    try {
+      var r = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+      var hit = icParseImgs(r).filter(function (im) { return im.ImageName === name; })[0];
+      if (hit) return hit;
+    } catch (e) { /* 忽略，走兜底 */ }
+    try {
+      var r2 = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
+      return icParseImgs(r2).filter(function (im) { return im.ImageName === name; })[0] || null;
+    } catch (e2) { return null; }
+  }
+
+  // 【v18r25】生成唯一镜像名：原名-2 / 原名-3 ...（重名时自动换名，不再中断整个流程）
+  function icUniqueImageName(base, n) {
+    var stem = String(base || 'img').replace(/-\d+$/, '');
+    return icSanitizeImageName(stem + '-' + (n || 2));
+  }
+
   // ====== 🏆 黄金机身份保护（2026-09-07 事故后新增） ======
   // 事故：一键全流程「标准化」在黄金机上 rm -f /etc/.mac 并随机重生 → 黄金机以新身份上线，原设备掉线"消失"。
   // 规则：黄金机的 device_code 一经记录永不改变；克隆/绑定流程跳过黄金机；全流程结束后自动校验并恢复身份。
@@ -874,6 +894,70 @@
     return new Promise(function (res) { setTimeout(res, ms); });
   }
 
+  // ============ 【v18r25 性能/健壮性优化】全流程并发锁 + 可中断等待 ============
+  // 背景（2026-09-11 用户反馈"太慢了，而且还容易卡住"）：
+  //   1) 标准化后硬等 120 秒；2) 镜像轮询 90×5s 且中断后仍在空转；3) 重复点击按钮 → 两个流程并发 → 镜像重名中断。
+  var icFlowRunning = false;       // 并发锁：同一时刻只允许一个全流程
+  var icFlowAbort = false;         // 中断标志：用户在流程中点按钮置真，各等待点会立即退出
+  var icFlowStartedAt = 0;
+  var IC_ABORT_MSG = '__IC_ABORT__';
+  function icFlowElapsed() { return Math.round((Date.now() - icFlowStartedAt) / 1000); }
+  // 全流程按钮状态：运行中变"⛔ 中断当前流程（已 N 秒）"，让用户看得见进度、随时能停
+  var icFlowBtnTimer = null;
+  function icSetFlowBtn(running, stopping) {
+    var btn = document.getElementById('icFlowBtn');
+    if (icFlowBtnTimer) { clearInterval(icFlowBtnTimer); icFlowBtnTimer = null; }
+    if (!btn) return;
+    if (!running) {
+      btn.textContent = stopping ? '⛔ 正在中断...' : '🚀 一键全流程（标准化→打镜像→开通，全自动）';
+      btn.style.background = '#cf1322';
+      return;
+    }
+    btn.style.background = '#d46b08';
+    var tick = function () { btn.textContent = '⛔ 中断当前流程（已 ' + icFlowElapsed() + ' 秒）'; };
+    tick();
+    icFlowBtnTimer = setInterval(tick, 1000);
+  }
+  function icAbortCheck() { if (icFlowAbort) throw new Error(IC_ABORT_MSG); }
+  // 可中断 sleep：把长等待切成 250ms 小片，任何时刻都能响应"中断"
+  async function icSleepIC(ms) {
+    var dl = Date.now() + ms;
+    while (Date.now() < dl) {
+      if (icFlowAbort) throw new Error(IC_ABORT_MSG);
+      await icSleep(Math.min(250, Math.max(1, dl - Date.now())));
+    }
+  }
+  // 从 DescribeCommandInvocations 响应取出第一条 InvokeInstances 记录
+  function icPickInvocation(out) {
+    var invs = (out && (out.CommandInvocations || out.commandInvocations || [])) || [];
+    if (!Array.isArray(invs) || !invs.length) return null;
+    var iis = invs[0].InvokeInstances || invs[0].invocationInstances || invs[0].InvocationInstances || [];
+    if (!Array.isArray(iis) || !iis.length) return null;
+    return iis[0];
+  }
+  // 轮询云助手命令是否执行完成（替代"硬等 N 秒"，快的话十几秒就能继续）
+  async function icWaitInvokeDone(region, invokeId, maxMs) {
+    var dl = Date.now() + (maxMs || 180000);
+    var last = '';
+    while (Date.now() < dl) {
+      if (icFlowAbort) throw new Error(IC_ABORT_MSG);
+      await icSleep(1500);
+      try {
+        var out = await AliyunClient.callSwasApi(region, 'DescribeCommandInvocations', {
+          RegionId: region, InvokeId: invokeId, IncludeOutput: true, PageSize: 1
+        });
+        var rec = icPickInvocation(out);
+        if (!rec) continue;
+        var stt = String(rec.InvocationStatus || '').toLowerCase();
+        last = stt;
+        if (stt === 'success' || stt === 'failed' || stt === 'stopped') {
+          return { status: stt, output: (rec.Output || '').trim() };
+        }
+      } catch (e) { /* 网络抖动：继续轮询 */ }
+    }
+    return { status: 'timeout', output: last };
+  }
+
   // ============ 舟翼云 admin 提交参数默认值（test.sh 第 1024 行硬编码）============
   // 这些值是 admin 后端业务参数，对齐 test.sh 行为；用户在「绑定舟翼云」面板无需填写
   var IC_DEFAULT_VENDOR_CUSTOMERS = 41;     // vendorSuggestCustomers
@@ -1278,6 +1362,19 @@
   // 一键全流程：标准化 → 创建镜像 → 轮询就绪 → 开通（用户只需填实例ID/镜像名/数量）
   async function icFullCloneFlow() {
     if (!icGuard()) return;
+    // 【v18r25 防重入】流程运行中再次点击 = 请求中断当前流程
+    //   修复：之前可重复点击 → 两个流程并发 → 第二个查不到刚创建的镜像 → CreateCustomImage 报
+    //   "The image name already exists." → 直接中断；且被中断方的轮询循环仍在空转（表现为"卡住"）
+    if (icFlowRunning) {
+      if (!confirm('⚠️ 全流程正在运行中（已 ' + icFlowElapsed() + ' 秒）。\n\n确定要【中断】当前流程吗？\n已创建的镜像不会删除，下次重跑会自动复用。')) return;
+      icFlowAbort = true;
+      icSetFlowBtn(false, true);
+      return;
+    }
+    icFlowRunning = true;
+    icFlowAbort = false;
+    icFlowStartedAt = Date.now();
+    icSetFlowBtn(true);
     var region = icGetRegion();
     var instId = (document.getElementById('icSrcInstance').value || '').trim();
     var imageName = (document.getElementById('icImageName').value || '').trim();
@@ -1316,42 +1413,73 @@
         }
       } catch (ge) { step('⚠️ 黄金机身份读取失败（流程继续）: ' + ge.message); }
 
-      // ① 标准化
+      // ① 标准化（【v18r25 优化】原来硬等 120 秒，现改为轮询命令执行状态，跑完立即继续）
       step('① 下发标准化命令到 ' + instId + ' ...');
       // 🚨 SWAS 没有 RunCommand action，改走 CreateCommand+InvokeCommand（v18r5 批量根治）
-      await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
-      step('✅ 标准化命令已下发，等待 120 秒执行完成...');
-      await icSleep(120000);
+      var stdInv = await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
+      step('⏳ 标准化执行中（轮询状态，完成即继续，不再固定等 120 秒）...');
+      var stdRes = await icWaitInvokeDone(region, stdInv.invokeId, 300000);
+      if (stdRes.status === 'success') {
+        step('✅ 标准化完成（累计用时约 ' + icFlowElapsed() + 's）');
+      } else if (stdRes.status === 'timeout') {
+        step('⚠️ 标准化状态轮询超时（300s），保守再等 30 秒后继续...');
+        await icSleepIC(30000);
+      } else {
+        step('⚠️ 标准化返回 ' + stdRes.status + '（继续流程，留意镜像是否含缓存）');
+      }
+      // 清理临时命令模板，避免堆积在「命令助手」
+      try { await AliyunClient.callSwasApi(region, 'DeleteCommand', { RegionId: region, CommandId: stdInv.commandId }); } catch (e) { /* 忽略 */ }
 
       // ② 创建镜像（先查同名镜像：已存在直接复用，避免重打 + 支持中断后重跑续接）
       var newImageId = '';
       var reusedExisting = false;
       try {
-        var existR = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
-        var existImgs = icParseImgs(existR);
-        var exist = existImgs.filter(function (im) { return im.ImageName === imageName; })[0];
+        var exist = await icFindImageByName(region, imageName);
         if (exist) {
           newImageId = exist.ImageId || '';
           reusedExisting = true;
-          step('✅ 镜像「' + imageName + '」已存在（ImageId=' + newImageId + '），跳过创建直接复用');
+          step('✅ 镜像「' + imageName + '」已存在（ImageId=' + newImageId + '），跳过创建直接复用（省一次打镜像时间）');
         }
       } catch (e) { step('⚠️ 查询已有镜像失败（忽略，继续创建）: ' + e.message); }
       if (!newImageId) {
-        step('② 创建镜像「' + imageName + '」...');
-        try {
-          var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
-          newImageId = cr.ImageId || cr.imageId || '';
-          step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
-        } catch (ce) {
-          var cmsg = (ce && ce.message) || String(ce);
-          // 🚨 自定义镜像配额已满（每个地域有上限，达到后无法再建）
-          if (/maximum|exceed|quota|limit|超过.*上限|超过.*限制/i.test(cmsg)) {
-            step('🚨 该地域自定义镜像已达上限（阿里云配额），请在面板「② 列镜像」点「🔄 加载我的自定义镜像」→「🗑️ 删除选中镜像」清掉不用的镜像后重试');
-            step('   原始错误：' + cmsg);
-            icLog('[镜像克隆] 镜像配额已满：' + region + '，需先删除旧镜像，原始=' + cmsg, 'error');
+        // 【v18r25 优化】重名不再中断整个流程：先复查（可能刚创建成功、列表未刷新）→ 复用；查不到则自动换名重试
+        var tryName = imageName;
+        for (var attempt = 1; attempt <= 3 && !newImageId; attempt++) {
+          icAbortCheck();
+          step('② 创建镜像「' + tryName + '」...' + (attempt > 1 ? '（第 ' + attempt + ' 次尝试）' : ''));
+          try {
+            var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: tryName });
+            newImageId = cr.ImageId || cr.imageId || '';
+            imageName = tryName;
+            step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+            break;
+          } catch (ce) {
+            var cmsg = (ce && ce.message) || String(ce);
+            // 🚨 自定义镜像配额已满（每个地域有上限，达到后无法再建）
+            if (/maximum|exceed|quota|limit|超过.*上限|超过.*限制/i.test(cmsg)) {
+              step('🚨 该地域自定义镜像已达上限（阿里云配额），请在面板「② 列镜像」点「🔄 加载我的自定义镜像」→「🗑️ 删除选中镜像」清掉不用的镜像后重试');
+              step('   原始错误：' + cmsg);
+              icLog('[镜像克隆] 镜像配额已满：' + region + '，需先删除旧镜像，原始=' + cmsg, 'error');
+              throw ce;
+            }
+            // 重名：先复查是否其实已经建好了（并发/列表延迟的经典情形）
+            if (/already exist|已存在|重复|duplicate/i.test(cmsg)) {
+              var reuse = await icFindImageByName(region, tryName);
+              if (reuse) {
+                newImageId = reuse.ImageId || '';
+                reusedExisting = true;
+                imageName = tryName;
+                step('✅ 镜像「' + tryName + '」实际已存在（ImageId=' + newImageId + '），直接复用，不再重复创建');
+                break;
+              }
+              tryName = icUniqueImageName(imageName, attempt + 1);
+              step('⚠️ 镜像名「' + imageName + '」已被占用且查不到记录，自动改用「' + tryName + '」重试...');
+              continue;
+            }
+            throw ce;
           }
-          throw ce;  // 保留原有中断行为
         }
+        if (!newImageId) throw new Error('镜像创建失败：3 次尝试均未成功（请检查阿里云控制台）');
       }
 
       // ③ 轮询镜像就绪（最多 15 分钟 —— 实测 SWAS 自定义镜像创建要 5~10 分钟，5 分钟根本不够）
@@ -1366,13 +1494,23 @@
       var lastInfo = '';
       var scannedRegions = {};  // 跨地域扫描结果
       var crossScanDone = false;  // 跨地域扫描已做过一次（命中/未命中都不再重复，等主地域先出现）
-      for (var i = 0; i < 90; i++) {
-        await icSleep(5000);  // 【加速】10s → 5s 轮询间隔（最多 7.5 分钟）
+      var pollStart = Date.now();
+      var POLL_MAX = 110;
+      // 【v18r25 优化】
+      //   a) 自适应间隔：前 20 轮 3 秒（抢占"刚就绪"窗口），之后 6 秒 → 同样 10 分钟覆盖，前期更快发现
+      //   b) 每轮开始先检查中断标志 → 修复"点了中断/流程已报错，轮询还在空转"的卡住现象
+      for (var i = 0; i < POLL_MAX; i++) {
+        icAbortCheck();
+        await icSleepIC(i < 20 ? 3000 : 6000);
+        icAbortCheck();
         var lr;
         try {
           lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
         } catch (e) {
-          step('⚠️ [轮询 ' + (i + 1) + '/90] ListImages 报错：' + e.message);
+          // 降噪：报错最多每 5 轮提示一次
+          if (i === 0 || (i + 1) % 5 === 0) {
+            step('⚠️ [轮询 ' + (i + 1) + '] ListImages 报错（已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's）：' + e.message);
+          }
           continue;
         }
         var imgs = icParseImgs(lr);
@@ -1391,19 +1529,24 @@
           lastInfo = info;
           if (!s || s.toLowerCase() === 'available' || s.toLowerCase() === 'success' || s.toLowerCase() === 'ready') {
             newImageId = found.ImageId || newImageId; ready = true;
-            step('✅ 镜像就绪（第 ' + (i + 1) + '/90 轮，' + info + '）');
+            step('✅ 镜像就绪（第 ' + (i + 1) + ' 轮，已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's，' + info + '）');
             break;
           }
           if (/fail|error|创建失败/i.test(s)) {
             step('❌ 镜像创建失败：' + info + '\n原始=' + JSON.stringify(found).slice(0, 400));
             return;
           }
-          // Status 显式还在 Creating/Waiting 等中间态：继续轮询
-          step('⏳ [轮询 ' + (i + 1) + '/90] ' + info + '，继续等待...');
+          // Status 显式还在 Creating/Waiting 等中间态：继续轮询（降噪，每 5 轮提示一次）
+          if ((i + 1) % 5 === 0) {
+            step('⏳ [轮询 ' + (i + 1) + '] ' + info + '，继续等待（已 ' + Math.round((Date.now() - pollStart) / 1000) + 's）...');
+          }
         } else {
-          step('⏳ [轮询 ' + (i + 1) + '/90] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
-          // 关键节点打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
-          if (i === 0 || (i + 1) % 10 === 0) {
+          // 降噪：不再每轮刷屏，每 5 轮报一次进度
+          if (i === 0 || (i + 1) % 5 === 0) {
+            step('⏳ [轮询 ' + (i + 1) + '] 镜像生成中...（已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's，列表 ' + imgs.length + ' 个）');
+          }
+          // 首次打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
+          if (i === 0) {
             step('🔍 [' + region + '] ListImages 返回前 3 个：' + JSON.stringify(imgs.slice(0, 3)).slice(0, 600));
           }
           // 【加速】跨地域扫描：只在主地域持续空时做一次（命中或不命中都不重复），并发查所有其他地域
@@ -1437,7 +1580,7 @@
                 step('🎯 跨地域命中！实际 RegionId=' + hit.rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
                 if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
                   region = hit.rid; newImageId = hit.img.ImageId || newImageId; ready = true;
-                  step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/90 轮）');
+                  step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + ' 轮，已 ' + Math.round((Date.now() - pollStart) / 1000) + 's）');
                   break;
                 }
                 if (/fail|error/i.test(s2)) {
@@ -1454,7 +1597,7 @@
         }
       }
       if (!ready) {
-        step('⚠️ 镜像未在 15 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
+        step('⚠️ 镜像未在 ' + Math.round((Date.now() - pollStart) / 60000) + ' 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
         // 兜底：去掉 ImageType 参数再查一次（SWAS 自定义镜像可能没这个 filter）
         step('🔄 兜底：不带 ImageType 参数重试一次 ListImages...');
         try {
@@ -1529,9 +1672,20 @@
       step('🔗 本批业务ID：<b>' + bizBatch.slice(0, 12) + '…</b>（' + entries2.length + ' 台已到服务中，每台分配独立 IPES SN 76hex，已云端持久化' + (wait2.ids.length < ids.length ? '；' + (ids.length - wait2.ids.length) + ' 台未就绪未计入' : '') + '）');
       icLog('[镜像克隆] 全流程完成: ' + instId + ' → 镜像 ' + newImageId + ' → 开通 ' + amount + ' 台', 'success');
     } catch (e) {
-      step('❌ 流程中断: ' + e.message);
-      icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
+      if (e && e.message === IC_ABORT_MSG) {
+        step('⛔ 已被用户中断（中途创建的镜像不会删除，下次重跑会自动复用）');
+        icLog('[镜像克隆] 全流程被用户中断于 ' + icFlowElapsed() + 's', 'warn');
+      } else {
+        step('❌ 流程中断: ' + e.message);
+        icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
+      }
     } finally {
+      // 【v18r25】释放并发锁 + 恢复按钮（放最前，保证后续黄金机恢复逻辑不受中断标志影响）
+      var flowSecs = icFlowElapsed();
+      icFlowRunning = false;
+      icFlowAbort = false;
+      icSetFlowBtn(false);
+      step('⏱️ 本次流程耗时 <b>' + flowSecs + 's</b>');
       // 🏆 黄金机身份自动校验恢复（成功/中断都执行）——确保黄金机永不因克隆流程掉线
       if (goldenCode) {
         try {

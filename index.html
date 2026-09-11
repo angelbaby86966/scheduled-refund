@@ -234,11 +234,11 @@
                 </div>
                 <div class="action-bar" style="justify-content:center; padding:16px 0;" data-page-node-id="RvfmRk943fGcAG6OFN80Dt">
                   <button class="btn btn-primary" id="fwApplyBtn" style="font-size:16px; padding:12px 32px;" onclick="batchApplyAllTemplates()" data-page-node-id="6oA096Ry6hJVsRY277APNE">
-                    🚀 应用到所有云主机
+                    🚀 应用到所有云主机（缺模板自动创建）
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;" data-page-node-id="xA6dCAcLQj795t46uPGpJ5">
-                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行；多凭证时逐账号执行
+                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行；多凭证逐账号执行，<strong>目标账号缺同名模板时按锁定规则自动创建</strong>，不再跳过
                 </p>
               </div>
             </div>
@@ -819,7 +819,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=15"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=106"></script>
+  <script src="app.js?v=107"></script>
   <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
   <script src="image-clone.js?v=18&r=30"></script>

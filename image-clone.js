@@ -996,7 +996,10 @@
   // ============ 舟翼云 admin 提交参数默认值（test.sh 第 1024 行硬编码）============
   // 这些值是 admin 后端业务参数，对齐 test.sh 行为；用户在「绑定舟翼云」面板无需填写
   var IC_DEFAULT_VENDOR_CUSTOMERS = 41;     // vendorSuggestCustomers
-  var IC_DEFAULT_TRANS_MODE = 1;            // transMode
+  // 【v18r30】transMode 1 → 0：对齐黄金机后台实际值。
+  //   背景（2026-09-11）：3 台克隆机按旧常量写成 1，与黄金机(0) 不一致，事后手工走
+  //   「降级→改→升回」才对齐。改常量后新克隆机开出来即为 0，不再出现该差异。
+  var IC_DEFAULT_TRANS_MODE = 0;            // transMode
   var IC_DEFAULT_IS_CROSS_NETWORK = false;  // 是否异网：非异网（截图一致）
   var IC_DEFAULT_CROSS_NETWORK_ISP = null;
   var IC_DEFAULT_IS_TRANS_PROV = true;      // 跨省调度：跨省（2026-09-10 用户按截图改 true，test.sh 原 false 不再生效）
@@ -1985,8 +1988,8 @@
     var done = 0, ok = 0, fail = 0;
     function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
 
-    // 有界并发（最多 20 台同时下发）
-    var CONC = 20, idx = 0;
+    // 有界并发（最多 30 台同时下发）—— 【v18r30】按用户要求批量部署统一 30 台一批
+    var CONC = 30, idx = 0;
     async function worker() {
       while (idx < ids.length) {
         var iid = ids[idx++];
@@ -2414,7 +2417,7 @@
       alert('请二选一填写：admin 鉴权\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
       return;
     }
-    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin stateflow：流转「待配置 → 服务中」（body={nodes,hostname,stage}）\n\n确认执行？')) return;
+    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=0, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin stateflow：流转「待配置 → 服务中」（body={nodes,hostname,stage}）\n\n确认执行？')) return;
 
     st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
     var cfg = {

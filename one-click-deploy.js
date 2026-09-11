@@ -1,5 +1,5 @@
 /* ============================================================
- * one-click-deploy.js  v16  —  对齐 admin 真实接口 + 带宽写入校验版
+ * one-click-deploy.js  v17  —  对齐 admin 真实接口 + 带宽写入校验 + 30 台分批
  * 一键部署：节点就绪 → 批量提交 → 批量部署
  *
  * 真实接口（来自 admin.zhouyi.top 前端源码）：
@@ -7,6 +7,10 @@
  *   批量提交：POST /api/edgeNode/updateEdgeNominalInfo   ← v16 纠正
  *   状态流转：POST /api/edgeNode/stateflow
  *   （/api/bigDeployLog/directDeployment 是后台「强制提交/再次提交」按钮，不是状态流转，仅兜底）
+ *
+ * v17 关键变更（用户 2026-09-11 指示「数量多就 30 台 30 台地部署」）：
+ *   默认批大小 100 → 30 台/批（v16 起每台请求数从 2 次涨到 ~4 次：读 stage → 可能降级
+ *   → 提交 → 读回校验，单批 100 台对转发器压力过大）。仍可在面板 batchSize 输入框覆盖。
  *
  * v16 关键变更（用户 2026-09-11 点名解封）：
  *   ① 批量提交接口纠正：updateEdgeRemark → updateEdgeNominalInfo
@@ -428,7 +432,7 @@ function ocdGetConfig() {
     transMode: gv('ocdTransMode'),
     isCrossNetwork: gb('ocdIsCrossNetwork'),
     crossNetworkIsp: gv('ocdCrossNetworkIsp'),
-    batchSize: parseInt(gv('ocdBatchSize') || '100', 10) || 100,
+    batchSize: parseInt(gv('ocdBatchSize') || '30', 10) || 30,
     batchDelay: parseInt(gv('ocdBatchDelay') || '1000', 10) || 1000,
   };
 }
@@ -507,8 +511,9 @@ async function ocdStartDeploy() {
     chunks = [nodeIds]; // 高级覆盖模式：一次性发送全部
     ocdAddLog(1, '使用高级请求体覆盖', 'warn', '不启用自动分批');
   } else {
-    chunks = ocdChunkArray(nodeIds, cfg.batchSize || 100);
-    ocdAddLog(1, '节点分批', 'ok', '共 ' + chunks.length + ' 批 · 每批 ' + (cfg.batchSize || 100) + ' 台 · 批间 ' + (cfg.batchDelay || 1000) + 'ms');
+    // 【v17】默认每批 30 台（用户 2026-09-11 指示：数量多就 30 台 30 台地部署）
+    chunks = ocdChunkArray(nodeIds, cfg.batchSize || 30);
+    ocdAddLog(1, '节点分批', 'ok', '共 ' + chunks.length + ' 批 · 每批 ' + (cfg.batchSize || 30) + ' 台 · 批间 ' + (cfg.batchDelay || 1000) + 'ms');
   }
 
   var totalSubmitOk = 0, totalDeployOk = 0, totalFail = 0;

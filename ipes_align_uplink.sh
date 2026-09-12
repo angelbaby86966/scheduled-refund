@@ -21,7 +21,8 @@
 #   1/6 主机防火墙全量放行 TCP+UDP 1-65535（iptables/ip6tables/nft + 关 firewalld，开机持久化）
 #   2/6 内核 NAT/conntrack 对齐（rp_filter=0、UDP 映射超时拉长、conntrack 上限拉高）
 #   3/6 tc 出向限速探测（默认只报告；FORCE_CLEAR_TC=1 才清 htb/tbf 硬限速）
-#   4/6 系统/内核/网络 性能调优（复用 ipes_preheat_and_health.sh，失败则内联兜底）
+#   4/6 系统/内核/网络 性能调优（复用 ipes_preheat_and_health.sh，失败则内联兜底；
+#       SKIP_PREHEAT=1 时跳过 —— 供 ipes_onekey.sh 编排时避免重复预热）
 #   5/6 缓存容量对齐（有未分配空间就在线扩分区+文件系统；报告缓存占用）
 #   6/6 IPES 容器/happ 结构对齐（保 SN 保缓存重建，无需重复预热）
 #   末   对齐后复测 + 打印报告 + 云端防火墙待办清单
@@ -39,6 +40,8 @@
 #   #   ALIGN_HAPP=0        设为 0 可跳过 happ 结构对齐（默认 1=自动补齐 happ 到 TARGET_HAPP）
 #   #   FORCE_CLEAR_TC=1    检测到出向硬限速时真的清掉（默认只报告）
 #   #   SKIP_IPES=1         只做系统/网络对齐，不重建 IPES 容器
+#   #   SKIP_PREHEAT=1      跳过 4/6 的预热调优（专供 ipes_onekey.sh：它在 [1/2] 已跑过预热，
+#   #                       若上层预热失败则会传 0 让这里再兜底跑一次；单独执行本脚本时默认 0）
 # =============================================================================
 set -uo pipefail
 export LC_ALL=C
@@ -324,6 +327,14 @@ tc_probe(){
 PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"
 run_preheat(){
   head1 "4/6 系统/内核/网络 性能调优"
+  # 【2026-09-12】SKIP_PREHEAT=1 时跳过本步。
+  #   ipes_onekey.sh 会在 [1/2] 先单独跑一遍预热（为了让健康检查/OS 调优立即落地），
+  #   若这里再跑一遍就是重复下载 + 重复日志（实测日志 15:58:33 与 15:58:49 两段雷同）。
+  #   默认 0：单独执行本脚本时行为完全不变。
+  if [ "${SKIP_PREHEAT:-0}" = "1" ]; then
+    log "SKIP_PREHEAT=1 —— 预热调优已由上层编排脚本完成，跳过本步（需强制重跑：SKIP_PREHEAT=0）"
+    return 0
+  fi
   local f=/tmp/ipes_preheat_and_health.sh ok=0 url
   for url in "$PREHEAT_URL" "https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"; do
     if curl -fsSL --connect-timeout 15 --max-time 90 "$url" -o "$f" 2>/dev/null \

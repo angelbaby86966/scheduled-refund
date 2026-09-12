@@ -13,11 +13,13 @@
 #   curl ... | bash -s -- --check
 #
 # 【可选环境变量（透传给对齐脚本）】
-#   TARGET_HAPP=9  TARGET_TAG=1.3.0  ALIGN_HAPP=1  FORCE_CLEAR_TC=0  SKIP_IPES=0
+#   TARGET_HAPP=9  TARGET_TAG=1.3.0  ALIGN_HAPP=1  FORCE_CLEAR_TC=0  SKIP_IPES=0  SKIP_PREHEAT=1
+#   （SKIP_PREHEAT 本脚本会自动决策：预热成功→1 跳过重复；失败→0 兜底；显式设置则尊重设置）
 #
-# 说明：对齐脚本第 4 步内部本就会再跑一遍预热（幂等、且带 CLEANED_FLAG 缓存加速），
-#       此处先单独跑一次 preheat 是为了让「健康检查安装 / OS 调优」在第一步就落地，
+# 说明：先单独跑一次 preheat 是为了让「健康检查安装 / OS 调优」在第一步就落地，
 #       即便后续对齐阶段因个别内核键不支持报错，健康拉起机制也已就绪。
+#   【2026-09-12】不再重复预热：第 1 步预热成功后，会以 SKIP_PREHEAT=1 调用对齐脚本，
+#       跳过它内部的 4/6 预热（原来会跑两遍、日志雷同）；若第 1 步失败，则传 0 让对齐阶段兜底再试。
 #
 # 变更（2026-09-12）：
 #   1) [0.5] 新增「缓存盘余量硬预警」——空间不足是压供量的头号原因，必须一进来就看见；
@@ -67,7 +69,9 @@ fi
 
 echo
 echo -e "\033[1;36m========== [1/2] 预热调优 + 健康检查安装 ==========\033[0m"
+PREHEAT_OK=0
 if curl -fsSL "$PREHEAT_URL" | bash; then
+  PREHEAT_OK=1
   echo "[1/2] 预热脚本执行完成"
 else
   echo -e "\033[1;33m[WARN] 预热脚本返回非 0（多为个别内核键不支持，可忽略；健康拉起机制已尽力安装）\033[0m"
@@ -75,7 +79,23 @@ fi
 
 echo
 echo -e "\033[1;36m========== [2/2] 对齐拉满（防火墙/NAT/tc/缓存/happ/镜像/重建） ==========\033[0m"
-# 透传参数给对齐脚本（如 --check）；对齐脚本第4步会再幂等跑一遍预热
+# 【2026-09-12】预热去重：
+#   本步已在上面跑过预热 → 告知对齐脚本跳过它自己的 4/6 预热，避免重复下载 + 重复日志。
+#   但若上面失败了，则传 0，让对齐阶段再兜底跑一次（成功才跳过，失败仍保底）。
+#   用户若显式设置了 SKIP_PREHEAT，则尊重用户设置。
+if [ -n "${SKIP_PREHEAT:-}" ]; then
+  export SKIP_PREHEAT
+elif [ "$PREHEAT_OK" = "1" ]; then
+  export SKIP_PREHEAT=1
+else
+  export SKIP_PREHEAT=0
+fi
+if [ "$SKIP_PREHEAT" = "1" ]; then
+  echo "[2/2] 对齐脚本内的预热步骤：跳过（本轮已在上一步完成，避免重复）"
+else
+  echo "[2/2] 对齐脚本内的预热步骤：将兜底执行一次（上一步未成功）"
+fi
+# 透传参数给对齐脚本（如 --check）
 curl -fsSL "$ALIGN_URL" | bash -s -- "$@"
 
 echo

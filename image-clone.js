@@ -1108,7 +1108,11 @@
           });
           await icSleep(1200);
         }
-      } catch (e) { /* 查询/降级失败不阻断，按原流程继续提交 */ }
+      } catch (e) {
+        // 【v18r31】登录态失效不吞掉：立即中止本台，避免后面每一步都白跑
+        if (icIsAuthExpired(e)) throw e;
+        /* 其余查询/降级失败不阻断，按原流程继续提交 */
+      }
 
       // ② 提交建设带宽/业务（参数保持写死的 IC_DEFAULT_* 语义不变）
       await fn('POST', IC_DEFAULT_NOMINAL_PATH, {
@@ -1139,6 +1143,11 @@
         say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回 usbw=' + ni.usbw + '（期望 ' + want + '）' +
           (i < attempts ? '，稍后重试…' : '，仍未生效'), 'warn');
       } catch (e) {
+        // 【v18r31】登录态失效 → 立刻抛出，不再重试（重试 3 次拿到的是同一个 401，纯浪费时间）
+        if (icIsAuthExpired(e)) {
+          say('❌ admin 登录已过期，停止重试：' + e.message, 'warn');
+          throw e;
+        }
         verifyErr++;
         say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回校验失败：' + e.message +
           (i < attempts ? '，稍后重试…' : ''), 'warn');
@@ -1219,16 +1228,16 @@
         return await icAdminCallHmac(method, path, body);
       } catch (e) {
         hmacErr = e;
-        // 【v18r16】HMAC 通道失败时**直接抛出**，不要 fallback。
-        // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect error 110），
-        // 浏览器直连 admin 又被 CORS 拒（Failed to fetch），fallback 链走不到 admin。
-        // HMAC 是 admin 后端期望的机器对机器方式（参考 ipes_auto_deploy.sh + transition_to_service.sh），
-        // HMAC 拿到 code=7 是真业务拒绝（path 错 / 该接口只认 JWT）→ 立即告知，不被 fallback 链路吞掉。
+        // 【v18r31 纠正】HMAC 直连在浏览器里**必然失败**（跨域被 CORS 拒 → Failed to fetch）；
+        // 且实测 HMAC 对 stateflow 完全不被校验（真/假 appId、合法/乱签返回一致）。
+        // 所以它不该被当成主通道，仅作最后兜底；真正的通道是 Token + Supabase 转发。
+        // 鉴权失效（JWT 过期）不是网络错 → 直接抛，让上层立刻提示换 token。
+        if (icIsAuthExpired(e)) throw e;
         if (!icIsNetworkErr(e)) {
-          // 业务错（含 code=7）→ 不 fallback，直接抛
+          // 其他业务错（path 错等）→ 不 fallback，直接抛
           throw e;
         }
-        // 仅网络/CORS 失败才继续往下走 fallback（但目前 supabase 直连 admin 也不通，几乎无解）
+        // 仅网络/CORS 失败才继续往下走 fallback
       }
     }
     // ② 浏览器直连 admin.zhouyi.top（x-token 鉴权）— 绕开 supabase 区域出口被屏蔽
@@ -1313,6 +1322,21 @@
     if (msg.indexOf('http 0') >= 0) return true; // fetch 在 CORS 失败时常见 status=0
     if (msg.indexOf('cors') >= 0) return true;
     return false;
+  }
+
+  // 【v18r31】识别「admin 登录态失效」（JWT 过期 / token 非法）。
+  // 这类错误**重试完全无用**，必须立即停止并提示换 token，否则会像 v18r29 那样
+  // 每台机器空转 3 次、刷一屏同样的报错。
+  // 服务端实测（2026-09-12，本机直连 admin.zhouyi.top，无 CORS 干扰，结论权威）：
+  //   · 过期 JWT            → HTTP 401 {"code":7,"data":null,"msg":"授权已过期"}
+  //   · 非 JWT 的 token 串   → HTTP 401 {"code":7,"data":null,"msg":"That's not even a token"}
+  //   · 完全不带 token       → HTTP 401 {"code":7,"data":null,"msg":"未登录或非法访问"}
+  function icIsAuthExpired(e) {
+    if (!e) return false;
+    if (e.isAuthErr === true) return true;
+    if (e.adminCode === 7 && /授权已过期|未登录|非法访问|token/i.test(String(e.message || ''))) return true;
+    var m = String(e.message || e);
+    return /授权已过期|未登录或非法访问|not even a token|登录已过期|未授权|unauthorized|token\s*失效/i.test(m);
   }
 
   // 从 ListImages 返回里解析自定义镜像数组
@@ -2251,22 +2275,44 @@
 
     // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + stateflow（v18r27 纠正）
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
-    // 【v18r16】早期校验：状态流转必须有 HMAC 三件套。
-    // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect timeout 110），
-    // 浏览器直连 admin 跨域 CORS 拒，只有 HMAC 三件套直连 admin 这条路能走通。
-    if (!icHasAdminHmac()) {
-      log('<span style="color:#cf1322;">❌ 状态流转必须填 admin 后端鉴权三件套（appId / ak / sk）。<br>' +
-        '原因：浏览器直连 admin.zhouyi.top 会被 CORS 拒；supabase 边缘到 admin.zhouyi.top 网络不可达（实测 TCP 超时 110）。<br>' +
-        '只有 HMAC 三件套直连 admin 这条路能走通，参考 ipes_auto_deploy.sh + transition_to_service.sh。<br>' +
-        '请展开「🔑 admin 后端鉴权三件套」面板填入，然后重试。</span>');
-      log('<span style="color:#cf1322;">状态流转完成：提交成功 0 / 部署成功 0 / 失败 ' + matched.length + '</span>');
-      icLog('[镜像克隆] 状态流转中断：缺少 HMAC 三件套', 'error');
-      return;
-    }
-    log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin，绕开 CORS 与 supabase 区域出口屏蔽）');
+    // 【v18r31 重大纠正】旧逻辑（v18r16）强制要求 HMAC 三件套，并断言"只有 HMAC 直连 admin 能走通"。
+    // 2026-09-12 服务端实测（本机直连 admin.zhouyi.top，无 CORS 干扰，结论权威）**推翻该前提**：
+    //   · GET  /api/edgeNode/findEdgeNode        ：合法 HMAC 与乱签返回完全相同 → 只认 x-token JWT
+    //   · POST /api/edgeNode/stateflow           ：真 appId / 假 appId / 合法签 / 乱签，四种返回**完全相同**
+    //                                              全是 401「未登录或非法访问」→ HMAC 在该接口完全不被校验
+    //   · POST /api/edgeNode/updateEdgeNominalInfo：不带任何鉴权头也照常进业务逻辑 → 该接口不校验鉴权
+    // 另：admin 登录带强制验证码（/api/base/login 报「CaptchaId值不能为空」）→ 无法无人值守自动续期。
+    // 结论：需要鉴权的 stateflow / 读回校验，只能靠**有效的 admin Token(JWT)**；HMAC 三件套对它们无效。
+    // 因此：① 门槛从"必须有 HMAC"改为"必须有 Token"；② 批量开始前**预检一次**，失效即整体停下。
+    var adminFn = icAdminCall;   // 统一入口
     var submitOk = 0, deployOk = 0, deployFail = 0, successList = [];
     var idx2 = 0;
-    var adminFn = icAdminCall;   // 统一入口：自动选 HMAC 或 x-token
+    var preToken = icGetAdminToken();
+    if (!preToken) {
+      log('<span style="color:#cf1322;">❌ 状态流转需要 admin Token（x-token JWT），当前为空。<br>' +
+        '获取：登录 admin.zhouyi.top → F12 → Application → Local Storage → 复制 <b>zy_admin_token</b> 的值，<br>' +
+        '粘贴到本页「🔑 admin.zhouyi.top Token」输入框并保存（务必填在输入框里，只改 localStorage 会被输入框旧值覆盖）。<br>' +
+        '⚠️ HMAC 三件套（appId/ak/sk）对 stateflow 无效，已实测，不必填。</span>');
+      log('<span style="color:#cf1322;">状态流转完成：提交成功 0 / 部署成功 0 / 失败 ' + matched.length + '</span>');
+      icLog('[镜像克隆] 状态流转中断：缺少 admin Token', 'error');
+      return;
+    }
+    log('🔐 使用 admin Token 鉴权（经 Supabase 转发；浏览器直连 admin 会被 CORS 拒）');
+    // 预检：findEdgeNode 只认 JWT，用它一次性验证 token 是否仍然有效，避免 N 台 × 3 次空转
+    try {
+      await icAdminFindNode(adminFn, matched[0].nodeId);
+      log('🔐 admin Token 预检通过，开始批量流转');
+    } catch (e) {
+      if (icIsAuthExpired(e)) {
+        log('<span style="color:#cf1322;">❌ admin 登录已过期：' + e.message + '<br>' +
+          '请重新登录 admin.zhouyi.top，把 localStorage 里的 <b>zy_admin_token</b> 复制到本页「🔑 admin.zhouyi.top Token」框保存后重试。<br>' +
+          '本次 ' + matched.length + ' 台已整体跳过（未做任何无效重试）。</span>');
+        icLog('[镜像克隆] 状态流转中止：admin Token 已过期', 'error');
+        log('<span style="color:#cf1322;">状态流转完成：提交成功 0 / 部署成功 0 / 失败 ' + matched.length + '</span>');
+        return;
+      }
+      log('<span style="color:#fa8c16;">⚠️ admin Token 预检未完成（' + e.message + '），继续按原流程尝试…</span>');
+    }
     async function flowWorker() {
       while (idx2 < matched.length) {
         var m = matched[idx2++];

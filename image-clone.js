@@ -656,7 +656,7 @@
     var lastErr = null;
     for (var i = 0; i < attempts.length; i++) {
       try {
-        var r = await AliyunClient.callCentralApi(attempts[i].action, attempts[i].params);
+        var r = await AliyunClient.callCentralApi(attempts[i].action, attempts[i].params, { retries: 1 });
         var orderId = r && (r.OrderId || r.orderId);
         if (orderId) return { OrderId: orderId, raw: r };
         lastErr = new Error('响应无 OrderId：' + JSON.stringify(r).slice(0, 200));
@@ -1677,12 +1677,13 @@
       var crossScanDone = false;  // 跨地域扫描已做过一次（命中/未命中都不再重复，等主地域先出现）
       var pollStart = Date.now();
       var POLL_MAX = 110;
-      // 【v18r25 优化】
-      //   a) 自适应间隔：前 20 轮 3 秒（抢占"刚就绪"窗口），之后 6 秒 → 同样 10 分钟覆盖，前期更快发现
+      // 【v18r27 提速】SWAS 自定义镜像构建通常 3~8 分钟：
+      //   a) 3 秒一轮纯属浪费（还持续压代理）→ 前 8 轮 4 秒（抢占"秒就绪"窗口），之后 8 秒
+      //      → 110 轮 ≈ 14 分钟覆盖，前期仍秒级发现，后期不再高频空打
       //   b) 每轮开始先检查中断标志 → 修复"点了中断/流程已报错，轮询还在空转"的卡住现象
       for (var i = 0; i < POLL_MAX; i++) {
         icAbortCheck();
-        await icSleepIC(i < 20 ? 3000 : 6000);
+        await icSleepIC(i < 8 ? 4000 : 8000);
         icAbortCheck();
         var lr;
         try {
@@ -1724,7 +1725,9 @@
         } else {
           // 降噪：不再每轮刷屏，每 5 轮报一次进度
           if (i === 0 || (i + 1) % 5 === 0) {
-            step('⏳ [轮询 ' + (i + 1) + '] 镜像生成中...（已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's，列表 ' + imgs.length + ' 个）');
+            var icWaitedS = Math.round((Date.now() - pollStart) / 1000);
+            step('⏳ [轮询 ' + (i + 1) + '] 镜像生成中...（已等待 ' + icWaitedS + 's，列表 ' + imgs.length + ' 个' +
+              (i === 0 ? '；SWAS 自定义镜像构建通常 3~8 分钟，属正常等待' : '') + '）');
           }
           // 首次打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
           if (i === 0) {
@@ -1732,7 +1735,9 @@
           }
           // 【加速】跨地域扫描：只在主地域持续空时做一次（命中或不命中都不重复），并发查所有其他地域
           // 实测 SWAS CreateCustomImage 通常在创建地域，跨地域是兜底防御 —— 做一次够用。
-          if (i >= 4 && !crossScanDone && imgs.length === 0) {
+          // 【v18r27】扫描阈值从第 4 轮(≈12s)后移到第 12 轮(≈60s)：镜像几乎不会在 1 分钟内就绪，
+          //   过早扫描只会白打一批并发、挤占 Edge Function，反而拖慢后续轮询。
+          if (i >= 12 && !crossScanDone && imgs.length === 0) {
             crossScanDone = true;
             step('🌐 主地域 [' + region + '] 一直空，并发扫描其他 8 个地域...');
             try {

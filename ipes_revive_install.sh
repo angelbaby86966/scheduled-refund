@@ -1,6 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# IPES 趴着自动唤醒 —— 一键安装/卸载器（把 ipes_revive.sh 装到本机并挂 crontab）
+# IPES 节点自愈看护 —— 一键安装/卸载器（安装 ipes_revive.sh 并挂 crontab）
+#
+# 说明（2026-09-12 RCT 结论已成文）：
+#   重启**不能**拉量（随机对照实验未见效果，详见报告第八节）。所以本看护只做：
+#     ① 容器不在运行 / happy 进程掉线 → 自动恢复（真故障恢复，有效）
+#     ② 低上行 → **只报告不动作**（避免无效重启打断正在跑的流量）
 #
 # 用法：
 #   curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_revive_install.sh | bash

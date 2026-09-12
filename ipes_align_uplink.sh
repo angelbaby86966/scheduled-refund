@@ -120,9 +120,22 @@ take_snapshot(){
   local tag="$1"
   head1 "$tag"
   local inst_id pub_ip priv_ip
-  inst_id=$(curl -s --max-time 3 http://100.100.100.200/latest/meta-data/instance-id 2>/dev/null || echo N/A)
-  pub_ip=$(curl -s --max-time 3 http://100.100.100.200/latest/meta-data/public-ipv4 2>/dev/null || echo N/A)
-  priv_ip=$(curl -s --max-time 3 http://100.100.100.200/latest/meta-data/private-ipv4 2>/dev/null || echo N/A)
+  # 公网 IP 取值：元数据不一定提供（轻量服务器无 public-ipv4；ECS 未绑公网/EIP 时返回 404 HTML）
+  # → 多源回退 + IPv4 格式校验，避免把 404 HTML 整段打进日志
+  _is_ipv4(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+  inst_id=$(curl -s --max-time 3 http://100.100.100.200/latest/meta-data/instance-id 2>/dev/null | tr -d '\r\n')
+  priv_ip=$(curl -s --max-time 3 http://100.100.100.200/latest/meta-data/private-ipv4 2>/dev/null | tr -d '\r\n')
+  pub_ip=""
+  for _u in http://100.100.100.200/latest/meta-data/eipv4 \
+            http://100.100.100.200/latest/meta-data/public-ipv4 \
+            https://api.ipify.org \
+            http://ip.3322.net; do
+    _c=$(curl -s --max-time 3 "$_u" 2>/dev/null | tr -d '\r\n')
+    if _is_ipv4 "$_c"; then pub_ip="$_c"; break; fi
+  done
+  [ -n "$inst_id" ] || inst_id="N/A"
+  [ -n "$priv_ip" ] || priv_ip="N/A"
+  [ -n "$pub_ip" ] || pub_ip="N/A(未绑公网或元数据不可用)"
   log "实例ID=$inst_id  公网IP=$pub_ip  内网IP=$priv_ip"
 
   local mem cpu root_sz data_avail
@@ -599,10 +612,12 @@ final_report(){
   fi
   cat <<'TODO'
     ┌──────────────────────────────────────────────────────────────────┐
-    │ 【必须人工做的一步】云防火墙是「实例级」的，不随自定义镜像继承：  │
+    │ 【必须人工做的一步】云端放行是「实例级」的，不随自定义镜像继承：  │
     │   放行  TCP 1-65535  和  UDP 1-65535                              │
-    │   路径A：阿里云控制台 → 轻量应用服务器 → 本实例 → 防火墙 → 添加规则 │
-    │   路径B：你的工作台「防火墙模板」→ 批量应用到本实例（一键）        │
+    │   · 轻量应用服务器(SWAS)：控制台 → 本实例 → 防火墙 → 添加规则      │
+    │     或工作台「防火墙模板」→ 批量应用到本实例（一键）               │
+    │   · ECS(i-bp1* 开头)：控制台 → 本实例 → 安全组 → 配置规则         │
+    │     入方向 添加：协议 TCP+UDP，端口 1/65535，源 0.0.0.0/0          │
     │   未放行时：NAT=restricted，只有下行、几乎没有上行                │
     └──────────────────────────────────────────────────────────────────┘
 TODO

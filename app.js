@@ -2893,6 +2893,26 @@ async function batchApplyQuota(desireValue) {
   }
 }
 
+// 【2026-09-12 新增】从输入框读目标上限再提交。
+//   背景：配额 q_z3sbl5「实例数量上限」的 ApplicableRange 是 [501, 1000]，
+//   且申请值必须【高于当前值】。原按钮写死 batchApplyQuota(500)，
+//   但这 9 个地区在 09-06 已全部批准到 500 → 再申请 500 会被阿里云拒绝：
+//   "The applied quota value is invalid."。
+//   故改为可输入目标值，默认 1000，并在前端先做范围校验。
+function batchApplyQuotaFromInput() {
+  var el = document.getElementById('quotaDesireValue');
+  var v = el ? parseInt(el.value, 10) : NaN;
+  if (!v || isNaN(v)) {
+    log('❌ 请先填写目标上限（数字）', 'error');
+    return;
+  }
+  if (v < 501 || v > 1000) {
+    log('❌ 目标上限需在 501 ~ 1000 之间（该配额当前已是 500，必须高于当前值才能申请）', 'error');
+    return;
+  }
+  return batchApplyQuota(v);
+}
+
 function escHtml(s) {
   return String(s).replace(/[<>&"]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; });
 }

@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.8 - callCentralApi 也走并发闸门(修镜像轮询被跨地域扫描打满→30s/轮)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.9 - 错误提示不再退化成无意义的 "HTTP 200"（暴露后端 hint/action 失配）', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -271,7 +271,15 @@
           var j = await resp.json();
           clearTimeout(timer);   // 等 JSON 解析完再清，body 卡住也能被超时打断
           if (!j.success) {
-            var be = new Error(j.error || ('HTTP ' + resp.status));
+            // 【2026-09-12 修复】原实现 `j.error || ('HTTP ' + resp.status)` 在「响应体没有 success 字段」
+            // 时会输出毫无意义的 "HTTP 200"，把真实原因完全掩盖。
+            // 典型场景：action 名大小写与后端 switch 不匹配 → 落 default 分支返回 {ok:true,hint:"aliyun-proxy alive"}，
+            // 于是 9 个地区全部报 "提交失败: HTTP 200"。现把响应体里的可读信息一并带出。
+            var _fallback = j.error || j.message || j.hint
+              || (j.received_action ? ('后端未注册该 action，收到: ' + j.received_action) : '')
+              || (j.ok === true ? '接口返回 ok 但没有 success 字段（疑似 action 名不匹配）' : '')
+              || ('HTTP ' + resp.status);
+            var be = new Error(_fallback);
             be.httpStatus = resp.status;
             be.response = j;   // 【v2.8】兼容旧调用方（如 icIsAliveProbe 读 e.response.hint）
             if (__isRetryableNetErr(be, resp.status) && attempt < retries) {

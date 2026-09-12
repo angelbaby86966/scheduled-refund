@@ -433,18 +433,20 @@
             <div class="card" data-page-node-id="ms5UhKCn0TDknvq4cJVycF">
               <div class="card-header" data-page-node-id="8CyueqWYz0NGAYPaY0tvrq">
                 <h3 data-page-node-id="BBg5wyXqnepOBh4Ld0rjnN">📈 批量提升实例数量配额</h3>
-                <p class="card-desc" data-page-node-id="3MaUNdBUsUYn9WLJtVqbMG">将 9 个地区的轻量应用服务器「实例数量上限」配额（<code data-page-node-id="UNKM3h5AvnZXf078CpSajF">q_z3sbl5</code>）批量提升到 500。</p>
+                <p class="card-desc" data-page-node-id="3MaUNdBUsUYn9WLJtVqbMG">将 9 个地区的轻量应用服务器「实例数量上限」配额（<code data-page-node-id="UNKM3h5AvnZXf078CpSajF">q_z3sbl5</code>）批量提升。可申请范围 <b>501 ~ 1000 台</b>，且必须高于当前值（多数地区当前已是 500）。</p>
               </div>
               <div class="card-body" data-page-node-id="4JJRON6oeGD6ynwjQzYx4E">
                 <div class="quota-region-list" id="quotaRegionList" style="margin-bottom:16px;" data-page-node-id="70Svr8WKXs77nHDWljMmD4">
                   <div class="empty-state" data-page-node-id="bFAy6o5ZGGq6iBGvIKAyIp">点击按钮后，会依次为 9 个地区提交配额提升申请。</div>
                 </div>
-                <div class="action-bar" style="justify-content:center; padding:10px 0;" data-page-node-id="rPUyP2SbCUmLscU2MX72Ud">
-                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchApplyQuota(500)" data-page-node-id="rJdtjAGGz2e572qlnLicuM">
-                    🚀 批量提额到 500
+                <div class="action-bar" style="justify-content:center; align-items:center; gap:10px; padding:10px 0;" data-page-node-id="rPUyP2SbCUmLscU2MX72Ud">
+                  <label for="quotaDesireValue" style="font-weight:600;">目标上限</label>
+                  <input id="quotaDesireValue" class="input" type="number" min="501" max="1000" step="1" value="1000" style="width:110px; text-align:center;" data-page-node-id="qDesireValInput">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchApplyQuotaFromInput()" data-page-node-id="rJdtjAGGz2e572qlnLicuM">
+                    🚀 批量提额
                   </button>
                 </div>
-                <small style="color:#888; display:block; text-align:center; margin-top:8px;" data-page-node-id="g3PtZHoqN4hs7a2OX9uHcO">配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
+                <small style="color:#888; display:block; text-align:center; margin-top:8px;" data-page-node-id="g3PtZHoqN4hs7a2OX9uHcO">可填 501 ~ 1000 台，且必须高于当前值（填 500 会被阿里云拒：The applied quota value is invalid.）。配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
               </div>
             </div>
           </div>
@@ -817,9 +819,9 @@
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
   </script>
-  <script src="aliyun-client-v2.js?v=16"></script>
+  <script src="aliyun-client-v2.js?v=17"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=108"></script>
+  <script src="app.js?v=109"></script>
   <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
   <script src="image-clone.js?v=18&r=32"></script>

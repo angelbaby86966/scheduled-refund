@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r10"
+SCRIPT_VERSION="v2026-09-13-r11"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1023,10 +1023,30 @@ set_node_attributes() {
     PYTHONIOENCODING=utf-8 "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" <<'PYEOF'
 # -*- coding: utf-8 -*-
 import json, sys
+
+# 后端 /api/edgeNode/findEdgeNode 的返回里，部分字符串是「UTF-8 字节被
+# surrogateescape 解出」的形态（如 "电信" 变成 '\udce7\udc94\udcb5'）。
+# 直接原样写回会报 UnicodeEncodeError: surrogates not allowed → 属性写不进去。
+# 这里递归修复：surrogateescape 编码回字节 -> 再按 utf-8 解码。
+def repair(o):
+    if isinstance(o, str):
+        try:
+            return o.encode('utf-8', 'surrogateescape').decode('utf-8', 'replace')
+        except Exception:
+            return o
+    if isinstance(o, list):
+        return [repair(x) for x in o]
+    if isinstance(o, dict):
+        out = {}
+        for k, v in o.items():
+            out[repair(k) if isinstance(k, str) else k] = repair(v)
+        return out
+    return o
+
 src, dst, isp, rtype, dtype, prov, city = sys.argv[1:8]
-op = open(src, encoding='utf-8') if sys.version_info[0] >= 3 else open(src)
-d = json.load(op)
-data = d.get('data') or {}
+raw = open(src, 'rb').read()
+d = json.loads(raw.decode('utf-8', 'surrogateescape'))
+data = repair(d.get('data') or {})
 ni = data.get('nodeInfo') or {}
 keys = ['isp', 'resourceType', 'dialType', 'natType', 'province', 'city']
 print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
@@ -1043,9 +1063,15 @@ if not ni.get('stage'):
     ni['stage'] = data.get('stage') or 'inService'
 data['nodeInfo'] = ni
 print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
-w = open(dst, 'w', encoding='utf-8') if sys.version_info[0] >= 3 else open(dst, 'w')
-w.write(json.dumps(data, ensure_ascii=False))
-w.close()
+txt = json.dumps(data, ensure_ascii=False)
+try:
+    txt.encode('utf-8')
+except Exception:
+    txt = json.dumps(data, ensure_ascii=True)   # 兜底：还有代理字符就用转义形式写
+f = open(dst, 'w', encoding='utf-8') if sys.version_info[0] >= 3 else open(dst, 'w')
+f.write(txt)
+f.close()
+print('   WROTE_OK')
 PYEOF
     if [ $? -ne 0 ]; then
         log_message "${YELLOW}[警告]${NC} JSON 改写失败，跳过节点属性写入"
@@ -1399,13 +1425,13 @@ main() {
         log_message "${YELLOW}[信息]${NC} 跳过 ipes_onekey（--skip-onekey）"
     fi
 
-    # [8] 安装 nload
+    # [8] 安装 nload（可选工具，加超时避免拖住后面的关键步骤）
     print_step "安装 nload"
     yum install -y epel-release >/dev/null 2>&1
-    if yum install -y nload >/dev/null 2>&1 || yum install -y nload; then
+    if timeout 120 yum install -y nload >/dev/null 2>&1; then
         log_message "${GREEN}[成功]${NC} nload 安装成功"
     else
-        log_message "${YELLOW}[警告]${NC} nload 安装失败（不影响跑量）"
+        log_message "${YELLOW}[警告]${NC} nload 安装失败/超时（可选工具，不影响跑量）"
     fi
 
     # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性 -> 校验业务标签

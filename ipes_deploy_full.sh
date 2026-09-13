@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r6"
+SCRIPT_VERSION="v2026-09-13-r8"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -80,6 +80,12 @@ ADMIN_NOMINAL_API="${ADMIN_NOMINAL_API:-/api/edgeNode/updateEdgeNominalInfo}"
 ADMIN_STATUS_API="${ADMIN_STATUS_API:-/api/edgeNode/stateflow}"
 ADMIN_FIND_NODE_API="${ADMIN_FIND_NODE_API:-/api/edgeNode/findEdgeNode}"
 ADMIN_NODE_UPDATE_API="${ADMIN_NODE_UPDATE_API:-/api/edgeNode/updateEdgeNode}"
+# 业务标签（后台节点列表 hover 提示里的「业务ID」就来自这里）
+ADMIN_BUSINESS_TAG_LIST_API="${ADMIN_BUSINESS_TAG_LIST_API:-/api/businessTag/getBusinessTagList}"
+ADMIN_BUSINESS_TAG_UPDATE_API="${ADMIN_BUSINESS_TAG_UPDATE_API:-/api/businessTag/updateBusinessTag}"
+ADMIN_BUSINESS_TAG_CREATE_API="${ADMIN_BUSINESS_TAG_CREATE_API:-/api/businessTag/createBusinessTag}"
+# 业务标签的 bizType（业务 41 = Q-Q2）；留空则不写该字段
+NODE_BIZ_TYPE="${NODE_BIZ_TYPE:-Q-Q2}"
 
 # 节点属性（决定后台节点列表两列显示）
 #   业务线运营商  <- nodeInfo.isp
@@ -981,6 +987,87 @@ PYEOF
 }
 
 # =============================================================================
+# 业务标签写入：后台节点列表 hover 里的「业务ID」
+# -----------------------------------------------------------------------------
+# 后台那列「业务ID」= business_tags[].hostName，真实来源是 **IPES 容器本地生成的序列号**：
+#     docker exec ipes cat /app/ipes/bin/ipes_sn     -> 76 位 hex（64+12；业务41后缀固定 69bccfe3bf24）
+#     docker exec ipes cat /app/ipes/bin/ipes_phy_sn -> 物理SN（写进标签的 mac 字段）
+# 平台在节点流转「服务中」时会自动建一条 business_tags 记录，但**多数只写占位符**
+# "ZHOUYI_XIAODU占位符"（实测最近 50 条里 47 条是占位符），所以需要本步骤用真实 SN 覆盖。
+#
+# 接口（X-Token 鉴权，且账号需有「业务标签」写权限）：
+#   GET  /api/businessTag/getBusinessTagList?nodeId=<SN>   取记录 ID
+#   PUT  /api/businessTag/updateBusinessTag                覆盖 hostName/isp/mac/bizType
+#   POST /api/businessTag/createBusinessTag                记录不存在时新建
+# 若返回 {"code":7,"msg":"权限不足"}：换有权限的账号 token，或到后台「业务标签」页手工填。
+# =============================================================================
+set_business_tag() {
+    local node="$1"
+    print_step "写入业务标签：业务ID（IPES 序列号）"
+
+    if [ -z "$node" ]; then
+        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务标签写入"
+        return 1
+    fi
+    if [ -z "$NODE_ACTIVATE_TOKEN" ]; then
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；写业务标签需要 JWT（X-Token），跳过"
+        return 1
+    fi
+
+    # 1) 从 IPES 容器读真实业务ID
+    local biz_sn="" phy_sn=""
+    if command -v docker >/dev/null 2>&1; then
+        biz_sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d ' \r\n')
+        phy_sn=$(docker exec ipes cat /app/ipes/bin/ipes_phy_sn 2>/dev/null | tr -d ' \r\n')
+    fi
+    if [ -z "$biz_sn" ]; then
+        log_message "${YELLOW}[警告]${NC} 未取到 IPES 序列号（容器未就绪？），跳过业务标签写入"
+        return 1
+    fi
+    log_message "IPES 业务ID(sn) : $biz_sn"
+    [ -n "$phy_sn" ] && log_message "IPES 物理SN     : $phy_sn"
+
+    # 2) 查已有标签记录，取 ID
+    local url="${ADMIN_API_HOST}${ADMIN_BUSINESS_TAG_LIST_API}?page=1&pageSize=5&nodeId=${node}"
+    local resp http_code body tag_id
+    resp=$(curl -k -s -w '\n%{http_code}' -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
+    http_code=$(echo "$resp" | tail -n1)
+    body=$(echo "$resp" | sed '$d')
+    tag_id=$(echo "$body" | sed -n 's/.*"ID":\([0-9]\{1,\}\).*/\1/p' | head -1)
+
+    # 3) 覆盖 / 新建
+    # ⚠️ mac 不要用 ipes_phy_sn 顶替：正常节点的 mac 是 32 位 base32 的 20 字节随机值
+    #    （由节点/平台侧生成），本地无法推导 → 保留已有值，取不到就留空。
+    local exist_mac exist_telegraf
+    exist_mac=$(echo "$body" | sed -n 's/.*"mac":"\([^"]*\)".*/\1/p' | head -1)
+    exist_telegraf=$(echo "$body" | sed -n 's/.*"telegraf":"\([^"]*\)".*/\1/p' | head -1)
+
+    local payload response rcode rbody
+    if [ -n "$tag_id" ]; then
+        payload="{\"ID\":${tag_id},\"nodeId\":\"${node}\",\"hostName\":\"${biz_sn}\",\"isp\":\"${ISP}\",\"deviceArch\":\"\",\"mac\":\"${exist_mac:-}\",\"telegraf\":\"${exist_telegraf:-}\",\"bizType\":\"${NODE_BIZ_TYPE}\",\"businessID\":${BUSINESS_ID}}"
+        response=$(admin_api_request_xtoken PUT "$ADMIN_BUSINESS_TAG_UPDATE_API" "$payload")
+    else
+        payload="{\"nodeId\":\"${node}\",\"hostName\":\"${biz_sn}\",\"isp\":\"${ISP}\",\"deviceArch\":\"\",\"mac\":\"\",\"telegraf\":\"\"}"
+        response=$(admin_api_request_xtoken POST "$ADMIN_BUSINESS_TAG_CREATE_API" "$payload")
+    fi
+    rcode=$(echo "$response" | tail -n1)
+    rbody=$(echo "$response" | sed '$d')
+    log_message "响应 [HTTP $rcode]: $rbody"
+
+    if echo "$rbody" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 业务ID 已写入：$biz_sn"
+        return 0
+    fi
+    if echo "$rbody" | grep -q '权限不足'; then
+        log_message "${YELLOW}[警告]${NC} 当前账号没有「业务标签」写权限 —— 请用有权限的账号 token，或到后台「业务标签」页手工填："
+        log_message "${YELLOW}        主机名(业务ID)=${biz_sn} / 运营商=${ISP}${NC}"
+    else
+        log_message "${YELLOW}[警告]${NC} 业务标签写入失败，可用 ADMIN_BUSINESS_TAG_*_API 覆盖接口路径后重试"
+    fi
+    return 1
+}
+
+# =============================================================================
 # Docker / IPES 部署 / ipes_onekey 拉满
 # =============================================================================
 check_docker_running() {
@@ -1265,11 +1352,12 @@ main() {
         log_message "${YELLOW}[警告]${NC} nload 安装失败"
     fi
 
-    # [9] 提交业务 41 + 状态流转到服务中 + 写节点属性
+    # [9] 提交业务 41 + 状态流转到服务中 + 写节点属性 + 写业务标签(业务ID)
     if [ -n "$DEVICE_ID" ]; then
         submit_business "$DEVICE_ID"
         transition_to_serving "$DEVICE_ID"
         set_node_attributes "$DEVICE_ID"
+        set_business_tag "$DEVICE_ID"
     else
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务提交与状态流转"
     fi

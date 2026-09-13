@@ -1,7 +1,11 @@
 # IPES 业务 41 一键部署 — 最终执行命令
 
-> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r9**）
-> 地址：`https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh`
+> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r11**）
+> 主源（jsDelivr，锁定 commit）：`https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@<commit>/ipes_deploy_full.sh`
+> 备源（ghproxy）：`https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh`
+>
+> ⚠️ **不要直接用 ghproxy 裸链而不校验版本**——它会缓存旧脚本，我们实测踩过：
+> 明明推了 r10，机器上 `curl` 下来还是 r9，导致修复没生效。命令里必须带**缓存穿透 + 内容校验**（见下）。
 
 ---
 

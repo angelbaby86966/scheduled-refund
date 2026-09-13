@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r8"
+SCRIPT_VERSION="v2026-09-13-r9"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -848,9 +848,20 @@ submit_business() {
     fi
 }
 
+# 读取 IPES 容器生成的序列号 = 后台列表显示的「业务ID」（business_tags.hostName）
+# 例：072605d9d5eca5cfe6fcd43f535621e746c9c65f6cb8bc876f4edb2110333bba69bccfe3bf24（76 位 hex）
+get_ipes_sn() {
+    local sn=""
+    sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
+    if [ -z "$sn" ]; then
+        sn=$(docker exec ipes cat /opt/soft/disk/IPES_SN 2>/dev/null | tr -d '\r\n')
+    fi
+    echo "$sn"
+}
+
 transition_to_serving() {
     local node="$1"
-    print_step "状态流转：待配置 -> 服务中（stateflow）"
+    print_step "状态流转：待配置 -> 服务中（stateflow，携带业务ID）"
 
     if [ -z "$node" ]; then
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过状态流转"
@@ -864,15 +875,42 @@ transition_to_serving() {
     #   stage: bound(待提交)/configured(待配置)/waitAudit(交付中)/inService(服务中)/gotOff(已下机)
     #   后台只允许 configured 与 inService 之间互转，其它值会报
     #   {"code":7,"msg":"设备只能流转到待配置或服务中"}
+    # ★ 业务ID（hostname）：不传 → 平台会写死占位符 "ZHOUYI_XIAODU占位符"
+    #   业务ID = IPES 容器序列号（get_ipes_sn），必须显式带上才会写入后台。
+    local biz_sn="${NODE_HOSTNAME:-}"
+    if [ -z "$biz_sn" ]; then
+        biz_sn=$(get_ipes_sn)
+    fi
+    if [ -n "$biz_sn" ]; then
+        log_message "业务ID（IPES 序列号）: $biz_sn"
+    else
+        log_message "${YELLOW}[警告]${NC} 未取到 IPES 序列号，流转不带 hostname，后台会显示占位符"
+    fi
+
     local request_body
     if [ -n "${ADMIN_STATUS_BODY:-}" ]; then
         request_body="$ADMIN_STATUS_BODY"
+    elif [ -n "$biz_sn" ]; then
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\",\"hostname\":\"$biz_sn\"}"
     else
-        request_body="{\"nodes\":[\"$node\"],\"stage\":\"${STATUS_TARGET:-inService}\"}"
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\"}"
     fi
 
     local response
     if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+        # 第 1 步：先降到「待配置」——平台在「服务中」状态不允许改信息，
+        #         必须「先降级 → 再升回」才能把 hostname（业务ID）写进去。
+        response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+        log_message "第1步(->待配置) 响应 [HTTP $(echo "$response" | tail -n1)]: $(echo "$response" | sed '$d')"
+        sleep 5
+        # 第 2 步：再升到「服务中」，这一步携带 hostname（业务ID）
+        if [ -z "${ADMIN_STATUS_BODY:-}" ]; then
+            if [ -n "$biz_sn" ]; then
+                request_body="{\"nodes\":[\"$node\"],\"stage\":\"${STATUS_TARGET:-inService}\",\"hostname\":\"$biz_sn\"}"
+            else
+                request_body="{\"nodes\":[\"$node\"],\"stage\":\"${STATUS_TARGET:-inService}\"}"
+            fi
+        fi
         response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
     else
         log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；stateflow 需要 JWT（X-Token），尝试签名方式..."
@@ -1003,67 +1041,38 @@ PYEOF
 # =============================================================================
 set_business_tag() {
     local node="$1"
-    print_step "写入业务标签：业务ID（IPES 序列号）"
+    print_step "校验业务标签：业务ID（后台 hostName）"
 
     if [ -z "$node" ]; then
-        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务标签写入"
-        return 1
-    fi
-    if [ -z "$NODE_ACTIVATE_TOKEN" ]; then
-        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；写业务标签需要 JWT（X-Token），跳过"
+        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务标签校验"
         return 1
     fi
 
-    # 1) 从 IPES 容器读真实业务ID
-    local biz_sn="" phy_sn=""
-    if command -v docker >/dev/null 2>&1; then
-        biz_sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d ' \r\n')
-        phy_sn=$(docker exec ipes cat /app/ipes/bin/ipes_phy_sn 2>/dev/null | tr -d ' \r\n')
-    fi
-    if [ -z "$biz_sn" ]; then
-        log_message "${YELLOW}[警告]${NC} 未取到 IPES 序列号（容器未就绪？），跳过业务标签写入"
-        return 1
-    fi
-    log_message "IPES 业务ID(sn) : $biz_sn"
-    [ -n "$phy_sn" ] && log_message "IPES 物理SN     : $phy_sn"
+    # 业务ID 已在 transition_to_serving 里通过 stateflow 的 hostname 参数写入。
+    # ⚠️ 不要再调 /businessTag/updateBusinessTag —— 普通账号对该接口是「权限不足」，
+    #    而 stateflow 的 hostname 字段才是平台认可的写入通道。
+    local biz_sn
+    biz_sn=$(get_ipes_sn)
 
-    # 2) 查已有标签记录，取 ID
     local url="${ADMIN_API_HOST}${ADMIN_BUSINESS_TAG_LIST_API}?page=1&pageSize=5&nodeId=${node}"
-    local resp http_code body tag_id
-    resp=$(curl -k -s -w '\n%{http_code}' -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
-    http_code=$(echo "$resp" | tail -n1)
-    body=$(echo "$resp" | sed '$d')
-    tag_id=$(echo "$body" | sed -n 's/.*"ID":\([0-9]\{1,\}\).*/\1/p' | head -1)
-
-    # 3) 覆盖 / 新建
-    # ⚠️ mac 不要用 ipes_phy_sn 顶替：正常节点的 mac 是 32 位 base32 的 20 字节随机值
-    #    （由节点/平台侧生成），本地无法推导 → 保留已有值，取不到就留空。
-    local exist_mac exist_telegraf
-    exist_mac=$(echo "$body" | sed -n 's/.*"mac":"\([^"]*\)".*/\1/p' | head -1)
-    exist_telegraf=$(echo "$body" | sed -n 's/.*"telegraf":"\([^"]*\)".*/\1/p' | head -1)
-
-    local payload response rcode rbody
-    if [ -n "$tag_id" ]; then
-        payload="{\"ID\":${tag_id},\"nodeId\":\"${node}\",\"hostName\":\"${biz_sn}\",\"isp\":\"${ISP}\",\"deviceArch\":\"\",\"mac\":\"${exist_mac:-}\",\"telegraf\":\"${exist_telegraf:-}\",\"bizType\":\"${NODE_BIZ_TYPE}\",\"businessID\":${BUSINESS_ID}}"
-        response=$(admin_api_request_xtoken PUT "$ADMIN_BUSINESS_TAG_UPDATE_API" "$payload")
+    local resp body cur=""
+    if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+        resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
     else
-        payload="{\"nodeId\":\"${node}\",\"hostName\":\"${biz_sn}\",\"isp\":\"${ISP}\",\"deviceArch\":\"\",\"mac\":\"\",\"telegraf\":\"\"}"
-        response=$(admin_api_request_xtoken POST "$ADMIN_BUSINESS_TAG_CREATE_API" "$payload")
+        resp=$(curl -k -s -m 30 "$url" 2>&1)
     fi
-    rcode=$(echo "$response" | tail -n1)
-    rbody=$(echo "$response" | sed '$d')
-    log_message "响应 [HTTP $rcode]: $rbody"
+    body=$(echo "$resp" | sed '$d')
+    cur=$(echo "$body" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
 
-    if echo "$rbody" | grep -q '"code":0'; then
-        log_message "${GREEN}[成功]${NC} 业务ID 已写入：$biz_sn"
+    if [ -n "$cur" ] && [ "$cur" != "ZHOUYI_XIAODU占位符" ]; then
+        log_message "${GREEN}[成功]${NC} 后台业务ID 已就绪: $cur"
         return 0
     fi
-    if echo "$rbody" | grep -q '权限不足'; then
-        log_message "${YELLOW}[警告]${NC} 当前账号没有「业务标签」写权限 —— 请用有权限的账号 token，或到后台「业务标签」页手工填："
-        log_message "${YELLOW}        主机名(业务ID)=${biz_sn} / 运营商=${ISP}${NC}"
-    else
-        log_message "${YELLOW}[警告]${NC} 业务标签写入失败，可用 ADMIN_BUSINESS_TAG_*_API 覆盖接口路径后重试"
-    fi
+
+    log_message "${YELLOW}[警告]${NC} 后台业务ID 仍为空/占位符（当前: ${cur:-无记录}）"
+    log_message "${YELLOW}        应写入的业务ID = ${biz_sn:-（未取到）}${NC}"
+    log_message "${YELLOW}        原因：状态流转时没带 hostname。stateflow body 需为${NC}"
+    log_message "${YELLOW}        {\"nodes\":[\"$node\"],\"stage\":\"inService\",\"hostname\":\"<业务ID>\"}${NC}"
     return 1
 }
 

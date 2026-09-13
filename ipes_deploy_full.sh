@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r11"
+SCRIPT_VERSION="v2026-09-13-r12"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1020,7 +1020,7 @@ set_node_attributes() {
     # ⚠️ 必须设 PYTHONIOENCODING=utf-8：在 nohup/云助手环境下 LANG 未设，
     #    Python3 stdout 默认 ascii，print 带中文(NodeInfo 的省/市)会抛
     #    UnicodeEncodeError 导致整段改写失败（实测踩过）。
-    PYTHONIOENCODING=utf-8 "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" <<'PYEOF'
+    PYTHONIOENCODING=utf-8 "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" "$BUSINESS_ID" <<'PYEOF'
 # -*- coding: utf-8 -*-
 import json, sys
 
@@ -1043,25 +1043,52 @@ def repair(o):
         return out
     return o
 
-src, dst, isp, rtype, dtype, prov, city = sys.argv[1:8]
+src, dst, isp, rtype, dtype, prov, city, bizid = sys.argv[1:9]
+
+# ⚠️⚠️ 中文「命令行参数」也必须 repair：
+#   nohup / 云助手环境下 LANG 未设，Python3.6 的 filesystem encoding 退化成 ascii，
+#   argv 里的中文会被 surrogateescape 解成 '\udce7\udc94\udcb5'(=电信)。
+#   不修的话写进去就是这个乱码 —— r11 实测踩到。
+isp, rtype, dtype, prov, city = (repair(x) for x in (isp, rtype, dtype, prov, city))
+
 raw = open(src, 'rb').read()
 d = json.loads(raw.decode('utf-8', 'surrogateescape'))
 data = repair(d.get('data') or {})
 ni = data.get('nodeInfo') or {}
 keys = ['isp', 'resourceType', 'dialType', 'natType', 'province', 'city']
 print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
+
+# 平台在提交业务41时通常已把 nodeInfo 写好；已是目标值就不必再 PUT
+# （updateEdgeNode 有 required 校验，能不调就不调，少一层失败面）。
+if (ni.get('isp') == isp and str(ni.get('resourceType')) == str(rtype)
+        and ni.get('dialType') == dtype):
+    print('   ALREADY_OK: 节点属性已是目标值，跳过写入')
+    open(dst, 'w').write('')   # 空文件 = 跳过哨兵
+    print('   WROTE_OK')
+    raise SystemExit(0)
+
 ni['isp'] = isp
 ni['resourceType'] = rtype
 ni['dialType'] = dtype
 if not ni.get('natType'):
     ni['natType'] = 'public'
 if not ni.get('province'):
-    ni['province'] = prov or data.get('province') or ''
+    ni['province'] = prov or repair(data.get('province') or '')
 if not ni.get('city'):
-    ni['city'] = city or data.get('city') or ''
+    ni['city'] = city or repair(data.get('city') or '')
 if not ni.get('stage'):
     ni['stage'] = data.get('stage') or 'inService'
 data['nodeInfo'] = ni
+
+# ⚠️ updateEdgeNode 的 ResourceNode.BusinessID 是 required，缺了直接报：
+#    Key: 'ResourceNode.BusinessID' Error:Field validation for 'BusinessID' failed on the 'required' tag
+try:
+    _bid = int(str(bizid).strip())
+    if not data.get('businessID'):
+        data['businessID'] = _bid
+except Exception:
+    pass
+
 print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
 txt = json.dumps(data, ensure_ascii=False)
 try:
@@ -1076,6 +1103,12 @@ PYEOF
     if [ $? -ne 0 ]; then
         log_message "${YELLOW}[警告]${NC} JSON 改写失败，跳过节点属性写入"
         return 1
+    fi
+
+    # 空文件 = python 判定「已是目标值」，不必再 PUT
+    if [ ! -s "$after" ]; then
+        log_message "${GREEN}[成功]${NC} 节点属性已是目标值（运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE），跳过写入"
+        return 0
     fi
 
     local response
@@ -1124,8 +1157,8 @@ set_business_tag() {
 
     local url="${ADMIN_API_HOST}${ADMIN_BUSINESS_TAG_LIST_API}?page=1&pageSize=5&nodeId=${node}"
     local resp body cur="" try=0
-    # 平台创建 business_tags 记录有延迟（实测数秒~数十秒），轮询 6 次，每次 8s
-    while [ $try -lt 6 ]; do
+    # 平台创建 business_tags 记录有明显延迟（实测 1~2 分钟才出现），轮询 18 次 × 10s = 180s
+    while [ $try -lt 18 ]; do
         try=$((try+1))
         if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
             resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
@@ -1138,12 +1171,12 @@ set_business_tag() {
             log_message "${GREEN}[成功]${NC} 后台业务ID 已就绪: $cur"
             return 0
         fi
-        [ $try -lt 6 ] && sleep 8
+        [ $try -lt 18 ] && sleep 10
     done
 
-    log_message "${YELLOW}[警告]${NC} 后台业务ID 仍为空/占位符（当前: ${cur:-无记录}）"
+    log_message "${YELLOW}[警告]${NC} 后台业务ID 轮询 180s 仍为空/占位符（当前: ${cur:-无记录}）"
     log_message "${YELLOW}        应写入的业务ID = ${biz_sn:-（未取到）}${NC}"
-    log_message "${YELLOW}        原因：状态流转时没带 hostname。stateflow body 需为${NC}"
+    log_message "${YELLOW}        平台建记录有延迟，通常稍后会自行出现；若始终为空，核对 stateflow body 是否带 hostname：${NC}"
     log_message "${YELLOW}        {\"nodes\":[\"$node\"],\"stage\":\"inService\",\"hostname\":\"<业务ID>\"}${NC}"
     return 1
 }
@@ -1434,13 +1467,12 @@ main() {
         log_message "${YELLOW}[警告]${NC} nload 安装失败/超时（可选工具，不影响跑量）"
     fi
 
-    # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性 -> 校验业务标签
+    # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性
     if [ -n "$DEVICE_ID" ]; then
         downgrade_to_configured "$DEVICE_ID"
         submit_business "$DEVICE_ID"
         transition_to_serving "$DEVICE_ID"
         set_node_attributes "$DEVICE_ID"
-        set_business_tag "$DEVICE_ID"
     else
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务提交与状态流转"
     fi
@@ -1460,6 +1492,13 @@ main() {
         log_message "${GREEN}[成功]${NC} admin 免密配置已注释"
     else
         log_message "${YELLOW}[信息]${NC} 保留 admin 免密 sudo（与金标准一致；如需清理设 DISABLE_ADMIN_NOPASSWD=1）"
+    fi
+
+    # [11.5] 校验业务ID（后台 hostName）
+    # 放在最后：平台创建 business_tags 记录有 1~2 分钟延迟，
+    # 让前面的 SSH 收尾工作（约 1 分钟）正好把延迟掩盖掉。
+    if [ -n "$DEVICE_ID" ]; then
+        set_business_tag "$DEVICE_ID"
     fi
 
     # [12] 最终输出

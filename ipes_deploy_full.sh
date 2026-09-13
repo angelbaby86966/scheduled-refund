@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r13"
+SCRIPT_VERSION="v2026-09-13-r14"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1359,8 +1359,10 @@ main() {
 
     # [8] 安装 nload（可选工具，加超时避免拖住后面的关键步骤）
     print_step "安装 nload"
-    yum install -y epel-release >/dev/null 2>&1
-    if timeout 120 yum install -y nload >/dev/null 2>&1; then
+    # ⚠️ epel-release 在没有外网/镜像慢时会卡很久（实测 7 分钟+），必须加 timeout
+    if command -v nload >/dev/null 2>&1; then
+        log_message "${GREEN}[成功]${NC} nload 已存在"
+    elif timeout 60 yum install -y epel-release >/dev/null 2>&1 && timeout 90 yum install -y nload >/dev/null 2>&1; then
         log_message "${GREEN}[成功]${NC} nload 安装成功"
     else
         log_message "${YELLOW}[警告]${NC} nload 安装失败/超时（可选工具，不影响跑量）"

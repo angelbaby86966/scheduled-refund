@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r5"
+SCRIPT_VERSION="v2026-09-13-r6"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -78,6 +78,19 @@ API_URL="http://api.zhouyiy.com/qudao/device/v1/batch/create2"
 ADMIN_API_HOST="${ADMIN_API_HOST:-https://admin.zhouyi.top}"
 ADMIN_NOMINAL_API="${ADMIN_NOMINAL_API:-/api/edgeNode/updateEdgeNominalInfo}"
 ADMIN_STATUS_API="${ADMIN_STATUS_API:-/api/edgeNode/stateflow}"
+ADMIN_FIND_NODE_API="${ADMIN_FIND_NODE_API:-/api/edgeNode/findEdgeNode}"
+ADMIN_NODE_UPDATE_API="${ADMIN_NODE_UPDATE_API:-/api/edgeNode/updateEdgeNode}"
+
+# 节点属性（决定后台节点列表两列显示）
+#   业务线运营商  <- nodeInfo.isp
+#   资源/上网方式 <- nodeInfo.resourceType(1=汇聚 2=专线) + nodeInfo.dialType
+# 官方 zyy_init_max.sh 只写「渠道注册」的顶层 isp，不写 nodeInfo，
+# 所以不加这一步新节点在后台这两列会是空的 / 显示「其他」。
+NODE_RESOURCE_TYPE="${NODE_RESOURCE_TYPE:-2}"          # 1=汇聚 2=专线
+NODE_DIAL_TYPE="${NODE_DIAL_TYPE:-staticNetSingle}"    # 固定公网单 IP
+# dialType 可选值：staticNetSingle 固定公网单 IP / staticNetCouple 固定公网多 IP
+#                 serverDial 服务器拨号 / dhcpNetSingle DHCP单 IP / dhcpNetCouple DHCP多 IP
+#                 virtualRoute 软路由
 
 # ↓↓↓ 加 token 的地方 ↓↓↓
 # 1) 后台登录 Bearer token（可选）：从 admin.zhouyi.top 拿到后粘贴，或运行时 ADMIN_TOKEN=xxx 传入
@@ -145,6 +158,11 @@ show_help() {
   --skip-onekey           跳过 ipes_onekey 预热对齐
   --skip-olmt             跳过 olmt.sh 限速（希望节点跑满不封顶时加）
   --node-token <token>    节点激活 token（待配置→服务中）
+  --resource-type <1|2>   节点资源类型：1=汇聚 2=专线 (默认: 2 专线)
+  --dial-type <type>      上网方式 (默认: staticNetSingle 固定公网单 IP)
+                          staticNetSingle 固定公网单IP / staticNetCouple 固定公网多IP
+                          serverDial 服务器拨号 / dhcpNetSingle DHCP单IP
+                          dhcpNetCouple DHCP多IP / virtualRoute 软路由
   --help                  显示此帮助信息
 
 环境变量 (后台认证，脚本已内置 test.sh 凭证，可用以下覆盖/补充):
@@ -157,7 +175,17 @@ show_help() {
   ADMIN_STATUS_API=<path>      默认 /api/edgeNode/stateflow
   ADMIN_NOMINAL_API=<path>     默认 /api/edgeNode/updateEdgeNominalInfo
   ADMIN_STATUS_BODY=<json>     自定义状态流转请求体（覆盖默认 nodes+stage）
+  ADMIN_FIND_NODE_API=<path>   默认 /api/edgeNode/findEdgeNode
+  ADMIN_NODE_UPDATE_API=<path> 默认 /api/edgeNode/updateEdgeNode
+  NODE_RESOURCE_TYPE=<1|2>     节点资源类型，默认 2（专线）
+  NODE_DIAL_TYPE=<type>        节点上网方式，默认 staticNetSingle（固定公网单 IP）
   IPES_IMAGE_MIRROR=<image>    IPES 镜像，默认 ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:1.3.0
+
+节点属性（后台节点列表两列的数据来源）:
+  业务线运营商  <- nodeInfo.isp            （取 --isp，如 电信）
+  资源/上网方式 <- nodeInfo.resourceType   （1=汇聚 2=专线）
+                + nodeInfo.dialType       （staticNetSingle=固定公网单 IP …）
+  官方 zyy_init_max.sh 不写 nodeInfo，只有本步骤会写
 
 状态流转 stage 取值（后台只允许 configured / inService 之间流转）:
   bound(待提交) / configured(待配置) / waitAudit(交付中) / inService(服务中) / gotOff(已下机)
@@ -190,6 +218,8 @@ parse_arguments() {
             --skip-onekey) SKIP_ONEKEY=1; shift ;;
             --skip-olmt)   SKIP_OLMT=1; shift ;;
             --node-token)  NODE_ACTIVATE_TOKEN="$2"; shift 2 ;;
+            --resource-type) NODE_RESOURCE_TYPE="$2"; shift 2 ;;
+            --dial-type)   NODE_DIAL_TYPE="$2"; shift 2 ;;
             --help)        show_help ;;
             *)
                 echo -e "${RED}[错误]${NC} 未知参数: $1"
@@ -259,6 +289,7 @@ init_log() {
     log_message "日志文件: $LOG_FILE"
     log_message "目标 happy 进程数: $TARGET_HAPP"
     log_message "运营商: $ISP / 缓存目录数: $NUM_DIRS"
+    log_message "节点属性: resourceType=$NODE_RESOURCE_TYPE / dialType=$NODE_DIAL_TYPE"
 }
 
 # =============================================================================
@@ -858,6 +889,98 @@ transition_to_serving() {
 }
 
 # =============================================================================
+# 节点属性写入：业务线运营商 / 资源类型 / 上网方式
+# -----------------------------------------------------------------------------
+# 后台节点列表那两列的真实数据来源（前端 bundle 还原 + 实测）：
+#   业务线运营商  <- nodeInfo.isp        （联通/移动/电信/阿里云/腾讯云）
+#   资源/上网方式 <- nodeInfo.resourceType(1=汇聚 2=专线) + nodeInfo.dialType
+# 官方 zyy_init_max.sh 只在【渠道注册】写顶层 isp（ipInfos 那一份），
+# 不写 nodeInfo，所以新节点在后台这两列会是空的 / 显示「其他」。
+# admin 前端「编辑节点」等价调用：GET findEdgeNode -> PUT updateEdgeNode（整对象回写）。
+# =============================================================================
+set_node_attributes() {
+    local node="$1"
+    print_step "写入节点属性：业务线运营商 / 资源类型 / 上网方式"
+
+    if [ -z "$node" ]; then
+        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过节点属性写入"
+        return 1
+    fi
+
+    if [ -z "$NODE_ACTIVATE_TOKEN" ]; then
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；写 nodeInfo 需要 JWT（X-Token），跳过"
+        return 1
+    fi
+
+    local py=""
+    for c in python3 python; do
+        if command -v "$c" >/dev/null 2>&1; then py="$c"; break; fi
+    done
+    if [ -z "$py" ]; then
+        log_message "${YELLOW}[警告]${NC} 机器上没有 python/python3，跳过（可事后用 set_node_attr.sh 补）"
+        return 1
+    fi
+
+    local before=/tmp/zyy_node_before.json
+    local after=/tmp/zyy_node_after.json
+    local url="${ADMIN_API_HOST}${ADMIN_FIND_NODE_API}?nodeId=${node}"
+
+    local http_code
+    http_code=$(curl -k -s -o "$before" -w '%{http_code}' -m 30 \
+        -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
+    log_message "读取节点 [HTTP $http_code]"
+    if [ "$http_code" != "200" ]; then
+        log_message "${YELLOW}[警告]${NC} 读取节点失败：$(head -c 200 "$before" 2>/dev/null)"
+        return 1
+    fi
+
+    "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" <<'PYEOF'
+# -*- coding: utf-8 -*-
+import json, sys
+src, dst, isp, rtype, dtype, prov, city = sys.argv[1:8]
+op = open(src, encoding='utf-8') if sys.version_info[0] >= 3 else open(src)
+d = json.load(op)
+data = d.get('data') or {}
+ni = data.get('nodeInfo') or {}
+keys = ['isp', 'resourceType', 'dialType', 'natType', 'province', 'city']
+print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys), ensure_ascii=False))
+ni['isp'] = isp
+ni['resourceType'] = rtype
+ni['dialType'] = dtype
+if not ni.get('natType'):
+    ni['natType'] = 'public'
+if not ni.get('province'):
+    ni['province'] = prov or data.get('province') or ''
+if not ni.get('city'):
+    ni['city'] = city or data.get('city') or ''
+if not ni.get('stage'):
+    ni['stage'] = data.get('stage') or 'inService'
+data['nodeInfo'] = ni
+print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys), ensure_ascii=False))
+w = open(dst, 'w', encoding='utf-8') if sys.version_info[0] >= 3 else open(dst, 'w')
+w.write(json.dumps(data, ensure_ascii=False))
+w.close()
+PYEOF
+    if [ $? -ne 0 ]; then
+        log_message "${YELLOW}[警告]${NC} JSON 改写失败，跳过节点属性写入"
+        return 1
+    fi
+
+    local response
+    response=$(admin_api_request_xtoken PUT "$ADMIN_NODE_UPDATE_API" "@$after")
+    local code=$(echo "$response" | tail -n1)
+    local body=$(echo "$response" | sed '$d')
+    log_message "响应 [HTTP $code]: $body"
+
+    if [ "$code" = "200" ] && echo "$body" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 节点属性已写入：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE"
+        return 0
+    fi
+    log_message "${YELLOW}[警告]${NC} 节点属性写入失败，可用 ADMIN_NODE_UPDATE_API 覆盖接口路径后重试"
+    return 1
+}
+
+# =============================================================================
 # Docker / IPES 部署 / ipes_onekey 拉满
 # =============================================================================
 check_docker_running() {
@@ -1142,10 +1265,11 @@ main() {
         log_message "${YELLOW}[警告]${NC} nload 安装失败"
     fi
 
-    # [9] 提交业务 41 + 状态流转到服务中
+    # [9] 提交业务 41 + 状态流转到服务中 + 写节点属性
     if [ -n "$DEVICE_ID" ]; then
         submit_business "$DEVICE_ID"
         transition_to_serving "$DEVICE_ID"
+        set_node_attributes "$DEVICE_ID"
     else
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务提交与状态流转"
     fi
@@ -1175,6 +1299,7 @@ main() {
     log_message "设备SN（业务ID）: ${DEVICE_ID:-未知}"
     log_message "省份/城市: ${province:-未知}/${city:-未知}"
     log_message "运营商: $ISP"
+    log_message "节点属性: 资源类型=$NODE_RESOURCE_TYPE(1=汇聚/2=专线) 上网方式=$NODE_DIAL_TYPE"
     log_message "目标 happy 进程数: $TARGET_HAPP/$TARGET_HAPP"
     log_message "日志文件: $LOG_FILE"
     log_message "若后台未显示「服务中」，请检查 admin.zhouyi.top token/接口路径是否正确"

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r9"
+SCRIPT_VERSION="v2026-09-13-r10"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -859,6 +859,45 @@ get_ipes_sn() {
     echo "$sn"
 }
 
+# 平台规则（实测）：设备处于「服务中 / 交付中」时**不允许修改设备信息**，
+# updateEdgeNominalInfo 会直接返回：
+#   {"code":7,"data":{},"msg":"设备处于服务中或交付中状态，不允许修改设备信息"}
+# 所以「提交业务」之前必须先 stateflow 把状态降到「待配置」，否则业务永远提交不上。
+downgrade_to_configured() {
+    local node="$1"
+    print_step "状态前置：降到「待配置」（平台要求待配置下才能改设备信息）"
+
+    if [ -z "$node" ]; then
+        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过降级"
+        return 1
+    fi
+    if [ -z "$NODE_ACTIVATE_TOKEN" ]; then
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN，跳过降级（提交业务可能被平台拒绝）"
+        return 1
+    fi
+
+    local biz_sn="${NODE_HOSTNAME:-}"
+    if [ -z "$biz_sn" ]; then
+        biz_sn=$(get_ipes_sn)
+    fi
+
+    local request_body
+    if [ -n "$biz_sn" ]; then
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\",\"hostname\":\"$biz_sn\"}"
+    else
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\"}"
+    fi
+
+    local response
+    response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    local http_code=$(echo "$response" | tail -n1)
+    local body=$(echo "$response" | sed '$d')
+    log_message "降级为「待配置」 [HTTP $http_code]: $(echo "$body" | tail -n1)"
+
+    sleep 5
+    return 0
+}
+
 transition_to_serving() {
     local node="$1"
     print_step "状态流转：待配置 -> 服务中（stateflow，携带业务ID）"
@@ -978,7 +1017,10 @@ set_node_attributes() {
         return 1
     fi
 
-    "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" <<'PYEOF'
+    # ⚠️ 必须设 PYTHONIOENCODING=utf-8：在 nohup/云助手环境下 LANG 未设，
+    #    Python3 stdout 默认 ascii，print 带中文(NodeInfo 的省/市)会抛
+    #    UnicodeEncodeError 导致整段改写失败（实测踩过）。
+    PYTHONIOENCODING=utf-8 "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" <<'PYEOF'
 # -*- coding: utf-8 -*-
 import json, sys
 src, dst, isp, rtype, dtype, prov, city = sys.argv[1:8]
@@ -987,7 +1029,7 @@ d = json.load(op)
 data = d.get('data') or {}
 ni = data.get('nodeInfo') or {}
 keys = ['isp', 'resourceType', 'dialType', 'natType', 'province', 'city']
-print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys), ensure_ascii=False))
+print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
 ni['isp'] = isp
 ni['resourceType'] = rtype
 ni['dialType'] = dtype
@@ -1000,7 +1042,7 @@ if not ni.get('city'):
 if not ni.get('stage'):
     ni['stage'] = data.get('stage') or 'inService'
 data['nodeInfo'] = ni
-print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys), ensure_ascii=False))
+print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
 w = open(dst, 'w', encoding='utf-8') if sys.version_info[0] >= 3 else open(dst, 'w')
 w.write(json.dumps(data, ensure_ascii=False))
 w.close()
@@ -1055,19 +1097,23 @@ set_business_tag() {
     biz_sn=$(get_ipes_sn)
 
     local url="${ADMIN_API_HOST}${ADMIN_BUSINESS_TAG_LIST_API}?page=1&pageSize=5&nodeId=${node}"
-    local resp body cur=""
-    if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
-        resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
-    else
-        resp=$(curl -k -s -m 30 "$url" 2>&1)
-    fi
-    body=$(echo "$resp" | sed '$d')
-    cur=$(echo "$body" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
-
-    if [ -n "$cur" ] && [ "$cur" != "ZHOUYI_XIAODU占位符" ]; then
-        log_message "${GREEN}[成功]${NC} 后台业务ID 已就绪: $cur"
-        return 0
-    fi
+    local resp body cur="" try=0
+    # 平台创建 business_tags 记录有延迟（实测数秒~数十秒），轮询 6 次，每次 8s
+    while [ $try -lt 6 ]; do
+        try=$((try+1))
+        if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+            resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
+        else
+            resp=$(curl -k -s -m 30 "$url" 2>&1)
+        fi
+        body=$(echo "$resp" | sed '$d')
+        cur=$(echo "$body" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
+        if [ -n "$cur" ] && [ "$cur" != "ZHOUYI_XIAODU占位符" ]; then
+            log_message "${GREEN}[成功]${NC} 后台业务ID 已就绪: $cur"
+            return 0
+        fi
+        [ $try -lt 6 ] && sleep 8
+    done
 
     log_message "${YELLOW}[警告]${NC} 后台业务ID 仍为空/占位符（当前: ${cur:-无记录}）"
     log_message "${YELLOW}        应写入的业务ID = ${biz_sn:-（未取到）}${NC}"
@@ -1355,14 +1401,16 @@ main() {
 
     # [8] 安装 nload
     print_step "安装 nload"
-    if yum install -y nload; then
+    yum install -y epel-release >/dev/null 2>&1
+    if yum install -y nload >/dev/null 2>&1 || yum install -y nload; then
         log_message "${GREEN}[成功]${NC} nload 安装成功"
     else
-        log_message "${YELLOW}[警告]${NC} nload 安装失败"
+        log_message "${YELLOW}[警告]${NC} nload 安装失败（不影响跑量）"
     fi
 
-    # [9] 提交业务 41 + 状态流转到服务中 + 写节点属性 + 写业务标签(业务ID)
+    # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性 -> 校验业务标签
     if [ -n "$DEVICE_ID" ]; then
+        downgrade_to_configured "$DEVICE_ID"
         submit_business "$DEVICE_ID"
         transition_to_serving "$DEVICE_ID"
         set_node_attributes "$DEVICE_ID"

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r4"
+SCRIPT_VERSION="v2026-09-13-r5"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -455,7 +455,14 @@ disable_root_ssh_login() {
     elif grep -q "^AllowUsers" "$sshd_config"; then
         sed -i 's/^AllowUsers.*/AllowUsers admin/g' "$sshd_config"
     else
-        echo "AllowUsers admin" >> "$sshd_config"
+        # 安全前置：AllowUsers admin 会把 SSH 收窄到只有 admin。
+        # 若 admin 还没有任何公钥，加上去就等于把自己锁在门外，宁可不加。
+        if [ -s /home/admin/.ssh/authorized_keys ]; then
+            echo "AllowUsers admin" >> "$sshd_config"
+        else
+            log_message "${RED}[错误]${NC} /home/admin/.ssh/authorized_keys 为空，跳过 AllowUsers admin（防止锁死）"
+            return 1
+        fi
     fi
 
     if grep -Eq "^PermitRootLogin[[:space:]]+no" "$sshd_config" && \
@@ -1148,10 +1155,17 @@ main() {
     clear_root_ssh_dir
     set_root_password
 
-    # [11] 清理 admin 免密 sudo
-    print_step "清理 admin 免密 sudo 配置"
-    sed -i 's/^admin ALL=(ALL)  NOPASSWD:ALL/# &/' /etc/sudoers 2>/dev/null
-    log_message "${GREEN}[成功]${NC} admin 免密配置已注释"
+    # [11] admin 免密 sudo（默认【保留】，与金标准工作节点一致）
+    # 注意：金标准节点(64e)的 sudoers 里 `admin ALL=(ALL)  NOPASSWD:ALL` 是保留的。
+    #       注释掉会断掉平台侧经 admin 的操作通道，所以默认不动；确要清理时用
+    #       环境变量 DISABLE_ADMIN_NOPASSWD=1 显式开启。
+    if [ "${DISABLE_ADMIN_NOPASSWD:-0}" = "1" ]; then
+        print_step "清理 admin 免密 sudo 配置（DISABLE_ADMIN_NOPASSWD=1）"
+        sed -i 's/^admin ALL=(ALL)  NOPASSWD:ALL/# &/' /etc/sudoers 2>/dev/null
+        log_message "${GREEN}[成功]${NC} admin 免密配置已注释"
+    else
+        log_message "${YELLOW}[信息]${NC} 保留 admin 免密 sudo（与金标准一致；如需清理设 DISABLE_ADMIN_NOPASSWD=1）"
+    fi
 
     # [12] 最终输出
     echo

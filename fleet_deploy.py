@@ -14,7 +14,7 @@ from aliyunsdkcore.client import AcsClient
 from aliyunsdkswas_open.request.v20200601.RunCommandRequest import RunCommandRequest
 from aliyunsdkswas_open.request.v20200601.DescribeInvocationResultRequest import DescribeInvocationResultRequest
 
-SCRIPT_SHA = "1c389aa252930db32791a505ff31de14df10da75"   # r14 的 commit，锁定版本避免 CDN 缓存旧脚本
+SCRIPT_SHA = "2865d3ac7fcededdcad83af2e45d0610fd042472"   # r15 的 commit，锁定版本避免 CDN 缓存旧脚本
 SRC_PRIMARY = f"https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@{SCRIPT_SHA}/ipes_deploy_full.sh"
 SRC_FALLBACK = ("https://ghproxy.net/https://raw.githubusercontent.com/"
                 "angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh")

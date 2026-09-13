@@ -2,15 +2,16 @@
 
 > **✅ 本命令已在 2026-09-13 乾亿益-4-* 深圳克隆机 60 台全量实战验证：60/60 服务中、业务 41、属性全落上、业务ID 全回填**（详见 `IPES全量部署验收报告-60台-20260913.md`）。
 >
-> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r16**，SHA `44e2470c`）
+> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r17**，SHA `0ce5d0cd`）
 > r15 提速：nload 改后台并行安装；修复业务ID/属性校验的解析 bug（`sed '$d'` 误删单行 JSON，导致每台白等 ~216s）；轮询 180s→30s。
 > **r16 裸机加固**：清掉 sysconfig docker flag（`--log-driver/--storage-driver`）与 ecache 写入 daemon.json 的冲突 + ecache 后 docker 自愈（实测杭州裸机 CentOS-rtms 踩坑：docker 起不来 → 容器丢失 → 业务ID 占位符）。
 > **单机全流程实测 ~1 分钟**（容器已存在的克隆机）。
 > 主源（jsDelivr，锁定 commit）：
-> `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@44e2470c7e176c1cc7422ea633f684e995609185/ipes_deploy_full.sh`
+> `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@0ce5d0cd54710c669daac3779dce54cd64eb42e8/ipes_deploy_full.sh`
 > 备源（ghproxy，带时间戳穿透缓存）：
 > `https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)`
 >
+> **🚀 启动器 v2（2026-09-13 22:15）**：双源**并行**下载（各限 15s，最坏 ~17s 出结果，替代旧的串行 60s 超时）+ 双重校验（`singleIpRadio` 内容 + `v2026-09-13-r17` 精确版本号），两源都拿不到时**拒绝启动**（报"下载失败"），杜绝跑旧版。
 > ⚠️ **不要直接用 ghproxy 裸链而不校验版本**——它会缓存旧脚本，我们实测踩过：
 > 明明推了 r10，机器上 `curl` 下来还是 r9，导致修复没生效。命令里必须带**缓存穿透 + 内容校验**（见下）。
 
@@ -38,7 +39,7 @@ curl https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh 
 > 把 `<渠道AK>` `<渠道SK>` `<JWT>` 换掉即可。
 
 ```bash
-SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@44e2470c7e176c1cc7422ea633f684e995609185/ipes_deploy_full.sh"; SRC2="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"; for u in "$SRC1" "$SRC2"; do curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break; done; sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; export NODE_ACTIVATE_TOKEN="<JWT>"; nohup setsid bash /root/ipes_full.sh --ak <渠道AK> --sk <渠道SK> --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
+SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@0ce5d0cd54710c669daac3779dce54cd64eb42e8/ipes_deploy_full.sh"; SRC2="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"; for u in "$SRC1" "$SRC2"; do curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break; done; sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; export NODE_ACTIVATE_TOKEN="<JWT>"; nohup setsid bash /root/ipes_full.sh --ak <渠道AK> --sk <渠道SK> --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
 ```
 
 > `grep -q singleIpRadio` 是**内容校验**：不通过就换备用源，避免下到 CDN 缓存的旧脚本。

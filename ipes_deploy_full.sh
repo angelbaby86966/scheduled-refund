@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r12"
+SCRIPT_VERSION="v2026-09-13-r13"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -94,6 +94,10 @@ NODE_BIZ_TYPE="${NODE_BIZ_TYPE:-Q-Q2}"
 # 所以不加这一步新节点在后台这两列会是空的 / 显示「其他」。
 NODE_RESOURCE_TYPE="${NODE_RESOURCE_TYPE:-2}"          # 1=汇聚 2=专线
 NODE_DIAL_TYPE="${NODE_DIAL_TYPE:-staticNetSingle}"    # 固定公网单 IP
+NODE_NAT_TYPE="${NODE_NAT_TYPE:-public}"               # public=固定公网；非固定填 other
+NODE_SINGLE_IP_RADIO="${NODE_SINGLE_IP_RADIO:-0}"      # 0=单IP
+NODE_USBW="${NODE_USBW:-200}"                          # 上行带宽 Mbps
+NODE_BW_NUM="${NODE_BW_NUM:-1}"                        # 带宽条数
 # dialType 可选值：staticNetSingle 固定公网单 IP / staticNetCouple 固定公网多 IP
 #                 serverDial 服务器拨号 / dhcpNetSingle DHCP单 IP / dhcpNetCouple DHCP多 IP
 #                 virtualRoute 软路由
@@ -830,8 +834,11 @@ submit_business() {
         return 1
     fi
 
-    # vendorSuggestCustomers=41 即业务 41（q2），transMode=1 默认直传
-    local request_body="{\"nodeId\":\"$node\",\"vendorSuggestCustomers\":$BUSINESS_ID,\"transMode\":1,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"isTransProv\":false,\"usbw\":200,\"bwNum\":1}"
+    # ⚠️ 必须带上 isp / natType / resourceType / dialType / province / city ——
+    #    平台的 nodeInfo（后台列表「业务线运营商 / 资源-上网方式」两列）就是靠这些字段生成的；
+    #    只传 usbw/bwNum 会让那两列空白（显示「其他」）。
+    #    vendorSuggestCustomers=41 即业务 41（q2）；transMode=1 直传。
+    local request_body="{\"nodeId\":\"$node\",\"province\":\"$province\",\"city\":\"$city\",\"isp\":\"$ISP\",\"natType\":\"$NODE_NAT_TYPE\",\"resourceType\":\"$NODE_RESOURCE_TYPE\",\"dialType\":\"$NODE_DIAL_TYPE\",\"singleIpRadio\":$NODE_SINGLE_IP_RADIO,\"usbw\":$NODE_USBW,\"bwNum\":$NODE_BW_NUM,\"transMode\":1,\"transModeStr\":\"cm:0,ct:0,cu:0\",\"transProvRate\":0,\"isTransProv\":false,\"isIPv6Schedule\":false,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"vendorSuggestCustomers\":$BUSINESS_ID}"
 
     local response=$(admin_api_request POST "$ADMIN_NOMINAL_API" "$request_body")
     local http_code=$(echo "$response" | tail -n1)
@@ -983,145 +990,37 @@ transition_to_serving() {
 # =============================================================================
 set_node_attributes() {
     local node="$1"
-    print_step "写入节点属性：业务线运营商 / 资源类型 / 上网方式"
+    print_step "校验节点属性（后台「业务线运营商 / 资源-上网方式」两列）"
 
+    # ⚠️ 关键结论（实测）：
+    #   nodeInfo 是平台的一条**独立记录**，只能用 updateEdgeNominalInfo 写入，
+    #   不能用 PUT /edgeNode/updateEdgeNode 写（PUT 只会把它写成 ID=0 的空壳）。
+    #   平台是拿 updateEdgeNominalInfo 里的 isp/resourceType/dialType/natType/province/city
+    #   生成 nodeInfo 的 —— 所以本步骤只做**只读校验**，写入已在 submit_business 完成。
     if [ -z "$node" ]; then
-        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过节点属性写入"
+        log_message "${YELLOW}[警告]${NC} 无设备SN，跳过节点属性校验"
         return 1
     fi
-
     if [ -z "$NODE_ACTIVATE_TOKEN" ]; then
-        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；写 nodeInfo 需要 JWT（X-Token），跳过"
+        log_message "${YELLOW}[警告]${NC} 无 NODE_ACTIVATE_TOKEN，无法回读校验"
         return 1
     fi
 
-    local py=""
-    for c in python3 python; do
-        if command -v "$c" >/dev/null 2>&1; then py="$c"; break; fi
-    done
-    if [ -z "$py" ]; then
-        log_message "${YELLOW}[警告]${NC} 机器上没有 python/python3，跳过（可事后用 set_node_attr.sh 补）"
-        return 1
-    fi
-
-    local before=/tmp/zyy_node_before.json
-    local after=/tmp/zyy_node_after.json
     local url="${ADMIN_API_HOST}${ADMIN_FIND_NODE_API}?nodeId=${node}"
+    local try=0 resp body
+    while [ $try -lt 6 ]; do
+        try=$((try+1))
+        resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
+        body=$(echo "$resp" | sed '$d')
+        if echo "$body" | grep -q "\"isp\":\"$ISP\"" && echo "$body" | grep -q "\"resourceType\":\"$NODE_RESOURCE_TYPE\""; then
+            log_message "${GREEN}[成功]${NC} 节点属性已就绪：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE"
+            return 0
+        fi
+        [ $try -lt 6 ] && sleep 5
+    done
 
-    local http_code
-    http_code=$(curl -k -s -o "$before" -w '%{http_code}' -m 30 \
-        -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
-    log_message "读取节点 [HTTP $http_code]"
-    if [ "$http_code" != "200" ]; then
-        log_message "${YELLOW}[警告]${NC} 读取节点失败：$(head -c 200 "$before" 2>/dev/null)"
-        return 1
-    fi
-
-    # ⚠️ 必须设 PYTHONIOENCODING=utf-8：在 nohup/云助手环境下 LANG 未设，
-    #    Python3 stdout 默认 ascii，print 带中文(NodeInfo 的省/市)会抛
-    #    UnicodeEncodeError 导致整段改写失败（实测踩过）。
-    PYTHONIOENCODING=utf-8 "$py" - "$before" "$after" "$ISP" "$NODE_RESOURCE_TYPE" "$NODE_DIAL_TYPE" "$province" "$city" "$BUSINESS_ID" <<'PYEOF'
-# -*- coding: utf-8 -*-
-import json, sys
-
-# 后端 /api/edgeNode/findEdgeNode 的返回里，部分字符串是「UTF-8 字节被
-# surrogateescape 解出」的形态（如 "电信" 变成 '\udce7\udc94\udcb5'）。
-# 直接原样写回会报 UnicodeEncodeError: surrogates not allowed → 属性写不进去。
-# 这里递归修复：surrogateescape 编码回字节 -> 再按 utf-8 解码。
-def repair(o):
-    if isinstance(o, str):
-        try:
-            return o.encode('utf-8', 'surrogateescape').decode('utf-8', 'replace')
-        except Exception:
-            return o
-    if isinstance(o, list):
-        return [repair(x) for x in o]
-    if isinstance(o, dict):
-        out = {}
-        for k, v in o.items():
-            out[repair(k) if isinstance(k, str) else k] = repair(v)
-        return out
-    return o
-
-src, dst, isp, rtype, dtype, prov, city, bizid = sys.argv[1:9]
-
-# ⚠️⚠️ 中文「命令行参数」也必须 repair：
-#   nohup / 云助手环境下 LANG 未设，Python3.6 的 filesystem encoding 退化成 ascii，
-#   argv 里的中文会被 surrogateescape 解成 '\udce7\udc94\udcb5'(=电信)。
-#   不修的话写进去就是这个乱码 —— r11 实测踩到。
-isp, rtype, dtype, prov, city = (repair(x) for x in (isp, rtype, dtype, prov, city))
-
-raw = open(src, 'rb').read()
-d = json.loads(raw.decode('utf-8', 'surrogateescape'))
-data = repair(d.get('data') or {})
-ni = data.get('nodeInfo') or {}
-keys = ['isp', 'resourceType', 'dialType', 'natType', 'province', 'city']
-print('   BEFORE: ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
-
-# 平台在提交业务41时通常已把 nodeInfo 写好；已是目标值就不必再 PUT
-# （updateEdgeNode 有 required 校验，能不调就不调，少一层失败面）。
-if (ni.get('isp') == isp and str(ni.get('resourceType')) == str(rtype)
-        and ni.get('dialType') == dtype):
-    print('   ALREADY_OK: 节点属性已是目标值，跳过写入')
-    open(dst, 'w').write('')   # 空文件 = 跳过哨兵
-    print('   WROTE_OK')
-    raise SystemExit(0)
-
-ni['isp'] = isp
-ni['resourceType'] = rtype
-ni['dialType'] = dtype
-if not ni.get('natType'):
-    ni['natType'] = 'public'
-if not ni.get('province'):
-    ni['province'] = prov or repair(data.get('province') or '')
-if not ni.get('city'):
-    ni['city'] = city or repair(data.get('city') or '')
-if not ni.get('stage'):
-    ni['stage'] = data.get('stage') or 'inService'
-data['nodeInfo'] = ni
-
-# ⚠️ updateEdgeNode 的 ResourceNode.BusinessID 是 required，缺了直接报：
-#    Key: 'ResourceNode.BusinessID' Error:Field validation for 'BusinessID' failed on the 'required' tag
-try:
-    _bid = int(str(bizid).strip())
-    if not data.get('businessID'):
-        data['businessID'] = _bid
-except Exception:
-    pass
-
-print('   AFTER : ' + json.dumps(dict((k, ni.get(k)) for k in keys)))
-txt = json.dumps(data, ensure_ascii=False)
-try:
-    txt.encode('utf-8')
-except Exception:
-    txt = json.dumps(data, ensure_ascii=True)   # 兜底：还有代理字符就用转义形式写
-f = open(dst, 'w', encoding='utf-8') if sys.version_info[0] >= 3 else open(dst, 'w')
-f.write(txt)
-f.close()
-print('   WROTE_OK')
-PYEOF
-    if [ $? -ne 0 ]; then
-        log_message "${YELLOW}[警告]${NC} JSON 改写失败，跳过节点属性写入"
-        return 1
-    fi
-
-    # 空文件 = python 判定「已是目标值」，不必再 PUT
-    if [ ! -s "$after" ]; then
-        log_message "${GREEN}[成功]${NC} 节点属性已是目标值（运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE），跳过写入"
-        return 0
-    fi
-
-    local response
-    response=$(admin_api_request_xtoken PUT "$ADMIN_NODE_UPDATE_API" "@$after")
-    local code=$(echo "$response" | tail -n1)
-    local body=$(echo "$response" | sed '$d')
-    log_message "响应 [HTTP $code]: $body"
-
-    if [ "$code" = "200" ] && echo "$body" | grep -q '"code":0'; then
-        log_message "${GREEN}[成功]${NC} 节点属性已写入：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE"
-        return 0
-    fi
-    log_message "${YELLOW}[警告]${NC} 节点属性写入失败，可用 ADMIN_NODE_UPDATE_API 覆盖接口路径后重试"
+    log_message "${YELLOW}[警告]${NC} 节点属性未落上（期望：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE）"
+    log_message "${YELLOW}        本步骤只校验；写入靠 POST ${ADMIN_NOMINAL_API} 带 isp/resourceType/dialType/natType/province/city${NC}"
     return 1
 }
 

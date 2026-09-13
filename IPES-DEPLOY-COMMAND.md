@@ -1,8 +1,10 @@
 # IPES 业务 41 一键部署 — 最终执行命令
 
-> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r11**）
-> 主源（jsDelivr，锁定 commit）：`https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@<commit>/ipes_deploy_full.sh`
-> 备源（ghproxy）：`https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh`
+> 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r14**，SHA `1c389aa2`）
+> 主源（jsDelivr，锁定 commit）：
+> `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@1c389aa252930db32791a505ff31de14df10da75/ipes_deploy_full.sh`
+> 备源（ghproxy，带时间戳穿透缓存）：
+> `https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)`
 >
 > ⚠️ **不要直接用 ghproxy 裸链而不校验版本**——它会缓存旧脚本，我们实测踩过：
 > 明明推了 r10，机器上 `curl` 下来还是 r9，导致修复没生效。命令里必须带**缓存穿透 + 内容校验**（见下）。
@@ -30,8 +32,10 @@ curl https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh 
 > 把 `<渠道AK>` `<渠道SK>` `<JWT>` 换掉即可。
 
 ```bash
-curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh -o /root/ipes_full.sh && export NODE_ACTIVATE_TOKEN="<JWT>" && nohup setsid bash /root/ipes_full.sh --ak <渠道AK> --sk <渠道SK> --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
+SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@1c389aa252930db32791a505ff31de14df10da75/ipes_deploy_full.sh"; SRC2="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"; for u in "$SRC1" "$SRC2"; do curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break; done; sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; export NODE_ACTIVATE_TOKEN="<JWT>"; nohup setsid bash /root/ipes_full.sh --ak <渠道AK> --sk <渠道SK> --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
 ```
+
+> `grep -q singleIpRadio` 是**内容校验**：不通过就换备用源，避免下到 CDN 缓存的旧脚本。
 
 **这条命令按顺序做完 12 步：**
 
@@ -47,16 +51,21 @@ curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/
 | 6.6 | `olmt.sh` | `--skip-olmt` 则跳过（本机不限速） |
 | 7 | **`ipes_onekey`** | **happy 拉满 9/9**、NAT/对齐/缓存/镜像重建 |
 | 8 | nload | 流量观测 |
-| 9 | **业务 41 + 状态流转 + 节点属性 + 业务ID** | 见下 |
+| 9 | **降级 → 业务41+节点属性 → 流转(带业务ID) → 校验** | 见下 |
 | 10 | SSH 安全收尾 | 禁 root 登录、清 root `.ssh`、改 root 密码 |
 | 11 | admin 免密 sudo | 默认**保留**（与金标准一致） |
 
-**第 9 步是最容易漏的**，它一次做四件事：
+**第 9 步顺序错就全白干**（平台上「服务中」不允许改设备信息）：
 
-- `POST /api/edgeNode/updateEdgeNominalInfo` → 提交业务 41（`vendorSuggestCustomers=41`、`usbw=200`）
-- `POST /api/edgeNode/stateflow` → **两步流转**：`configured` →(等5秒)→ `inService`
-- `PUT /api/edgeNode/updateEdgeNode` → 写 `nodeInfo`（业务线运营商 / 资源类型 / 上网方式）
-- **流转时携带 `hostname` = IPES 序列号**，后台「业务ID」才不是占位符
+| 顺序 | 动作 | 说明 |
+|---|---|---|
+| 9.1 | `stateflow → configured` | 先降到「待配置」，平台此时才允许改信息（并会删掉旧的 business_tags 占位记录） |
+| 9.2 | `POST /api/edgeNode/updateEdgeNominalInfo` | 提交业务 41 + **节点属性**：body 必须带 `isp / natType / resourceType / dialType / province / city`（后台那两列就是靠它生成的） |
+| 9.3 | `stateflow → inService`，**带 `hostname` = IPES 序列号** | 升回服务中；后台「业务ID」这一步写进去 |
+| 9.4 | 回读校验 `nodeInfo` + 轮询 `business_tags.hostName`（180s） | **只读**，不再写 |
+
+> ⚠️ **不要用 `PUT /api/edgeNode/updateEdgeNode` 去写 nodeInfo** —— 实测只会把它写成 `ID=0` 的空壳。
+> nodeInfo 的**唯一**写入通道是 9.2 的 `updateEdgeNominalInfo`。
 
 ---
 
@@ -134,6 +143,9 @@ echo "happ=$(pgrep -c -f happ)"; docker exec ipes ./bin/ipes health 2>&1 | tail 
 | `--resource-type` | 资源类型：1=汇聚 / **2=专线**（默认 2） |
 | `--dial-type` | 上网方式：**staticNetSingle=固定公网单IP**（默认） |
 | `NODE_ACTIVATE_TOKEN` | JWT，**推荐用环境变量传**（命令短、不进参数历史） |
+| `NODE_NAT_TYPE` | 默认 `public`（固定公网） |
+| `NODE_SINGLE_IP_RADIO` | 默认 `0`（单 IP） |
+| `NODE_USBW` / `NODE_BW_NUM` | 默认 `200` / `1` |
 | `ADMIN_STATUS_BODY` | 覆盖 stateflow 请求体（接口变体时用） |
 
 ---

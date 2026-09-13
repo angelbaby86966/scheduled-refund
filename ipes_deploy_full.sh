@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r15"
+SCRIPT_VERSION="v2026-09-13-r16"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1105,6 +1105,11 @@ install_docker_step() {
         log_message "${YELLOW}[警告]${NC} docker 安装失败"; return 1
     fi
 
+    # 【r16】清掉 sysconfig flag 里的 --log-driver/--storage-driver，避免与 daemon.json 冲突
+    sed -i -e 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' \
+           -e 's/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' \
+           /etc/sysconfig/docker /etc/sysconfig/docker-storage 2>/dev/null
+
     mkdir -p /etc/docker
     tee /etc/docker/daemon.json <<-'EOF' >/dev/null
 {
@@ -1209,13 +1214,32 @@ run_ecache_deploy() {
     local tmp_script="/tmp/.ecache_patched.sh"
     local url
 
+    # 【r16 裸机坑预防】CentOS7 docker 由 sysconfig flag 注入 --log-driver/--storage-driver，
+    # ecache 又会往 /etc/docker/daemon.json 写同名指令 → docker 重启即配置冲突起不来
+    # （实测杭州裸机：directives specified both as a flag and in the configuration file）。
+    # 先清掉 sysconfig 里的冲突 flag，让 daemon.json 成为唯一配置来源。
+    sed -i -e 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' \
+           -e 's/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' \
+           /etc/sysconfig/docker /etc/sysconfig/docker-storage 2>/dev/null
+
     for url in "$origin_url" "$cdn_url"; do
         if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIMEOUT" "$url" -o "$tmp_script" 2>/dev/null && [ -s "$tmp_script" ]; then
             sed -i "s#${ACR_IMAGE_DEAD}#${IPES_IMAGE_MIRROR}#g" "$tmp_script"
             sed -i 's#docker_login_for_image "\$DOCKER_IMAGE"#true#' "$tmp_script"
             log_message "ecache 已打补丁: 镜像 -> $IPES_IMAGE_MIRROR"
             bash "$tmp_script" -t 2 -i 1 -n "$NUM_DIRS"
-            return $?
+            local rc=$?
+            # 【r16 自愈】若 docker 仍因配置冲突起不来：重写干净 daemon.json 并拉回容器
+            if ! systemctl is-active --quiet docker; then
+                log_message "${YELLOW}[警告]${NC} ecache 执行后 docker 未运行，自愈：重写 daemon.json"
+                mkdir -p /etc/docker
+                printf '{\n  "registry-mirrors": ["https://w2xkvcue.mirror.aliyuncs.com"]\n}\n' > /etc/docker/daemon.json
+                systemctl daemon-reload
+                systemctl start docker
+                docker start ipes >/dev/null 2>&1
+                sleep 2
+            fi
+            return $rc
         fi
     done
 

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r17"
+SCRIPT_VERSION="v2026-09-13-r18"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -923,14 +923,17 @@ transition_to_serving() {
     #   {"code":7,"msg":"设备只能流转到待配置或服务中"}
     # ★ 业务ID（hostname）：不传 → 平台会写死占位符 "ZHOUYI_XIAODU占位符"
     #   业务ID = IPES 容器序列号（get_ipes_sn），必须显式带上才会写入后台。
+    # 【r18】不再"取不到就裸流转"：用 get_valid_sn 带格式校验 + docker 自愈 + 120s 重试，
+    #   最大限度保证流转一定携带真实业务ID（杜绝后台占位符）。
     local biz_sn="${NODE_HOSTNAME:-}"
-    if [ -z "$biz_sn" ]; then
-        biz_sn=$(get_ipes_sn)
+    if ! echo "$biz_sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+        biz_sn=$(get_valid_sn)
     fi
     if [ -n "$biz_sn" ]; then
         log_message "业务ID（IPES 序列号）: $biz_sn"
     else
-        log_message "${YELLOW}[警告]${NC} 未取到 IPES 序列号，流转不带 hostname，后台会显示占位符"
+        log_message "${RED}[错误]${NC} 等待 120s 仍未取到合法 IPES 序列号（docker=$(systemctl is-active docker 2>/dev/null)）"
+        log_message "${YELLOW}[提示]${NC} 仍将流转，但后台业务ID会是占位符；后续 set_business_tag 步骤检测到占位符会自动补写"
     fi
 
     local request_body
@@ -1078,6 +1081,42 @@ set_business_tag() {
         [ $try -lt 6 ] && sleep 5
     done
 
+    # 【r18】占位符自愈：轮询耗尽仍是占位符/空时，不再只报警——
+    #   重新拿合法 SN（内部含 docker 自愈 + 重试），若拿到则重走两步 stateflow
+    #   （configured -> inService + hostname）把真实业务ID写进去，再复核一次。
+    #   （等价于人工修复通道：POST /edgeNode/stateflow {stage,hostname}）
+    if [ "$cur" = "ZHOUYI_XIAODU占位符" ] || [ -z "$cur" ]; then
+        log_message "${YELLOW}[警告]${NC} 后台业务ID 为空/占位符（当前: ${cur:-无记录}），启动自动补写"
+        local fix_sn
+        fix_sn=$(get_valid_sn)
+        if [ -n "$fix_sn" ]; then
+            log_message "自动补写：重新两步流转携带业务ID $fix_sn"
+            if transition_to_serving "$node" >/dev/null 2>&1; then
+                local rtry=0 rcur=""
+                while [ $rtry -lt 4 ]; do
+                    rtry=$((rtry+1))
+                    sleep 5
+                    if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+                        resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
+                    else
+                        resp=$(curl -k -s -m 30 "$url" 2>&1)
+                    fi
+                    rcur=$(echo "$resp" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
+                    if [ -n "$rcur" ] && [ "$rcur" != "ZHOUYI_XIAODU占位符" ]; then
+                        log_message "${GREEN}[成功]${NC} 业务ID 已自动补写: $rcur"
+                        return 0
+                    fi
+                done
+                log_message "${YELLOW}[警告]${NC} 补写流转已执行但复核 20s 仍为占位符（平台可能有延迟，可稍后手工核对）"
+            else
+                log_message "${YELLOW}[警告]${NC} 补写流转失败（检查 NODE_ACTIVATE_TOKEN 是否有效）"
+            fi
+        else
+            log_message "${YELLOW}[警告]${NC} 自动补写失败：120s 内未取到合法 IPES 序列号（docker 持续异常？查看上方自愈日志）"
+        fi
+        return 1
+    fi
+
     log_message "${YELLOW}[警告]${NC} 后台业务ID 轮询 30s 仍为空/占位符（当前: ${cur:-无记录}）"
     log_message "${YELLOW}        应写入的业务ID = ${biz_sn:-（未取到）}${NC}"
     log_message "${YELLOW}        平台建记录有延迟，通常稍后会自行出现；若始终为空，核对 stateflow body 是否带 hostname：${NC}"
@@ -1092,6 +1131,59 @@ check_docker_running() {
     command -v docker >/dev/null 2>&1 || return 1
     systemctl is-active --quiet docker || return 1
     return 0
+}
+
+# =============================================================================
+# 【r18】docker 健康兜底（幂等，可反复调用）
+# -----------------------------------------------------------------------------
+# 背景（广州完整机实测）：ecache 安装脚本在容器启动后 ~7s 会【异步】重写
+# /etc/sysconfig/docker-storage（--storage-driver overlay2）与 /etc/docker/daemon.json
+# （log-driver/storage-driver）并重启 docker → flag 与 daemon.json 冲突 → docker 挂。
+# 时序无法可靠预测，所以：a) ecache 结束等待落定后无条件清一次；
+# b) 读取 SN / 流转前再兜底一次。配置清理对运行中的 docker 无副作用。
+# =============================================================================
+ensure_docker_healthy() {
+    command -v docker >/dev/null 2>&1 || return 1
+    # 1) 无条件清理两个冲突源
+    sed -i 's/--storage-driver overlay2//g; s/--storage-driver=overlay2//g' /etc/sysconfig/docker-storage 2>/dev/null
+    sed -i 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g; s/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' /etc/sysconfig/docker 2>/dev/null
+    if [ -f /etc/docker/daemon.json ] && grep -qE '"log-driver"|"storage-driver"|"log-opts"' /etc/docker/daemon.json 2>/dev/null; then
+        mkdir -p /etc/docker
+        printf '{\n  "registry-mirrors": ["https://w2xkvcue.mirror.aliyuncs.com"]\n}\n' > /etc/docker/daemon.json
+    fi
+    systemctl daemon-reload 2>/dev/null
+    # 2) docker 不在跑 → 清理后拉起；ipes 容器存在但停了 → 拉回
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [自愈] docker 未运行（flag 与 daemon.json 冲突），清理配置后重启" >> "$LOG_FILE"
+        systemctl start docker 2>/dev/null || return 1
+        sleep 3
+    fi
+    if docker inspect ipes >/dev/null 2>&1 && [ "$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)" != "true" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [自愈] ipes 容器未运行，重新拉起" >> "$LOG_FILE"
+        docker start ipes >/dev/null 2>&1
+        sleep 3
+    fi
+    return 0
+}
+
+# 【r18】带格式校验 + 重试的 SN 读取：流转前必须拿到合法 SN（76 位 hex）。
+# ⚠️ /etc/.mac 里的 32 位设备码（nodeID）不是 SN，必须用长度排除；
+# docker 被弄挂时先自愈再读，最多等 12×10s=120s。
+# 注意：本函数会被 $() 捕获，诊断信息直接写 $LOG_FILE，stdout 只输出 SN。
+get_valid_sn() {
+    local sn="" try=0
+    while [ $try -lt 12 ]; do
+        try=$((try+1))
+        systemctl is-active --quiet docker 2>/dev/null || ensure_docker_healthy
+        sn=$(get_ipes_sn | tr -d '[:space:]')
+        if echo "$sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+            echo "$sn"
+            return 0
+        fi
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [等待] SN 未就绪（第 $try/12 次，docker=$(systemctl is-active docker 2>/dev/null)），10s 后重试" >> "$LOG_FILE"
+        [ $try -lt 12 ] && sleep 10
+    done
+    return 1
 }
 
 install_docker_step() {
@@ -1238,17 +1330,11 @@ run_ecache_deploy() {
                 systemctl is-failed --quiet docker 2>/dev/null && break
                 if systemctl is-active --quiet docker 2>/dev/null && [ $wait -ge 3 ]; then break; fi
             done
-            if ! systemctl is-active --quiet docker 2>/dev/null; then
-                log_message "${YELLOW}[警告]${NC} ecache 重启 docker 失败（flag 与 daemon.json 冲突），自愈：清理冲突配置"
-                sed -i 's/--storage-driver overlay2//g; s/--storage-driver=overlay2//g' /etc/sysconfig/docker-storage 2>/dev/null
-                sed -i 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g; s/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' /etc/sysconfig/docker 2>/dev/null
-                mkdir -p /etc/docker
-                printf '{\n  "registry-mirrors": ["https://w2xkvcue.mirror.aliyuncs.com"]\n}\n' > /etc/docker/daemon.json
-                systemctl daemon-reload
-                systemctl start docker
-                docker start ipes >/dev/null 2>&1
-                sleep 3
-            fi
+            # 【r18】等待落定后【无条件】做一次健康兜底：
+            # ecache 异步重启的时序不可预测（r17 的 60s 观察窗曾在其 stop 动作前放行），
+            # 这里不再判断 docker 状态，直接清掉它异步写回的冲突配置——
+            # 对运行中的 docker 无副作用；若已被弄挂则顺手拉起 docker + ipes 容器。
+            ensure_docker_healthy
             return $rc
         fi
     done

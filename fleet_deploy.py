@@ -14,12 +14,18 @@ from aliyunsdkcore.client import AcsClient
 from aliyunsdkswas_open.request.v20200601.RunCommandRequest import RunCommandRequest
 from aliyunsdkswas_open.request.v20200601.DescribeInvocationResultRequest import DescribeInvocationResultRequest
 
-SCRIPT_URL = "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh"
+SCRIPT_SHA = "d5d464c9f12fcf77d7a5b4fc40a20df3f2451e10"   # r10 的 commit，锁定版本避免 CDN 缓存旧脚本
+SRC_PRIMARY = f"https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@{SCRIPT_SHA}/ipes_deploy_full.sh"
+SRC_FALLBACK = ("https://ghproxy.net/https://raw.githubusercontent.com/"
+                "angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh")
+MARKER = "downgrade_to_configured"   # 结构标记：确认下到的是 r10+ 而不是缓存里的旧脚本
 
 
 def build_cmd(ak, sk, isp, num_dirs, jwt, extra):
     parts = [
-        f'curl -fsSL {SCRIPT_URL} -o /root/ipes_full.sh',
+        # 双源下载 + 内容校验（ghproxy/jsDelivr 都会缓存旧版本，必须校验）
+        f"SRC1='{SRC_PRIMARY}'; SRC2='{SRC_FALLBACK}?t=$(date +%s)'",
+        f"for u in \"$SRC1\" \"$SRC2\"; do curl -fsSL -m 60 \"$u\" -o /root/ipes_full.sh && grep -q {MARKER} /root/ipes_full.sh && break; done",
         "sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null",
     ]
     if jwt:

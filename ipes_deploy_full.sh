@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r14"
+SCRIPT_VERSION="v2026-09-13-r15"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1007,16 +1007,18 @@ set_node_attributes() {
     fi
 
     local url="${ADMIN_API_HOST}${ADMIN_FIND_NODE_API}?nodeId=${node}"
-    local try=0 resp body
-    while [ $try -lt 6 ]; do
+    local try=0 resp
+    # r15: 轮询 3 次 × 3s（属性在 updateEdgeNominalInfo 提交后即时可见，修复解析 bug 后首查即命中）
+    while [ $try -lt 3 ]; do
         try=$((try+1))
         resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
-        body=$(echo "$resp" | sed '$d')
-        if echo "$body" | grep -q "\"isp\":\"$ISP\"" && echo "$body" | grep -q "\"resourceType\":\"$NODE_RESOURCE_TYPE\""; then
+        # ⚠️ r15 修复：此处 curl 未加 -w http_code，响应只有单行 JSON；
+        #    旧代码 `sed '$d'` 会把整行删光导致永远查不到（白等 33s）
+        if echo "$resp" | grep -q "\"isp\":\"$ISP\"" && echo "$resp" | grep -q "\"resourceType\":\"$NODE_RESOURCE_TYPE\""; then
             log_message "${GREEN}[成功]${NC} 节点属性已就绪：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE"
             return 0
         fi
-        [ $try -lt 6 ] && sleep 5
+        [ $try -lt 3 ] && sleep 3
     done
 
     log_message "${YELLOW}[警告]${NC} 节点属性未落上（期望：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE）"
@@ -1055,25 +1057,28 @@ set_business_tag() {
     biz_sn=$(get_ipes_sn)
 
     local url="${ADMIN_API_HOST}${ADMIN_BUSINESS_TAG_LIST_API}?page=1&pageSize=5&nodeId=${node}"
-    local resp body cur="" try=0
-    # 平台创建 business_tags 记录有明显延迟（实测 1~2 分钟才出现），轮询 18 次 × 10s = 180s
-    while [ $try -lt 18 ]; do
+    local resp cur="" try=0
+    # r15 修复+提速：
+    #  1) ⚠️ 解析 bug：此处 curl 未加 -w http_code，响应只有单行 JSON，旧代码
+    #     `body=$(echo "$resp" | sed '$d')` 把整行删光 → 永远「无记录」→ 白轮询 180s。
+    #     实测 business_tags 在 stateflow 成功后**即时创建**（CreatedAt 与流转同秒）。
+    #  2) 轮询 18×10s=180s → 6×5s=30s 上限（修复解析后通常首查即命中）。
+    while [ $try -lt 6 ]; do
         try=$((try+1))
         if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
             resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
         else
             resp=$(curl -k -s -m 30 "$url" 2>&1)
         fi
-        body=$(echo "$resp" | sed '$d')
-        cur=$(echo "$body" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
+        cur=$(echo "$resp" | sed -n 's/.*"hostName":"\([^"]*\)".*/\1/p' | head -1)
         if [ -n "$cur" ] && [ "$cur" != "ZHOUYI_XIAODU占位符" ]; then
             log_message "${GREEN}[成功]${NC} 后台业务ID 已就绪: $cur"
             return 0
         fi
-        [ $try -lt 18 ] && sleep 10
+        [ $try -lt 6 ] && sleep 5
     done
 
-    log_message "${YELLOW}[警告]${NC} 后台业务ID 轮询 180s 仍为空/占位符（当前: ${cur:-无记录}）"
+    log_message "${YELLOW}[警告]${NC} 后台业务ID 轮询 30s 仍为空/占位符（当前: ${cur:-无记录}）"
     log_message "${YELLOW}        应写入的业务ID = ${biz_sn:-（未取到）}${NC}"
     log_message "${YELLOW}        平台建记录有延迟，通常稍后会自行出现；若始终为空，核对 stateflow body 是否带 hostname：${NC}"
     log_message "${YELLOW}        {\"nodes\":[\"$node\"],\"stage\":\"inService\",\"hostname\":\"<业务ID>\"}${NC}"
@@ -1357,15 +1362,15 @@ main() {
         log_message "${YELLOW}[信息]${NC} 跳过 ipes_onekey（--skip-onekey）"
     fi
 
-    # [8] 安装 nload（可选工具，加超时避免拖住后面的关键步骤）
-    print_step "安装 nload"
-    # ⚠️ epel-release 在没有外网/镜像慢时会卡很久（实测 7 分钟+），必须加 timeout
+    # [8] 安装 nload（可选观测工具，r15 起改为**后台并行安装**，不再阻塞主流程）
+    print_step "安装 nload（后台并行，不阻塞）"
+    # ⚠️ epel-release 在没有外网/镜像慢时会卡很久（实测 7 分钟+）；nload 只是观测工具，
+    #    不值得让它拖住后面的业务提交/流转。改为 nohup 后台装，主流程立即继续。
     if command -v nload >/dev/null 2>&1; then
         log_message "${GREEN}[成功]${NC} nload 已存在"
-    elif timeout 60 yum install -y epel-release >/dev/null 2>&1 && timeout 90 yum install -y nload >/dev/null 2>&1; then
-        log_message "${GREEN}[成功]${NC} nload 安装成功"
     else
-        log_message "${YELLOW}[警告]${NC} nload 安装失败/超时（可选工具，不影响跑量）"
+        nohup setsid bash -c 'yum install -y epel-release >/dev/null 2>&1; yum install -y nload >/dev/null 2>&1' >/dev/null 2>&1 </dev/null &
+        log_message "${GREEN}[信息]${NC} nload 已转入后台安装（PID=$!，不阻塞主流程；稍后 command -v nload 可查）"
     fi
 
     # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性

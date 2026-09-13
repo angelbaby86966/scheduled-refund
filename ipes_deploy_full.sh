@@ -38,9 +38,10 @@
 # 可配置环境变量：
 #   ADMIN_API_HOST          管理后台域名，默认 https://admin.zhouyi.top
 #   ADMIN_NOMINAL_API       业务/带宽提交接口，默认 /api/edgeNode/updateEdgeNominalInfo
-#   ADMIN_STATUS_API        状态流转接口，默认 /api/edgeNode/updateNodeStatus
-#   ADMIN_STATUS_BODY       自定义状态流转请求体（覆盖默认 nodeId+status）
-#   NODE_ACTIVATE_TOKEN     节点激活 token（部分后台「待配置→服务中」需要）
+#   ADMIN_STATUS_API        状态流转接口，默认 /api/edgeNode/stateflow
+#   ADMIN_STATUS_BODY       自定义状态流转请求体（覆盖默认 nodes+stage）
+#   NODE_ACTIVATE_TOKEN     节点激活 JWT（stateflow 以 X-Token 头鉴权，必需）
+#   IPES_IMAGE_MIRROR       IPES 镜像（默认腾讯云公开镜像，匿名可拉）
 #
 # 安全提示：
 #   脚本内已内置 test.sh 里的后台凭证以便开箱即用；正式分发前建议改为环境变量传入，
@@ -59,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r3"
+SCRIPT_VERSION="v2026-09-13-r4"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -76,13 +77,17 @@ API_URL="http://api.zhouyiy.com/qudao/device/v1/batch/create2"
 # 也可改用 Bearer token：设置 ADMIN_TOKEN=xxx 后将优先使用
 ADMIN_API_HOST="${ADMIN_API_HOST:-https://admin.zhouyi.top}"
 ADMIN_NOMINAL_API="${ADMIN_NOMINAL_API:-/api/edgeNode/updateEdgeNominalInfo}"
-ADMIN_STATUS_API="${ADMIN_STATUS_API:-/api/edgeNode/updateNodeStatus}"
+ADMIN_STATUS_API="${ADMIN_STATUS_API:-/api/edgeNode/stateflow}"
 
 # ↓↓↓ 加 token 的地方 ↓↓↓
 # 1) 后台登录 Bearer token（可选）：从 admin.zhouyi.top 拿到后粘贴，或运行时 ADMIN_TOKEN=xxx 传入
 ADMIN_TOKEN="${ADMIN_TOKEN:-}"
 # 2) 节点激活 token（可选）：部分后台「待配置→服务中」需单独传入的 token，留空则不带
 NODE_ACTIVATE_TOKEN="${NODE_ACTIVATE_TOKEN:-}"
+# IPES 镜像：官方 ecache 脚本内置的阿里云 ACR 已失效（401），改用腾讯云公开镜像（匿名可拉）
+IPES_IMAGE_MIRROR="${IPES_IMAGE_MIRROR:-ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:1.3.0}"
+# 官方 ecache 脚本里写死的阿里云 ACR 镜像（用于 sed 替换，勿改）
+ACR_IMAGE_DEAD="crpi-0myzmqp9v99mnimv.cn-beijing.personal.cr.aliyuncs.com/qy_q2/ipes-linux-amd64-youkai-latest:latest"
 # ↑↑↑ 加 token 的地方 ↑↑↑
 
 # 默认后台凭证（来自 test.sh；建议通过环境变量覆盖，避免明文落在脚本里）
@@ -145,13 +150,17 @@ show_help() {
 环境变量 (后台认证，脚本已内置 test.sh 凭证，可用以下覆盖/补充):
   优先: ADMIN_TOKEN=<Bearer token>            设了就走 Bearer
   默认: ADMIN_APPID/AK/SK=<id>/<ak>/<sk>      HMAC-SHA256 签名（已内置，可覆盖）
-  加token: NODE_ACTIVATE_TOKEN=<节点激活token> 部分后台「待配置→服务中」需要
+  加token: NODE_ACTIVATE_TOKEN=<节点激活JWT>  状态流转接口 stateflow 用 X-Token 头鉴权，必需
 
 可配置:
   ADMIN_API_HOST=<host>        默认 https://admin.zhouyi.top
-  ADMIN_STATUS_API=<path>      默认 /api/edgeNode/updateNodeStatus
+  ADMIN_STATUS_API=<path>      默认 /api/edgeNode/stateflow
   ADMIN_NOMINAL_API=<path>     默认 /api/edgeNode/updateEdgeNominalInfo
-  ADMIN_STATUS_BODY=<json>     自定义状态流转请求体（覆盖默认 nodeId+status）
+  ADMIN_STATUS_BODY=<json>     自定义状态流转请求体（覆盖默认 nodes+stage）
+  IPES_IMAGE_MIRROR=<image>    IPES 镜像，默认 ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:1.3.0
+
+状态流转 stage 取值（后台只允许 configured / inService 之间流转）:
+  bound(待提交) / configured(待配置) / waitAudit(交付中) / inService(服务中) / gotOff(已下机)
 
 示例:
   在线执行 (推荐):
@@ -750,6 +759,24 @@ admin_api_request() {
         --max-time $CURL_MAX_TIMEOUT 2>&1
 }
 
+# X-Token（JWT 激活 token）鉴权请求：admin 前端「状态流转」用的就是这个头
+admin_api_request_xtoken() {
+    local method="$1"
+    local api_path="$2"
+    local body="$3"
+    local url="${ADMIN_API_HOST}${api_path}"
+
+    log_message "请求(X-Token): $method $url"
+    log_message "请求体: $body"
+
+    curl -k -s -w "\n%{http_code}" --location --request "$method" "$url" \
+        --header "X-Token: $NODE_ACTIVATE_TOKEN" \
+        --header 'Content-Type: application/json' \
+        --data "$body" \
+        --connect-timeout $CURL_CONNECT_TIMEOUT \
+        --max-time $CURL_MAX_TIMEOUT 2>&1
+}
+
 submit_business() {
     local node="$1"
     print_step "提交业务 ${BUSINESS_ID} 与带宽信息"
@@ -779,31 +806,41 @@ submit_business() {
 
 transition_to_serving() {
     local node="$1"
-    print_step "状态流转：待配置 -> 服务中"
+    print_step "状态流转：待配置 -> 服务中（stateflow）"
 
     if [ -z "$node" ]; then
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过状态流转"
         return 1
     fi
 
-    # 构造状态流转请求体（后台不一致可改 ADMIN_STATUS_API / ADMIN_STATUS_BODY）
-    # 默认尝试 nodeId + status=1；若后台「待配置→服务中」需要单独 token，用 NODE_ACTIVATE_TOKEN 注入
+    # 真实接口（从 admin.zhouyi.top 前端 bundle 还原并实测通过）：
+    #   POST /api/edgeNode/stateflow
+    #   Header: X-Token: <JWT 激活 token>
+    #   Body:   {"nodes":["<SN>"],"stage":"inService"}
+    #   stage: bound(待提交)/configured(待配置)/waitAudit(交付中)/inService(服务中)/gotOff(已下机)
+    #   后台只允许 configured 与 inService 之间互转，其它值会报
+    #   {"code":7,"msg":"设备只能流转到待配置或服务中"}
     local request_body
     if [ -n "${ADMIN_STATUS_BODY:-}" ]; then
         request_body="$ADMIN_STATUS_BODY"
-    elif [ -n "$NODE_ACTIVATE_TOKEN" ]; then
-        request_body="{\"nodeId\":\"$node\",\"status\":1,\"token\":\"$NODE_ACTIVATE_TOKEN\",\"remark\":\"自动化部署上线\"}"
     else
-        request_body="{\"nodeId\":\"$node\",\"status\":1,\"remark\":\"自动化部署上线\"}"
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"${STATUS_TARGET:-inService}\"}"
     fi
 
-    local response=$(admin_api_request POST "$ADMIN_STATUS_API" "$request_body")
+    local response
+    if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+        response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    else
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN；stateflow 需要 JWT（X-Token），尝试签名方式..."
+        response=$(admin_api_request POST "$ADMIN_STATUS_API" "$request_body")
+    fi
+
     local http_code=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | sed '$d')
 
     log_message "响应 [HTTP $http_code]: $body"
 
-    if [ "$http_code" = "200" ] && echo "$body" | grep -qE '"code":0|"success":true|操作成功'; then
+    if [ "$http_code" = "200" ] && echo "$body" | grep -q '"code":0'; then
         log_message "${GREEN}[成功]${NC} 设备已流转到「服务中」"
         return 0
     else
@@ -921,9 +958,52 @@ run_ipes_deploy() {
         fi
     fi
 
-    log_message "部署命令: ecache_docker_install_ali_ten.sh -t 2 -i 1 -n $NUM_DIRS"
-    run_remote_script_with_retry "http://oemtest.hejinyun.cn/shell/ecache_docker_install_ali_ten.sh" -t 2 -i 1 -n "$NUM_DIRS"
+    log_message "部署命令: ecache_docker_install_ali_ten.sh -t 2 -i 1 -n $NUM_DIRS（已打补丁：镜像 -> $IPES_IMAGE_MIRROR）"
+    run_ecache_deploy
     return $?
+}
+
+# 官方 ecache 脚本内置的阿里云 ACR 凭据已失效（docker login 返回 unauthorized），
+# 导致镜像拉不下来、ipes 容器起不来（实测：广州新机卡在这一步）。
+# 这里下载脚本后打两处补丁：
+#   1) 阿里云 ACR 私有镜像 -> 腾讯云公开镜像（匿名可拉，64e 工作节点用的就是它）
+#   2) 中和失效的 docker login 调用
+run_ecache_deploy() {
+    local origin_url="http://oemtest.hejinyun.cn/shell/ecache_docker_install_ali_ten.sh"
+    local cdn_url="${origin_url//$ORIGIN_DOMAIN/$CDN_DOMAIN}"
+    local tmp_script="/tmp/.ecache_patched.sh"
+    local url
+
+    for url in "$origin_url" "$cdn_url"; do
+        if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIMEOUT" "$url" -o "$tmp_script" 2>/dev/null && [ -s "$tmp_script" ]; then
+            sed -i "s#${ACR_IMAGE_DEAD}#${IPES_IMAGE_MIRROR}#g" "$tmp_script"
+            sed -i 's#docker_login_for_image "\$DOCKER_IMAGE"#true#' "$tmp_script"
+            log_message "ecache 已打补丁: 镜像 -> $IPES_IMAGE_MIRROR"
+            bash "$tmp_script" -t 2 -i 1 -n "$NUM_DIRS"
+            return $?
+        fi
+    done
+
+    log_stderr "${RED}[错误]${NC} 获取 ecache 脚本失败"
+    return 1
+}
+
+# IPES 稳定性看门狗：容器在但容器内 master 挂掉时自动拉起（每分钟一次）
+install_ipes_watchdog() {
+    print_step "安装 IPES 看门狗（master 挂掉自动拉起）"
+    cat > /usr/local/bin/ipes_watchdog.sh <<'WATCHDOG'
+#!/bin/bash
+docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ipes$' || exit 0
+if ! docker exec ipes sh -c 'ps -ef | grep -q "[i]pes start"' 2>/dev/null; then
+  docker exec ipes /app/ipes/bin/ipes start >/dev/null 2>&1
+  logger -t ipes_watchdog "ipes master was down -> restarted"
+fi
+WATCHDOG
+    chmod +x /usr/local/bin/ipes_watchdog.sh
+    ( crontab -l 2>/dev/null | grep -v ipes_watchdog; echo "* * * * * /usr/local/bin/ipes_watchdog.sh >/dev/null 2>&1" ) | crontab -
+    systemctl enable crond >/dev/null 2>&1 || true
+    systemctl start crond >/dev/null 2>&1 || true
+    log_message "${GREEN}[成功]${NC} 看门狗已安装（cron 每分钟检查一次）"
 }
 
 run_ipes_onekey() {
@@ -1022,6 +1102,9 @@ main() {
     if [ $deploy_retry -ge 3 ] && ! check_ipes_containers; then
         log_message "${RED}[错误]${NC} ipes 部署失败"; exit 1
     fi
+
+    # [6.6] 安装看门狗：master 掉线自动拉起（否则节点会静默不跑量）
+    install_ipes_watchdog
 
     # [6.5] 限速脚本（来自 test.sh，olmt.sh）
     # 注意：该脚本会下发带宽整形规则。若希望节点跑满不封顶，加 --skip-olmt 跳过。

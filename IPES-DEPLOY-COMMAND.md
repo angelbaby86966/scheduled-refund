@@ -1,5 +1,7 @@
 # IPES 业务 41 一键部署 — 最终执行命令
 
+> **✅ 本命令已在 2026-09-13 乾亿益-4-* 深圳克隆机 60 台全量实战验证：60/60 服务中、业务 41、属性全落上、业务ID 全回填**（详见 `IPES全量部署验收报告-60台-20260913.md`）。
+>
 > 脚本：`ipes_deploy_full.sh`（**v2026-09-13-r14**，SHA `1c389aa2`）
 > 主源（jsDelivr，锁定 commit）：
 > `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@1c389aa252930db32791a505ff31de14df10da75/ipes_deploy_full.sh`
@@ -29,6 +31,7 @@ curl https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh 
 
 ## ✅ 完整版最终命令（自动流转 · 单行 · 直接复制）
 
+> **与 60 台批量实战完全同款**（fleet_deploy.py 的 build_cmd 内联版）：双源下载 + `grep -q singleIpRadio` 内容校验 + yum 源修复 + JWT 环境变量 + 后台异步。
 > 把 `<渠道AK>` `<渠道SK>` `<JWT>` 换掉即可。
 
 ```bash

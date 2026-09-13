@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r16"
+SCRIPT_VERSION="v2026-09-13-r17"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1229,15 +1229,25 @@ run_ecache_deploy() {
             log_message "ecache 已打补丁: 镜像 -> $IPES_IMAGE_MIRROR"
             bash "$tmp_script" -t 2 -i 1 -n "$NUM_DIRS"
             local rc=$?
-            # 【r16 自愈】若 docker 仍因配置冲突起不来：重写干净 daemon.json 并拉回容器
-            if ! systemctl is-active --quiet docker; then
-                log_message "${YELLOW}[警告]${NC} ecache 执行后 docker 未运行，自愈：重写 daemon.json"
+            # 【r17 自愈】ecache 结尾会"异步"重写 sysconfig/daemon.json 并重启 docker
+            # （实测广州完整机：容器启动后 7s 才 stop/restart，r16 的即时检查被绕过），
+            # 必须等它落定（最多 60s），若 flag 与 daemon.json 冲突导致起不来则修复自愈。
+            local wait=0
+            while [ $wait -lt 12 ]; do
+                sleep 5; wait=$((wait+1))
+                systemctl is-failed --quiet docker 2>/dev/null && break
+                if systemctl is-active --quiet docker 2>/dev/null && [ $wait -ge 3 ]; then break; fi
+            done
+            if ! systemctl is-active --quiet docker 2>/dev/null; then
+                log_message "${YELLOW}[警告]${NC} ecache 重启 docker 失败（flag 与 daemon.json 冲突），自愈：清理冲突配置"
+                sed -i 's/--storage-driver overlay2//g; s/--storage-driver=overlay2//g' /etc/sysconfig/docker-storage 2>/dev/null
+                sed -i 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g; s/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' /etc/sysconfig/docker 2>/dev/null
                 mkdir -p /etc/docker
                 printf '{\n  "registry-mirrors": ["https://w2xkvcue.mirror.aliyuncs.com"]\n}\n' > /etc/docker/daemon.json
                 systemctl daemon-reload
                 systemctl start docker
                 docker start ipes >/dev/null 2>&1
-                sleep 2
+                sleep 3
             fi
             return $rc
         fi

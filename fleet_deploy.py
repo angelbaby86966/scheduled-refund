@@ -8,17 +8,17 @@
 # 凭证文件: 第1行 AK，第2行 SK
 # 实例清单: 每行  "<region> <instanceId> [name]"
 #
-# 会顺序对每台下发：下载 r9 脚本 -> 后台 nohup 跑完整流程 -> 打印 PID
+# 会顺序对每台下发：下载 r14 脚本 -> 后台 nohup 跑完整流程 -> 打印 PID
 import json, sys, time, argparse, concurrent.futures as cf
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkswas_open.request.v20200601.RunCommandRequest import RunCommandRequest
 from aliyunsdkswas_open.request.v20200601.DescribeInvocationResultRequest import DescribeInvocationResultRequest
 
-SCRIPT_SHA = "d5d464c9f12fcf77d7a5b4fc40a20df3f2451e10"   # r10 的 commit，锁定版本避免 CDN 缓存旧脚本
+SCRIPT_SHA = "1c389aa252930db32791a505ff31de14df10da75"   # r14 的 commit，锁定版本避免 CDN 缓存旧脚本
 SRC_PRIMARY = f"https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@{SCRIPT_SHA}/ipes_deploy_full.sh"
 SRC_FALLBACK = ("https://ghproxy.net/https://raw.githubusercontent.com/"
                 "angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh")
-MARKER = "downgrade_to_configured"   # 结构标记：确认下到的是 r10+ 而不是缓存里的旧脚本
+MARKER = "singleIpRadio"   # 结构标记：确认下到的是 r13+（updateEdgeNominalInfo 带全字段）而不是缓存旧脚本
 
 
 def build_cmd(ak, sk, isp, num_dirs, jwt, extra):

@@ -386,7 +386,7 @@ sctl_guard(){
   # 归属标记做兜底自补（老节点升级上来时可能没有这一行）
   grep -q 'OWNER: ipes_tune' "$conf" 2>/dev/null || \
     sed -i '1i # OWNER: ipes_tune (r21)' "$conf" 2>/dev/null || true
-  # 这 8 项是历史上被覆盖过的重灾区
+  # 这 10 项是历史上被覆盖过的重灾区
   local pairs="net.core.rmem_default=16777216
 net.ipv4.udp_rmem_min=32768
 net.core.netdev_budget=3000
@@ -394,7 +394,9 @@ net.core.default_qdisc=fq
 vm.dirty_ratio=20
 vm.dirty_background_ratio=10
 net.core.somaxconn=65535
-net.ipv4.tcp_congestion_control=bbr"
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_max_tw_buckets=1048576"
   local bad kv k want got
   _sctl_check(){
     bad=""

@@ -17,11 +17,32 @@
 
 ## 🚀 最快路径：短链一键（调优 + 部署）
 
-**单行命令**（把 `<渠道AK>` `<渠道SK>` `<JWT>` 换掉）：
+> ### ⚠️ 复制命令时**千万不要带尖括号 `<>`**
+> `<xxx>` 在 shell 里是**输入重定向**，不是占位符。写成 `--ak <06d78b19...>` 会直接报
+> `06d78b19...: No such file or directory` + `curl: (23) Failed writing body`，脚本**一行都不会执行**。
+> 正确写法就是**光秃秃的值**：`--ak 06d78b19...`。本页占位符一律用中文，不再用 `<>`。
+
+**第一步：填值**（把下面三行的中文换成真实值，**等号右边不要加引号以外的任何符号**）
 
 ```bash
-curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh?t=$(date +%s)" | bash -s -- --ak <渠道AK> --sk <渠道SK> --jwt <JWT> --isp 电信
+AK=你的渠道AK
+SK=你的渠道SK
+JWT=你的JWT
 ```
+
+**第二步：一条命令跑完**（直接复用上面的变量，不用手工替换，就不会再误带尖括号）
+
+```bash
+curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh?t=$(date +%s)" | bash -s -- --ak "$AK" --sk "$SK" --jwt "$JWT" --isp 电信
+```
+
+<details><summary>等价的单行版（把「你的渠道AK」等中文整段替换成值，替换后不应残留任何尖括号）</summary>
+
+```bash
+curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh?t=$(date +%s)" | bash -s -- --ak 你的渠道AK --sk 你的渠道SK --jwt 你的JWT --isp 电信
+```
+
+</details>
 
 这条短链按顺序做三件事：
 
@@ -50,7 +71,7 @@ curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966
 ## ✅ 完整版最终命令（手动模式，单行可直接复制）
 
 ```bash
-SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@4082428fe8df7c9fcbf5ac524d6af2249eafd871/ipes_deploy_full.sh"; SRC2="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"; for u in "$SRC1" "$SRC2"; do curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break; done; sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; export NODE_ACTIVATE_TOKEN="<JWT>"; nohup setsid bash /root/ipes_full.sh --ak <渠道AK> --sk <渠道SK> --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
+SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@4082428fe8df7c9fcbf5ac524d6af2249eafd871/ipes_deploy_full.sh"; SRC2="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"; for u in "$SRC1" "$SRC2"; do curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break; done; sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; export NODE_ACTIVATE_TOKEN="$JWT"; nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp 电信 --num-dirs 12 --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null & echo "已后台启动 PID=$!"
 ```
 
 **这条命令按顺序做完 13 步：**

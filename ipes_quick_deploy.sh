@@ -92,9 +92,8 @@ vm.dirty_ratio = 15
 vm.dirty_background_ratio = 5
 vm.overcommit_memory = 1
 # 7) 200M 上行专属（把物理上行用满，iQiyi 实测高吞吐=健康）
-#    BBR 拥塞控制: 高 BDP/弱网也能跑满上行，比 cubic 更适合 PCDN 回源
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_available_congestion_control = bbr cubic reno
+#    (注: tcp_congestion_control 不写进本文件——CentOS7/3.10 内核无 BBR 模块，
+#     写进持久文件会致重启报红；改由下方 7a 运行时探测，支持才启用并单独持久化)
 #    空闲后不清空 cwnd: PCDN 突发短连接保持热拥塞窗口，避免每次慢启动掉速
 net.ipv4.tcp_slow_start_after_idle = 0
 #    TCP Fast Open: 短连接省一次 RTT（PCDN 海量短连接收益明显）
@@ -117,13 +116,19 @@ EOF
   modprobe nf_conntrack 2>/dev/null || true
   sysctl -e -p /etc/sysctl.d/99-ipes.conf >/dev/null 2>&1 || true
 
-  # 7a) BBR 拥塞控制生效（模块可能未编入内核，需 modprobe；失败则回退 cubic）
+  # 7a) BBR 拥塞控制（模块可能未编入内核，需 modprobe；失败则回退 cubic）
+  #     - CentOS7 默认 3.10 内核无 BBR，会回退 cubic（仍可用，吞吐略低）
+  #     - 内核>=4.9 才支持；支持时立即启用，并单独持久化(modprobe.d+sysctl.d)以便重启保持
   modprobe tcp_bbr 2>/dev/null || true
-  if sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
-    echo "[调优] TCP 拥塞控制=bbr"
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
+     && sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    echo "[调优] TCP 拥塞控制=bbr (已启用)"
+    # 持久化：开机自动加载模块 + 设 bbr（仅本机确实支持时才写，避免不支持的内核重启报红）
+    echo "tcp_bbr" > /etc/modprobe.d/tcp_bbr.conf 2>/dev/null || true
+    echo "net.ipv4.tcp_congestion_control = bbr" > /etc/sysctl.d/99-ipes-bbr.conf 2>/dev/null || true
   else
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-    echo -e "\033[1;33m[提示]\033[0m 内核不支持 BBR，已回退 cubic（仍可用，吞吐略低）"
+    echo -e "\033[1;33m[提示]\033[0m 内核不支持 BBR(需>=4.9)，已用 cubic（200M 干净链路仍可跑满）"
   fi
 
   # 7b) RPS: 把网卡收包软中断摊到所有 CPU（云主机多为单队列 virtio 网卡，

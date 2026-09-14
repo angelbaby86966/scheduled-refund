@@ -32,7 +32,8 @@ done
 
 if [[ -z "$AK" || -z "$SK" || -z "$JWT" ]]; then
   echo "[ERROR] 缺少 --ak / --sk / --jwt，必须提供"
-  echo "示例：curl -fsSL ... | bash -s -- --ak <ak> --sk <sk> --jwt <jwt> --isp 电信"
+  echo "示例（注意：值要写裸值，不要带尖括号 <>，否则会被 shell 当成输入重定向）："
+  echo "  curl -fsSL ... | bash -s -- --ak 你的渠道AK --sk 你的渠道SK --jwt 你的JWT --isp 电信"
   exit 1
 fi
 

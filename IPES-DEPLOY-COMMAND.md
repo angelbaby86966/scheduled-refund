@@ -115,6 +115,9 @@ SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@4082428fe8df7c
 | 9.4 | 回读校验 `nodeInfo` + 轮询 `business_tags.hostName` | **只读**，不再写 |
 
 > ⚠️ **不要用 `PUT /api/edgeNode/updateEdgeNode` 写 nodeInfo** —— 实测只会写成 `ID=0` 空壳。唯一写入通道是 9.2 的 `updateEdgeNominalInfo`。
+>
+> ✅ **9.4 校验口径（2026-09-14 订正）**：只看 4 项 —— `nodeInfo.vendorSuggestCustomers==41`、`nodeInfo.usbw==200`、`nodeInfo.isp==电信`、`nodeInfo.resourceType=="2"`，且节点顶层 `stage==inService`/`status==online`，外加 `business_tags.hostName == 容器 ipes_sn`（76hex 真SN）。
+> ❌ **不要用 `nodeInfo.ID` / `nodeInfo.boundTime` / `nodeInfo.stage` 当判据**：`updateEdgeNominalInfo` 返回 `code:0 更新成功` 也不会写它们；实测 `?businessID=41` 共 2489 台里 752 台（30%，含 330 台 inService 已跑 10 天）都是 `ID=0 + boundTime=null`，属常见形态，不代表未绑定。官方 `ipes_deploy_full.sh` 的回读校验同样不 grep ID。
 
 ---
 

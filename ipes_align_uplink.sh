@@ -526,6 +526,41 @@ add_happ_to_cfg(){
   done
   return 0
 }
+# 当当前 happ 数 > TARGET_HAPP 时，裁剪多余 worker（保留 happ.0..happ.(TARGET_HAPP-1)），
+# 使 TARGET_HAPP 成为【精确目标】而非仅下限。低内存节点（如 941MB）多 worker 徒增内存压力、
+# 挤占 PCDN 命中所需的页缓存，故默认 6 必须能"削得下来"，否则 IPES 首启生成的 12 永远降不回 6。
+# 安全：只删 happ.{tgt..cur-1} 行与对应数据目录；身份在 /data 卷持久，删子目录不影响保留 worker。
+reduce_happ_to_target(){
+  local cur="$1" tgt="$TARGET_HAPP" cfg="$2" i nums pat
+  [ -z "$tgt" ] || [ "$tgt" -lt 1 ] 2>/dev/null && { log "TARGET_HAPP 无效($tgt)，跳过削减"; return 0; }
+  [ "$cur" -gt "$tgt" ] 2>/dev/null || return 0
+  log "happ 数 $cur > $tgt，开始削减至精确目标（保留 happ.0..happ.$((tgt-1))，删多余数据目录）"
+  # 1) 备份 custom.yml
+  [ -n "$cfg" ] && { cp -a "$cfg" "${cfg}.reduce.bak" 2>/dev/null; CFG_BAK="${cfg}.reduce.bak"; }
+  # 2) 构造待删索引正则 happ.{tgt}..happ.{cur-1}
+  nums=""
+  for i in $(seq "$tgt" $((cur-1))); do
+    [ -z "$nums" ] && nums="$i" || nums="$nums|$i"
+  done
+  pat='happ/happ\.('"$nums"')'
+  # 3) 裁剪 custom.yml（IPES 按 args 里的 happ 路径数决定 worker 数；删行即减 worker）
+  if [ -n "$cfg" ]; then
+    grep -vE "$pat" "$cfg" > "${cfg}.new" 2>/dev/null && mv -f "${cfg}.new" "$cfg"
+    local left; left=$(grep -cE 'happ/happ\.[0-9]+' "$cfg" 2>/dev/null)
+    log "已裁剪 $cfg 至 $left 个 happ 路径（原文件已备份 ${CFG_BAK:-无}）"
+  else
+    warn "未找到 custom.yml，无法裁剪 worker 数（请人工确认 $C 的 happ 配置）"
+  fi
+  # 4) 删除多余数据目录（身份在 /data 卷持久，删子目录不影响保留 worker 身份）
+  for i in $(seq "$tgt" $((cur-1))); do
+    rm -rf "/data/happ/happ.$i" 2>/dev/null || true
+  done
+  # 5) 重启容器重读 custom.yml（identity 在 /data 卷，不重置）
+  log "重启容器 $C 以重读 custom.yml（happ 精确对齐到 $tgt）"
+  docker restart "$C" >/dev/null 2>&1 || true
+  sleep 3
+  return 0
+}
 align_ipes(){
   head1 "6/6 IPES 容器 / happ 结构对齐"
   if [ "$SKIP_IPES" = "1" ]; then warn "SKIP_IPES=1，跳过容器对齐"; return 0; fi
@@ -593,8 +628,11 @@ align_ipes(){
     else
       log "原始 docker_run 已含全部 happ 挂载，无需改动"
     fi
+  elif [ "$cur_happ" -gt "$TARGET_HAPP" ] 2>/dev/null; then
+    log "happ 数 $cur_happ > $TARGET_HAPP，削减至精确目标（TARGET_HAPP 为精确目标而非仅下限）"
+    reduce_happ_to_target "$cur_happ" "$CFG"
   else
-    log "happ 数已达标（$cur_happ >= $TARGET_HAPP），不动结构"
+    log "happ 数已精确对齐（$cur_happ == $TARGET_HAPP），不动结构"
   fi
 
   # (b) 镜像 tag 不一致 → 只替换 tag（作用域极小，先备份）

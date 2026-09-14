@@ -371,7 +371,11 @@ tc_probe(){
 # =============================================================================
 # 4/6 系统/内核/网络 性能调优（复用预热脚本）
 # =============================================================================
-PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"
+# ★2026-09-14 预热门户收敛★ 修复版已从 ipes-scripts 收敛到本仓库；下载后须通过
+#   'OWNER: ipes_tune' 共存修复指纹校验，不含则视为旧版（会把 r21 调优打回旧值）而拒绝执行。
+PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
+PREHEAT_URL2="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
+PREHEAT_FP='OWNER: ipes_tune'
 run_preheat(){
   head1 "4/6 系统/内核/网络 性能调优"
   # 【2026-09-12】SKIP_PREHEAT=1 时跳过本步。
@@ -383,12 +387,18 @@ run_preheat(){
     return 0
   fi
   local f=/tmp/ipes_preheat_and_health.sh ok=0 url
-  for url in "$PREHEAT_URL" "https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"; do
+  for url in "$PREHEAT_URL" "$PREHEAT_URL2"; do
     if curl -fsSL --connect-timeout 15 --max-time 90 "$url" -o "$f" 2>/dev/null \
        && [ -s "$f" ] && head -1 "$f" | grep -q '^#!/bin/bash' && bash -n "$f" 2>/dev/null; then
-      ok=1; log "已拉取预热调优脚本并校验通过: $url"; break
+      # ★共存修复指纹★ 没有 OWNER 标记 = 旧版 preheat，跑它会把 r21 调优打回旧值 → 拒绝
+      if grep -q "$PREHEAT_FP" "$f"; then
+        ok=1; log "已拉取预热调优脚本并校验通过（含共存修复指纹）: $url"; break
+      fi
+      warn "$url 下载到的预热脚本缺少共存修复指纹（旧版），拒绝执行以免打回 r21 调优"
+      rm -f "$f"
+    else
+      warn "拉取失败，换下一个源: $url"
     fi
-    warn "拉取失败，换下一个源: $url"
   done
   if [ "$ok" = "1" ]; then
     bash "$f" || warn "预热脚本返回非 0（多为个别内核键不支持，可忽略）"

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-14-r19"
+SCRIPT_VERSION="v2026-09-14-r20"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -149,6 +149,7 @@ SKIP_OLMT=0
 province=""
 city=""
 DEVICE_ID=""
+ADMIN_NODE_ID=""        # admin.zhouyi.top 后台的 32hex nodeId（stateflow/updateEdgeNominalInfo 用）
 
 # =============================================================================
 # 帮助信息
@@ -659,6 +660,79 @@ display_device_id() {
     fi
 }
 
+# =============================================================================
+# 解析 admin 后台真正需要绑定的 nodeId（32hex）
+# -----------------------------------------------------------------------------
+# /etc/.mac 里存的是 SN（UUID 或 76hex 业务ID），但后台 stateflow /
+# updateEdgeNominalInfo / findEdgeNode 都要求传 nodeId。r19 之前一直用 SN
+# 去调，导致业务属性要么写到旧节点、要么写不进去，节点在线但 nominalInfo 全空。
+# 根治：从 edge_client 的 device_code 读 nodeId；读不到再按公网 IP 反查后台。
+# =============================================================================
+resolve_admin_node_id() {
+    print_step "解析 admin 后台节点 ID（32hex nodeId）"
+    local f
+    for f in /usr/local/edge_zycloud/device_code /usr/local/edge/device_code /etc/edge/device_code; do
+        if [ -f "$f" ]; then
+            ADMIN_NODE_ID=$(cat "$f" 2>/dev/null | tr -d '[:space:]')
+            if [[ "$ADMIN_NODE_ID" =~ ^[a-fA-F0-9]{32}$ ]]; then
+                log_message "${GREEN}[成功]${NC} 从 $f 读取到 nodeId: $ADMIN_NODE_ID"
+                return 0
+            fi
+        fi
+    done
+    log_message "${YELLOW}[警告]${NC} 本地未读到合法 32hex nodeId，尝试按公网 IP 反查后台..."
+    ADMIN_NODE_ID=$(python3 - "$ADMIN_API_HOST" "$NODE_ACTIVATE_TOKEN" <<'PY'
+import json, re, ssl, sys, time, urllib.request, urllib.error
+host = sys.argv[1]
+jwt = sys.argv[2]
+ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+
+def get_ip():
+    for url in ["http://myip.ipip.net","http://ip.sb","http://checkip.amazonaws.com"]:
+        try:
+            r = urllib.request.urlopen(url, timeout=5)
+            ips = re.findall(r'\d+\.\d+\.\d+\.\d+', r.read().decode())
+            if ips: return ips[0]
+        except: pass
+    return None
+
+def call(path):
+    req = urllib.request.Request(host + path, headers={"x-token": jwt})
+    try:
+        r = urllib.request.urlopen(req, context=ctx, timeout=30)
+        return r.getcode(), r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+pubip = get_ip()
+if not pubip:
+    sys.exit(1)
+for page in range(1, 81):
+    code, txt = call(f"/api/edgeNode/getEdgeNodeList?page={page}&pageSize=200")
+    if code != 200:
+        break
+    d = json.loads(txt)
+    data = d.get('data') or {}
+    hits = [x for x in data.get('list', []) if x.get('publicIP') == pubip]
+    if hits:
+        # 优先 inService，其次最近更新
+        hits.sort(key=lambda x: (x.get('stage') == 'inService', x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
+        print(hits[0].get('nodeID'))
+        sys.exit(0)
+    if page * 200 >= data.get('total', 0):
+        break
+    time.sleep(0.1)
+sys.exit(1)
+PY
+)
+    if [ -n "$ADMIN_NODE_ID" ]; then
+        log_message "${GREEN}[成功]${NC} 从后台反查到 nodeId: $ADMIN_NODE_ID"
+        return 0
+    fi
+    log_message "${YELLOW}[警告]${NC} 无法解析 admin 节点 ID，后续 admin 绑定将使用 SN 回退（可能失败）"
+    return 1
+}
+
 show_installer_contents() {
     print_step "安装文件列表"
     if [ -d "$INSTALLER_DIR" ]; then
@@ -1032,15 +1106,18 @@ set_node_attributes() {
         resp=$(curl -k -s -m 30 -H "X-Token: $NODE_ACTIVATE_TOKEN" "$url" 2>&1)
         # ⚠️ r15 修复：此处 curl 未加 -w http_code，响应只有单行 JSON；
         #    旧代码 `sed '$d'` 会把整行删光导致永远查不到（白等 33s）
-        if echo "$resp" | grep -q "\"isp\":\"$ISP\"" && echo "$resp" | grep -q "\"resourceType\":\"$NODE_RESOURCE_TYPE\""; then
-            log_message "${GREEN}[成功]${NC} 节点属性已就绪：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE"
+        if echo "$resp" | grep -q "\"isp\":\"$ISP\"" \
+           && echo "$resp" | grep -q "\"resourceType\":\"$NODE_RESOURCE_TYPE\"" \
+           && echo "$resp" | grep -qE "\"vendorSuggestCustomers\": *$BUSINESS_ID" \
+           && echo "$resp" | grep -qE "\"usbw\": *$NODE_USBW"; then
+            log_message "${GREEN}[成功]${NC} 节点属性已就绪：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE / 业务=$BUSINESS_ID / 上行=${NODE_USBW}M"
             return 0
         fi
         [ $try -lt 3 ] && sleep 3
     done
 
-    log_message "${YELLOW}[警告]${NC} 节点属性未落上（期望：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE）"
-    log_message "${YELLOW}        本步骤只校验；写入靠 POST ${ADMIN_NOMINAL_API} 带 isp/resourceType/dialType/natType/province/city${NC}"
+    log_message "${YELLOW}[警告]${NC} 节点属性未落上（期望：运营商=$ISP / 资源类型=$NODE_RESOURCE_TYPE / 上网方式=$NODE_DIAL_TYPE / 业务=$BUSINESS_ID / 上行=${NODE_USBW}M）"
+    log_message "${YELLOW}        可能原因：本地 device_code 与后台活跃节点不一致，或 updateEdgeNominalInfo 未命中当前 nodeId${NC}"
     return 1
 }
 
@@ -1432,6 +1509,9 @@ main() {
     # [3] 读取设备 SN
     display_device_id
 
+    # [3.5] 解析 admin 后台需要的 32hex nodeId（r20 根治：用 nodeId 而不是 SN 调 admin 接口）
+    resolve_admin_node_id
+
     # [4] 注册设备
     if [ -n "$DEVICE_ID" ]; then
         get_location_info
@@ -1509,7 +1589,14 @@ main() {
     fi
 
     # [9] 降级「待配置」-> 提交业务 41 -> 升回「服务中」(带业务ID) -> 写节点属性
-    if [ -n "$DEVICE_ID" ]; then
+    # r20：必须用 ADMIN_NODE_ID（32hex）调 admin 接口；用 SN 调会写到错节点或写不进去。
+    if [ -n "$ADMIN_NODE_ID" ]; then
+        downgrade_to_configured "$ADMIN_NODE_ID"
+        submit_business "$ADMIN_NODE_ID"
+        transition_to_serving "$ADMIN_NODE_ID"
+        set_node_attributes "$ADMIN_NODE_ID"
+    elif [ -n "$DEVICE_ID" ]; then
+        log_message "${YELLOW}[警告]${NC} 未解析到 admin nodeId，尝试用 SN 回退（极有可能无法绑定业务）"
         downgrade_to_configured "$DEVICE_ID"
         submit_business "$DEVICE_ID"
         transition_to_serving "$DEVICE_ID"
@@ -1538,7 +1625,9 @@ main() {
     # [11.5] 校验业务ID（后台 hostName）
     # 放在最后：平台创建 business_tags 记录有 1~2 分钟延迟，
     # 让前面的 SSH 收尾工作（约 1 分钟）正好把延迟掩盖掉。
-    if [ -n "$DEVICE_ID" ]; then
+    if [ -n "$ADMIN_NODE_ID" ]; then
+        set_business_tag "$ADMIN_NODE_ID"
+    elif [ -n "$DEVICE_ID" ]; then
         set_business_tag "$DEVICE_ID"
     fi
 
@@ -1548,6 +1637,7 @@ main() {
     echo -e "${GREEN}业务 ${BUSINESS_ID}（q2）整体部署脚本执行完毕！${NC}"
     echo -e "${CYAN}======================================================${NC}"
     log_message "设备SN（业务ID）: ${DEVICE_ID:-未知}"
+    log_message "admin 节点 ID: ${ADMIN_NODE_ID:-未知}（32hex，后台 stateflow/updateEdgeNominalInfo 用）"
     log_message "省份/城市: ${province:-未知}/${city:-未知}"
     log_message "运营商: $ISP"
     log_message "节点属性: 资源类型=$NODE_RESOURCE_TYPE(1=汇聚/2=专线) 上网方式=$NODE_DIAL_TYPE"

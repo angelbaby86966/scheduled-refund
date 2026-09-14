@@ -157,7 +157,7 @@ CUR_OPTS=$(findmnt -no OPTIONS / 2>/dev/null)
 echo "  root fstype=$FSTYPE opts=$CUR_OPTS"
 
 if [ "$FSTYPE" = "ext4" ]; then
-  ADD_OPTS="commit=60,barrier=0"
+  ADD_OPTS="noatime,nodiratime,commit=60,barrier=0,data=writeback"
 elif [ "$FSTYPE" = "xfs" ]; then
   ADD_OPTS="logbsize=256k"
 else
@@ -165,13 +165,13 @@ else
 fi
 
 if [ -n "$ADD_OPTS" ]; then
-  # 2.1 幂等写入 /etc/fstab（带标记，改一次就够；改前备份）
-  if [ -f /etc/fstab ] && ! grep -q "ipes-tuned" /etc/fstab 2>/dev/null; then
+  # 2.1 幂等写入 /etc/fstab（规范化 / 挂载选项；data=writeback 减少日志开销、拉缓存写盘更快）
+  #     改前备份；已含 data=writeback 则跳过
+  if [ -f /etc/fstab ] && ! grep -q "data=writeback" /etc/fstab 2>/dev/null; then
     cp -a /etc/fstab "/etc/fstab.ipes.bak.$(date +%s)"
-    awk -v add="$ADD_OPTS" 'BEGIN{OFS="\t"} {
-      if ($2=="/" && $4 !~ /ipes-tuned/ && index($4,"commit=")==0 && index($4,"logbsize=")==0) {
-        $4=$4","add; $0=$0" # ipes-tuned"
-      }
+    awk 'BEGIN{OFS="\t"} {
+      if ($2=="/" && $3=="ext4") { $4="defaults,noatime,nodiratime,commit=60,barrier=0,data=writeback" }
+      if ($2=="/" && $3=="xfs")  { $4="defaults,logbsize=256k" }
       print
     }' /etc/fstab > /etc/fstab.new 2>/dev/null && mv /etc/fstab.new /etc/fstab
     echo "  [fstab] patched: +$ADD_OPTS (backup kept)"
@@ -181,7 +181,7 @@ if [ -n "$ADD_OPTS" ]; then
 
   # 2.2 立即生效（在线 remount；失败也不影响运行，下次重启由 fstab 承载）
   case "$CUR_OPTS" in
-    *commit=*|*logbsize=*)
+    *data=writeback*)
       echo "  [remount] already active, skip" ;;
     *)
       if mount -o "remount,$ADD_OPTS" / 2>/dev/null; then
@@ -206,9 +206,10 @@ net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.core.rmem_default = 16777216
 net.core.wmem_default = 16777216
-net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_rmem = 4096 262144 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.tcp_notsent_lowat = 16384
+# 200M 上行：关掉 notsent_lowat 上限，避免批量上行被节流（缓存回源/上行首窗更快填满管道）
+net.ipv4.tcp_notsent_lowat = 0
 # UDP（PCDN 上行大量小包）：加大全局与单 socket 下限
 net.ipv4.udp_mem = 65536 98304 131072
 net.ipv4.udp_rmem_min = 32768
@@ -393,6 +394,33 @@ done
 echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
 
 # -----------------------------------------------------------------------------
+# 6.5) 出口路由 initcwnd/initrwnd —— 加速「部署后拉缓存」与上行爬坡
+#   CentOS7 3.10 内核默认 initcwnd=10；拉缓存（从源站下行填充）和上行首窗都受初始窗口限制，
+#   调到 20 让新连接起步即多发送 ~2 倍数据：缓存填充更快、上行更快爬到 200M。
+#   路由在重启后会重置 → 本脚本（ipes-tune.service 开机重放）带 30s 重试等待默认路由出现。
+# -----------------------------------------------------------------------------
+echo "--- [6.5/8] egress route initcwnd/initrwnd ---"
+tune_egress_route(){
+  local tries=30 gw dev
+  while [ "$tries" -gt 0 ]; do
+    gw=$(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
+    dev=$(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    [ -n "$gw" ] && [ -n "$dev" ] && break
+    sleep 1; tries=$((tries-1))
+  done
+  if [ -n "$gw" ] && [ -n "$dev" ]; then
+    if ip route replace default via "$gw" dev "$dev" initcwnd 20 initrwnd 20 2>/dev/null; then
+      echo "  [route] default via $gw dev $dev -> $(ip route show default 2>/dev/null | grep -o 'initcwnd [0-9]* initrwnd [0-9]*')"
+    else
+      echo "  [route] FAILED set initcwnd (非致命)"
+    fi
+  else
+    echo "  [route] 未发现默认路由，跳过（开机由 ipes-tune.service 重试）"
+  fi
+}
+tune_egress_route
+
+# -----------------------------------------------------------------------------
 # 7) conntrack hashsize + raw NOTRACK（高并发下省 CPU）
 # -----------------------------------------------------------------------------
 echo "--- [7/8] conntrack ---"
@@ -440,7 +468,7 @@ cat > /etc/systemd/system/ipes-tune.service <<'EOF'
 [Unit]
 Description=IPES PCDN disk/nic/sysctl tuning (replay on boot)
 After=network.target local-fs.target
-Wants=network.target
+Wants=network.target network-online.target
 
 [Service]
 Type=oneshot
@@ -593,6 +621,7 @@ echo "  dirty 20/10    : $(sysctl -n vm.dirty_ratio)/$(sysctl -n vm.dirty_backgr
 echo "  ulimit -n      : $(ulimit -n)   (新登录 shell)"
 echo "  limit conf     : $(grep -h nofile /etc/security/limits.d/99-ipes.conf 2>/dev/null | tail -1)"
 echo "  txqueuelen     : $(cat /sys/class/net/$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')/tx_queue_len 2>/dev/null)"
+echo "  default route  : $(ip route show default 2>/dev/null | grep -o 'initcwnd [0-9]* initrwnd [0-9]*')"
 echo "================================================="
 echo " IPES TUNE $TUNE_VER DONE  $(date '+%F %T')"
 echo "================================================="

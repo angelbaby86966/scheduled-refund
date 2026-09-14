@@ -334,7 +334,13 @@ for d in /sys/block/*; do
   if [ "$rot" = "0" ]; then echo none > "$d/queue/scheduler" 2>/dev/null
   else echo mq-deadline > "$d/queue/scheduler" 2>/dev/null; fi
   echo 256 > "$d/queue/read_ahead_kb" 2>/dev/null
-  echo 1024 > "$d/queue/nr_requests" 2>/dev/null
+  # 与 r21 同款：队列深度按 8192→4096→1024 逐级尝试并读回确认。
+  # 原先硬编码 1024 会把 r21 争取到的更深队列打回；部分内核（virtio-blk + none）本就写不进去，
+  # 故用"尝试 + 读回"而不是盲写。
+  for _v in 8192 4096 1024; do
+    echo "$_v" > "$d/queue/nr_requests" 2>/dev/null
+    [ "$(cat "$d/queue/nr_requests" 2>/dev/null)" = "$_v" ] && break
+  done
   echo 0 > "$d/queue/add_random" 2>/dev/null
 done
 fi

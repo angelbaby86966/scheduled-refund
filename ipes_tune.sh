@@ -129,6 +129,9 @@ fi
 # -----------------------------------------------------------------------------
 echo "--- [3/8] sysctl (single authoritative file) ---"
 cat > /etc/sysctl.d/99-ipes.conf <<'EOF'
+# OWNER: ipes_tune (r21) —— 内核调优【唯一权威文件】
+#   ★其它脚本（ipes_preheat_and_health.sh / ipes_align_uplink.sh）必须只做补充：
+#     先 grep 这一行判断归属，凡本文件已定义的键一律不得再写，避免后跑者把值打回旧值。
 # ===== IPES PCDN 调优 v21（唯一权威文件，勿再放 98-*/99-*-perf.conf 以免冲突）=====
 # --- TCP/UDP 缓冲：高并发 + 高 BDP 链路，缓冲要够大才跑得满 ---
 net.core.rmem_max = 67108864
@@ -213,7 +216,14 @@ vm.dirty_writeback_centisecs = 50
 vm.zone_reclaim_mode = 0
 vm.min_free_kbytes = 65536
 EOF
-rm -f /etc/sysctl.d/98-ipes-nat.conf /etc/sysctl.d/99-ipes-perf.conf 2>/dev/null
+# ★根治「两套调优打架」★
+#   只删【文件名排序 ≥ 99-ipes.conf】且携带旧值的遗留文件 —— 它们在开机 sysctl 扫描时
+#   会排在本文件之后，从而把 r21 的新值再打回旧值。
+#   · 99-ipes-perf.conf    : r21 早期版本遗留
+#   · 99-ipes-fallback.conf: 旧版 align 的兜底文件（dirty 40/30、udp_rmem_min 16384），
+#                            新版 align 已改名 50-ipes-fallback.conf 并去掉重叠键
+#   98-ipes-nat.conf 保留：修复后它只含 r21 未管理的键，且 98 < 99，开机时会被本文件覆盖。
+rm -f /etc/sysctl.d/99-ipes-perf.conf /etc/sysctl.d/99-ipes-fallback.conf 2>/dev/null
 modprobe nf_conntrack 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf 2>&1 | grep -vE "^\s*$" | tail -5
 
@@ -356,6 +366,68 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload 2>/dev/null
 systemctl enable ipes-tune.service >/dev/null 2>&1 && echo "  [persist] ipes-tune.service enabled"
+
+# -----------------------------------------------------------------------------
+# 7) ★护栏★ 关键键断言 + 自愈 —— 根治「其它脚本把新值打回旧值」
+# -----------------------------------------------------------------------------
+# 背景：ipes_preheat_and_health.sh（旧版）与本脚本曾写同一个 /etc/sysctl.d/99-ipes.conf，
+#       谁后跑谁生效，导致 dirty 20/10、netdev_budget 3000、udp_rmem_min 32768、
+#       rmem_default 16M、qdisc fq 等 7 项被打回旧值。
+# 现在的约定（三处已同步改造）：
+#       ① 本脚本写 99-ipes.conf 并打上 "OWNER: ipes_tune" 归属标记；
+#       ② preheat 探测到该标记后改为【只补不覆盖】，写 50-ipes-preheat.conf（排序在前，开机必被本文件覆盖）；
+#       ③ align 的 NAT/兜底文件剔除被本文件管理的重叠键。
+# 本段是最后的「绊线」：任何脚本再把键改回去，这里都会立刻发现并重放自愈。
+echo ""
+echo "--- [guard] sysctl assert + self-heal ---"
+sctl_guard(){
+  local conf=/etc/sysctl.d/99-ipes.conf
+  [ -f "$conf" ] || { echo "  [guard] 缺少 $conf，跳过"; return 0; }
+  # 归属标记做兜底自补（老节点升级上来时可能没有这一行）
+  grep -q 'OWNER: ipes_tune' "$conf" 2>/dev/null || \
+    sed -i '1i # OWNER: ipes_tune (r21)' "$conf" 2>/dev/null || true
+  # 这 8 项是历史上被覆盖过的重灾区
+  local pairs="net.core.rmem_default=16777216
+net.ipv4.udp_rmem_min=32768
+net.core.netdev_budget=3000
+net.core.default_qdisc=fq
+vm.dirty_ratio=20
+vm.dirty_background_ratio=10
+net.core.somaxconn=65535
+net.ipv4.tcp_congestion_control=bbr"
+  local bad kv k want got
+  _sctl_check(){
+    bad=""
+    while IFS= read -r kv; do
+      [ -n "$kv" ] || continue
+      k="${kv%%=*}"; want="${kv#*=}"
+      got=$(sysctl -n "$k" 2>/dev/null)
+      # BBR 不可用时回退 cubic 属正常，不算回退
+      if [ "$k" = "net.ipv4.tcp_congestion_control" ] && [ "$got" != "bbr" ]; then
+        sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q bbr || continue
+      fi
+      [ "$got" = "$want" ] || bad="$bad $k(应=$want 实=${got:-N/A})"
+    done <<< "$pairs"
+  }
+  _sctl_check
+  if [ -n "$bad" ]; then
+    echo "  [guard] ⚠ 关键键被回退:$bad"
+    echo "  [guard] 自动自愈：重放 $conf"
+    sysctl -e -p "$conf" >/dev/null 2>&1 || true
+    _sctl_check
+    if [ -n "$bad" ]; then
+      echo "  [guard] ✗ 自愈后仍异常:$bad"
+      echo "  [guard]   多为第三方脚本（预热/对齐/onekey）持续覆盖，请检查 /etc/sysctl.d/ 下 98-*/99-* 文件"
+    else
+      echo "  [guard] ✔ 自愈成功，关键键已恢复 r21 值"
+    fi
+  else
+    echo "  [guard] ✔ 关键键全部为 r21 值"
+  fi
+  # 顺带清掉可能被重跑的旧脚本重建的、会压过本文件的遗留文件
+  rm -f /etc/sysctl.d/99-ipes-perf.conf /etc/sysctl.d/99-ipes-fallback.conf 2>/dev/null || true
+}
+sctl_guard
 
 # -----------------------------------------------------------------------------
 # 汇总

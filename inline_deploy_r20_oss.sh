@@ -361,7 +361,11 @@ if [ "$running" != "true" ]; then
   docker start ipes 2>/dev/null || { systemctl restart docker >/dev/null 2>&1; docker start ipes 2>/dev/null; }
 fi
 use=$(df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
-[ -n "$use" ] && [ "$use" -ge 85 ] && logger -t ipes-health "WARN /data usage ${use}% >= 85%"
+if [ -n "$use" ] && [ "$use" -ge 85 ] 2>/dev/null; then
+  logger -t ipes-health "WARN /data usage ${use}% >= 85%"
+fi
+# ★必须显式 exit 0★：Type=oneshot 以脚本退出码判定成败，否则磁盘 <85% 时服务恒被判 failed
+exit 0
 HEOF
 chmod +x /usr/local/bin/ipes-health.sh
 cat > /etc/systemd/system/ipes-health.service <<'HEOF'

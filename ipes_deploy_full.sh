@@ -1771,6 +1771,20 @@ vm.dirty_writeback_centisecs = 50
 vm.zone_reclaim_mode = 0
 vm.min_free_kbytes = 65536
 EOF
+# --- tcp_mem 按物理内存缩放（15% / 30% / 60%，封顶 16G pages）---
+#   原先是硬编码 36134 72268 144537 —— 该值恰好等于 941MB 机型的 15/30/60%。
+#   换到 2G/4G/8G 规格时它会明显偏小，把 TCP 总内存上限压住，高并发下行（拉缓存）可能提前触顶。
+#   改为动态计算：1GB 机型结果与原值【逐字节一致】，更大规格自动放宽。
+_mem_kb=$(grep -m1 MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+_mem_mb=$(( ${_mem_kb:-8388608} / 1024 ))
+_ram_pages=$(( _mem_mb * 256 ))          # page=4KB ⇒ 每 MB = 256 pages
+TP_LOW=$((   _ram_pages * 15 / 100 ))
+TP_PRESS=$(( _ram_pages * 30 / 100 ))
+TP_MAX=$((   _ram_pages * 60 / 100 ))
+[ "$TP_MAX" -gt 4194304 ] && TP_MAX=4194304
+sed -i "s|^net.ipv4.tcp_mem = .*|net.ipv4.tcp_mem = $TP_LOW $TP_PRESS $TP_MAX|" /etc/sysctl.d/99-ipes.conf 2>/dev/null
+echo "  [tcp_mem] MemTotal=${_mem_mb}MB -> $TP_LOW $TP_PRESS $TP_MAX pages (15/30/60% 缩放)"
+
 # ★根治「两套调优打架」★
 #   只删【文件名排序 ≥ 99-ipes.conf】且携带旧值的遗留文件 —— 它们在开机 sysctl 扫描时
 #   会排在本文件之后，从而把 r21 的新值再打回旧值。
@@ -2005,7 +2019,12 @@ net.ipv4.tcp_max_tw_buckets=1048576"
     [ "$ra" = "256" ] || dq_bad="$dq_bad read_ahead_kb(应=256 实=${ra:-N/A})"
     { [ -z "$ng" ] || [ "$ng" = "0" ]; } || dq_bad="$dq_bad nomerges(应=0 实=$ng)"
     { [ -z "$rq" ] || [ "$rq" = "2" ]; } || dq_bad="$dq_bad rq_affinity(应=2 实=$rq)"
-    case "$sched" in *"[none]"*) : ;; *) dq_bad="$dq_bad scheduler(应=[none] 实=${sched:-N/A})" ;; esac
+    # 真实内核回显形如 "[none] mq-deadline kyber"（方括号标出当前生效项）；
+    # 少数环境可能只回显 "none"，一并兼容，避免误报
+    case "$sched" in
+      *"[none]"*|none) : ;;
+      *) dq_bad="$dq_bad scheduler(应=[none] 实=${sched:-N/A})" ;;
+    esac
   }
   _dq_heal(){
     local d hw want _v

@@ -111,7 +111,7 @@ echo "已后台启动部署 PID=$DEPLOY_PID"
 
 # ============ C) 业务绑定自修复 ============
 cat > /root/ipes_repair_binding.py <<'PY'
-import json, os, re, ssl, sys, time, urllib.request, urllib.error
+import json, os, re, ssl, subprocess, sys, time, urllib.request, urllib.error
 
 JWT = os.environ.get('NODE_ACTIVATE_TOKEN','')
 if not JWT:
@@ -132,6 +132,16 @@ NODE_BW_NUM = int(os.environ.get('NODE_BW_NUM','1'))
 CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode = ssl.CERT_NONE
 
 def log(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+def get_ipes_sn():
+    """读容器内真正的 IPES 业务 SN（76 位 hex），不要用后台 UUID sn。"""
+    for path in ['/app/ipes/bin/ipes_sn', '/opt/soft/disk/IPES_SN']:
+        try:
+            out = subprocess.check_output(['docker','exec','ipes','cat',path], stderr=subprocess.DEVNULL, timeout=10)
+            sn = out.decode('utf-8','replace').strip()
+            if sn: return sn
+        except Exception: continue
+    return ''
 
 def admin_call(path, body=None, method="GET"):
     req = urllib.request.Request(BASE + path, method=method)
@@ -179,8 +189,11 @@ def is_bound(ni):
     info = ni.get('nominalInfo') or {}
     return info.get('vendorSuggestCustomers') == BUSINESS_ID and info.get('usbw') == NODE_USBW
 
-def do_bind(node_id, sn):
+def do_bind(node_id):
     log(f"为活跃节点 {node_id} 补绑业务 {BUSINESS_ID}")
+    # 业务 ID 必须取容器内 76hex IPES SN，否则后台会写 UUID 占位符
+    biz_sn = get_ipes_sn()
+    log(f"  -> 容器 IPES SN: {biz_sn[:16]}...{biz_sn[-12:]} (len={len(biz_sn)})")
     for stage in ['configured','configured']:
         code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": stage}, "POST")
         log(f"  -> {stage}: HTTP {code} {txt[:120]}")
@@ -197,7 +210,7 @@ def do_bind(node_id, sn):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
-    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
+    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": biz_sn}, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
@@ -212,7 +225,7 @@ def main():
     if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
     log(f"找到节点: {ni.get('nodeID')} stage={ni.get('stage')} vendor={(ni.get('nominalInfo') or {}).get('vendorSuggestCustomers')} usbw={(ni.get('nominalInfo') or {}).get('usbw')}")
     if is_bound(ni): log("[OK] 已绑定，无需修复"); sys.exit(0)
-    do_bind(ni.get('nodeID'), ni.get('sn', ''))
+    do_bind(ni.get('nodeID'))
     time.sleep(2)
     ni = find_node_by_ip(pubip)
     if is_bound(ni): log("[OK] 修复成功"); sys.exit(0)

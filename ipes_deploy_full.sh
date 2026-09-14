@@ -1526,6 +1526,69 @@ echo " IPES TUNE $TUNE_VER   $(date '+%F %T')   host=$(hostname)  ncpu=$NCPU"
 echo "=============================================================="
 
 # -----------------------------------------------------------------------------
+# ★根治「kernel 调优被别的 sysctl 文件覆盖」★
+#   实测（procps-ng 3.3.10，CentOS 7.9）：
+#     `sysctl --system` 的顺序是【先扫完 /run|/etc|/usr/lib 下所有 sysctl.d/*.conf，
+#      最后才应用 /etc/sysctl.conf】，且 /etc/sysctl.d/99-sysctl.conf 只是 /etc/sysctl.conf
+#      的软链 ⇒ 靠“文件名字典序”改名（如 99-zz-*.conf）【压不过它】，已实测证伪。
+#   本机该文件里就带着旧值：tcp_max_tw_buckets=5000、tcp_max_syn_backlog=1024。
+#   ⇒ 唯一稳妥的做法：让【与 r21 同名但值不同】的键在其它文件里就地让位（注释掉）。
+#   原则：值相同的不动（最小侵入）；首次改动前备份 .ipes-bak；幂等，可反复执行。
+# -----------------------------------------------------------------------------
+deconflict_sysctl_files(){
+  local mine=/etc/sysctl.d/99-ipes.conf
+  [ -f "$mine" ] || { echo "  [deconf] 缺 $mine，跳过"; return 0; }
+  # r21 自己声明的「键 <TAB> 值」映射（只取未注释的生效行）
+  local kvf=/tmp/ipes_mine_kv.txt
+  awk -F= '/^[ \t]*[A-Za-z0-9._-]+[ \t]*=/{
+      k=$1; gsub(/^[ \t]+|[ \t]+$/,"",k);
+      v=substr($0,index($0,"=")+1); gsub(/^[ \t]+|[ \t]+$/,"",v); gsub(/[ \t]+/," ",v);
+      print k "\t" v
+    }' "$mine" > "$kvf" 2>/dev/null
+  local total; total=$(wc -l < "$kvf" 2>/dev/null | tr -d ' ')
+  echo "  [deconf] r21 声明 $total 个键，开始比对其它 sysctl 文件…"
+  # 候选：/etc/sysctl.conf + /etc/sysctl.d/*.conf
+  #   注意用 find -type f 跳过软链（99-sysctl.conf → ../sysctl.conf），避免同一文件被处理两次
+  local f files
+  files="/etc/sysctl.conf"
+  while IFS= read -r f; do files="$files $f"; done < \
+    <(find /etc/sysctl.d -maxdepth 1 -name '*.conf' -type f 2>/dev/null | sort)
+  local changed_files=0 changed_keys=0
+  for f in $files; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$mine" ] && continue
+    awk -v MAP="$kvf" -v TAG="# [ipes-tune r21 接管] " '
+      BEGIN{ while((getline l < MAP) > 0){ i=index(l,"\t"); if(i>0){ mine[substr(l,1,i-1)]=substr(l,i+1) } } }
+      {
+        t=$0; sub(/^[ \t]+/,"",t)
+        if (t != "" && t !~ /^#/ && t ~ /^[A-Za-z0-9._-]+[ \t]*=/) {
+          k=t; sub(/[ \t]*=.*/,"",k)
+          v=t; sub(/^[A-Za-z0-9._-]+[ \t]*=/,"",v)
+          gsub(/^[ \t]+|[ \t]+$/,"",v); gsub(/[ \t]+/," ",v)
+          if ((k in mine) && v != mine[k]) { print TAG $0; next }
+        }
+        print
+      }' "$f" > /tmp/ipes_deconf.out 2>/dev/null
+    if ! cmp -s /tmp/ipes_deconf.out "$f" 2>/dev/null; then
+      [ -f "$f.ipes-bak" ] || cp -p "$f" "$f.ipes-bak" 2>/dev/null
+      # 用 cat 覆盖以保留 inode/权限（对软链目标也安全）
+      cat /tmp/ipes_deconf.out > "$f" 2>/dev/null
+      local n; n=$(grep -c '^# \[ipes-tune r21 接管\]' "$f" 2>/dev/null || echo 0)
+      echo "  [deconf] ✔ 已让位: $f  (累计注释 $n 行，原文件备份为 $f.ipes-bak)"
+      changed_files=$((changed_files+1)); changed_keys=$((changed_keys+n))
+    fi
+  done
+  rm -f /tmp/ipes_deconf.out 2>/dev/null
+  if [ "$changed_files" -eq 0 ]; then
+    echo "  [deconf] ✔ 无冲突键需要让位（其它文件均不与 r21 冲突）"
+  else
+    echo "  [deconf] ✔ 共处理 $changed_files 个文件；这些键今后不会再被 sysctl --system 打回"
+  fi
+  # 让被注释掉的键在本次运行末立即回到 r21 值
+  sysctl -e -p "$mine" >/dev/null 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
 # 1) 磁盘 I/O 队列 —— 吞吐优先（PCDN：大块顺序写缓存 + 顺序读缓存）
 # -----------------------------------------------------------------------------
 echo "--- [1/8] block queue (throughput-first) ---"
@@ -1714,8 +1777,13 @@ EOF
 #   · 99-ipes-perf.conf    : r21 早期版本遗留
 #   · 99-ipes-fallback.conf: 旧版 align 的兜底文件（dirty 40/30、udp_rmem_min 16384），
 #                            新版 align 已改名 50-ipes-fallback.conf 并去掉重叠键
-#   98-ipes-nat.conf 保留：修复后它只含 r21 未管理的键，且 98 < 99，开机时会被本文件覆盖。
+#   98-ipes-nat.conf 保留：修复后它只含 r21 未管理的键；万一还残留旧值，下一步 deconflict 会兜住。
 rm -f /etc/sysctl.d/99-ipes-perf.conf /etc/sysctl.d/99-ipes-fallback.conf 2>/dev/null
+
+# 让 /etc/sysctl.conf（最后应用者）与其它 sysctl.d 文件里【值冲突】的键就地让位
+echo "--- [3.5/8] de-conflict competing sysctl files ---"
+deconflict_sysctl_files
+
 modprobe nf_conntrack 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf 2>&1 | grep -vE "^\s*$" | tail -5
 
@@ -1906,7 +1974,10 @@ net.ipv4.tcp_max_tw_buckets=1048576"
   _sctl_check
   if [ -n "$bad" ]; then
     echo "  [guard] ⚠ 关键键被回退:$bad"
-    echo "  [guard] 自动自愈：重放 $conf"
+    echo "  [guard] 自动自愈：清理冲突文件 + 重放 $conf"
+    # 先让"最后应用者"（/etc/sysctl.conf）与其它 sysctl.d 文件里的冲突键让位，
+    # 否则单纯重放本文件，下次 sysctl --system 又会被打回
+    deconflict_sysctl_files 2>/dev/null | grep -E '已让位|无冲突|共处理' || true
     sysctl -e -p "$conf" >/dev/null 2>&1 || true
     _sctl_check
     if [ -n "$bad" ]; then
@@ -1920,6 +1991,54 @@ net.ipv4.tcp_max_tw_buckets=1048576"
   fi
   # 顺带清掉可能被重跑的旧脚本重建的、会压过本文件的遗留文件
   rm -f /etc/sysctl.d/99-ipes-perf.conf /etc/sysctl.d/99-ipes-fallback.conf 2>/dev/null || true
+
+  # --- 磁盘队列断言 + 自愈（preheat 的 boot-tune / rc.local 也写这些 /sys 节点）---
+  local dq_bad=""
+  _dq_check(){
+    dq_bad=""
+    local d=/sys/block/vda ra ng rq sched
+    [ -d "$d/queue" ] || return 0
+    ra=$(cat "$d/queue/read_ahead_kb" 2>/dev/null)
+    ng=$(cat "$d/queue/nomerges"      2>/dev/null)
+    rq=$(cat "$d/queue/rq_affinity"   2>/dev/null)
+    sched=$(tr -d '\n' < "$d/queue/scheduler" 2>/dev/null)
+    [ "$ra" = "256" ] || dq_bad="$dq_bad read_ahead_kb(应=256 实=${ra:-N/A})"
+    { [ -z "$ng" ] || [ "$ng" = "0" ]; } || dq_bad="$dq_bad nomerges(应=0 实=$ng)"
+    { [ -z "$rq" ] || [ "$rq" = "2" ]; } || dq_bad="$dq_bad rq_affinity(应=2 实=$rq)"
+    case "$sched" in *"[none]"*) : ;; *) dq_bad="$dq_bad scheduler(应=[none] 实=${sched:-N/A})" ;; esac
+  }
+  _dq_heal(){
+    local d hw want _v
+    for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
+      [ -d "$d/queue" ] || continue
+      echo none > "$d/queue/scheduler"     2>/dev/null
+      echo 0    > "$d/queue/rotational"    2>/dev/null
+      echo 256  > "$d/queue/read_ahead_kb" 2>/dev/null
+      for _v in 8192 4096 1024; do
+        echo "$_v" > "$d/queue/nr_requests" 2>/dev/null
+        [ "$(cat "$d/queue/nr_requests" 2>/dev/null)" = "$_v" ] && break
+      done
+      echo 0    > "$d/queue/nomerges"      2>/dev/null
+      hw=$(cat "$d/queue/max_hw_sectors_kb" 2>/dev/null); want=1024
+      [ -n "$hw" ] && [ "$hw" -lt "$want" ] 2>/dev/null && want=$hw
+      echo "$want" > "$d/queue/max_sectors_kb" 2>/dev/null
+      echo 2    > "$d/queue/rq_affinity"   2>/dev/null
+    done
+  }
+  _dq_check
+  if [ -n "$dq_bad" ]; then
+    echo "  [guard] ⚠ 磁盘队列被回退:$dq_bad"
+    echo "  [guard] 自动自愈：重写块设备队列参数"
+    _dq_heal
+    _dq_check
+    if [ -n "$dq_bad" ]; then
+      echo "  [guard] ✗ 磁盘队列自愈后仍异常:$dq_bad"
+    else
+      echo "  [guard] ✔ 磁盘队列自愈成功"
+    fi
+  else
+    echo "  [guard] ✔ 磁盘队列为 r21 值"
+  fi
 }
 sctl_guard
 

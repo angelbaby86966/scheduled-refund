@@ -11,6 +11,14 @@
 #   export NODE_ACTIVATE_TOKEN="<后台 x-token JWT，有效期约3天>"
 #   bash complete_node.sh
 # =============================================================================
+#
+# ── 已知事项：BBR 拥塞控制 与 内核版本 ────────────────────────────────────────
+# 本脚本只做「业务绑定+流转」，不碰内核。若你同时跑了 ipes_quick_deploy.sh 的调优：
+#   * BBR 需内核 >= 4.9；CentOS 7 默认 3.10 内核无 tcp_bbr 模块，脚本会自动回退 cubic。
+#   * 其余调优（conntrack 表/RPS/NOTRACK/socket 缓冲等）在 3.10 上全部生效。
+#   * 想真正启用 BBR：把内核升到 elrepo kernel-ml(>=4.9)，见仓库 fleet_kernel_upgrade.sh
+#     （走阿里云云助手批量下发，重启后 99-ipes-bbr.conf 自动生效）。
+# ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 TOKEN="${NODE_ACTIVATE_TOKEN:-}"

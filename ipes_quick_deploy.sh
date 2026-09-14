@@ -21,6 +21,7 @@
 #   bash ipes_quick_deploy.sh --dirs 9 --isp 1 --data-disk /dev/vdb      # 挂新数据盘做缓存
 #   bash ipes_quick_deploy.sh --force      # 重跑清旧容器（丢缓存，谨慎）
 #   bash ipes_quick_deploy.sh --notrack    # 纯 PCDN 节点: 关 conntrack 跟踪(IPES 高 PPS 不再被表满限流)
+#   bash ipes_quick_deploy.sh --tune-only  # 仅应用 OS 调优(sysctl/BBR/RPS/NOTRACK)，不动容器/磁盘/绑定
 # =============================================================================
 set -uo pipefail
 
@@ -32,6 +33,7 @@ HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-https://zyy-go.oss-cn-beijing.aliyuncs.com
 DATA_DISK="${DATA_DISK:-}"        # 例如 /dev/vdb：全新空数据盘，格式化 XFS 挂 /data 专做缓存
 FORCE=0
 NOTRACK=0
+TUNE_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --data-disk) DATA_DISK="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --notrack) NOTRACK=1; shift ;;
+    --tune-only) TUNE_ONLY=1; shift ;;
     --skip-health) HEALTH_CHECK_URL=""; shift ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
@@ -198,6 +201,15 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 systemctl enable --now docker 2>/dev/null || true
 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || { echo "[错误] Docker 未就绪"; exit 1; }
+
+# ---------- tune-only: 仅应用 OS 调优，不动数据盘/容器/绑定 ----------
+if [ "$TUNE_ONLY" -eq 1 ]; then
+  echo "[tune-only] 仅应用 OS 调优（sysctl/BBR/RPS/NOTRACK），跳过部署"
+  tune_system
+  bypass_conntrack
+  echo "[tune-only] 完成。验证: sysctl net.ipv4.tcp_congestion_control ; iptables -t raw -L -n"
+  exit 0
+fi
 
 setup_data_disk
 tune_system

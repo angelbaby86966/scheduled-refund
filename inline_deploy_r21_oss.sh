@@ -60,7 +60,7 @@ fi
 #   独立脚本 ipes_tune.sh：磁盘队列 / 挂载参数 / 内核 sysctl / 网卡 / nofile
 #   幂等、可重复执行、装机后由 ipes-tune.service 开机自动重放
 #   主脚本 r21 内嵌同一份调优作兜底（这里先跑一遍，后面所有步骤都受益）
-TUNE_SHA="ef87c4aef69794b5141c0ed62cc8555bc7f88e90"
+TUNE_SHA="c8d50974658acc3ba261fffe66b4c33207c6fa59"
 # ★防"静默下发旧版"★：ghproxy.net 对上游 raw 有 CDN 缓存（?t= 只绕它自己那层），
 #   实测曾取回 28428B 旧版而不是 29404B 新版。故除"含 IPES TUNE"外，
 #   还强制要求版本指纹相等；不相等即判过期 → 换下一个源（jsdelivr 按 commit SHA 取，不可变）。
@@ -69,30 +69,60 @@ TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/sche
 TUNE2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
 TUNE_OK=0
 for u in "$TUNE1" "$TUNE2"; do
-  if curl -fsSL -m 30 "$u" -o /root/ipes_tune.sh 2>/dev/null \
-     && grep -q "IPES TUNE" /root/ipes_tune.sh \
-     && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/ipes_tune.sh; then
+  # 先下到临时文件：否则源不可达时 /root/ipes_tune.sh 会残留上一版，
+  # 而后面 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记 → 会复用这个过期副本
+  rm -f /root/.tune.try
+  if curl -fsSL -m 30 "$u" -o /root/.tune.try 2>/dev/null \
+     && grep -q "IPES TUNE" /root/.tune.try \
+     && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.tune.try; then
+    mv -f /root/.tune.try /root/ipes_tune.sh
     TUNE_OK=1; break
   fi
-  if grep -q "IPES TUNE" /root/ipes_tune.sh 2>/dev/null; then
+  if [ -s /root/.tune.try ] && grep -q "IPES TUNE" /root/.tune.try; then
     echo "[tune][WARN] 该源返回的 tune 版本过期（缺 TUNE_REV=$TUNE_REV_EXPECT，多为 CDN 缓存），换下一个源"
   fi
+  rm -f /root/.tune.try
 done
 if [ "$TUNE_OK" = "1" ]; then
-  echo "[tune] $(grep -o 'TUNE_VER=\"[^\"]*\"' /root/ipes_tune.sh | head -1) applying ..."
+  echo "[tune] $(grep -o 'TUNE_REV=\"[^\"]*\"' /root/ipes_tune.sh | head -1) $(grep -o 'TUNE_VER=\"[^\"]*\"' /root/ipes_tune.sh | head -1) applying ..."
   bash /root/ipes_tune.sh 2>&1 | tail -30
 else
-  echo "[tune][WARN] 调优脚本下载失败；主脚本 r21 内嵌同一份，部署时会补做"
+  echo "[tune][WARN] 调优脚本下载失败（或两个源的内容都过期）；主脚本 r21 内嵌同一份，部署时会补做"
+  # ★关键★：把过期副本删掉。否则下方 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记，
+  # 会把这个旧版 cp 过去 —— 等于缓存过期照样上线。
+  # 删掉后闸门回落到"内嵌正文"，而内嵌正文随 full_deploy 一起下发（下方 SRC 循环已校验其世代）。
+  if [ -f /root/ipes_tune.sh ] && ! grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/ipes_tune.sh; then
+    rm -f /root/ipes_tune.sh
+    echo "[tune][WARN] 已移除过期副本 /root/ipes_tune.sh，避免被版本一致性闸门复用"
+  fi
 fi
 
 # ============ B) 完整部署（r21：真实 nodeId 绑定 + 内嵌调优兜底）============
-SRC_SHA="4082428fe8df7c9fcbf5ac524d6af2249eafd871"
+SRC_SHA="62f573d138451499b455b7f5f8a013f2469e6c20"
 SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
 SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${SRC_SHA}/ipes_deploy_full.sh"
 for u in "$SRC1" "$SRC2"; do
-  curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break
+  # 同样要求"含当前世代的内嵌 tune"：full_deploy 里内嵌的正是 tune 全文，含 TUNE_REV 指纹。
+  # 这样即使 ghproxy 命中旧缓存，也会被识别并换源（jsdelivr 按 commit SHA 取，不可变）。
+  rm -f /root/.full.try
+  if curl -fsSL -m 60 "$u" -o /root/.full.try 2>/dev/null \
+     && grep -q singleIpRadio /root/.full.try \
+     && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.full.try; then
+    mv -f /root/.full.try /root/ipes_full.sh
+    break
+  fi
+  if [ -s /root/.full.try ] && grep -q singleIpRadio /root/.full.try; then
+    echo "[deploy][WARN] 该源返回的部署脚本世代过期（缺 TUNE_REV=$TUNE_REV_EXPECT），换下一个源"
+  fi
+  rm -f /root/.full.try
 done
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+# 两个源都拿不到正确世代的部署脚本时，宁可明确失败，也不要拿旧副本/空文件去做半套部署
+if [ ! -s /root/ipes_full.sh ]; then
+  echo "[deploy][ERROR] 两个源的部署脚本都不可用或已过期，已终止（请稍后重试或检查网络/镜像）"
+  exit 1
+fi
+echo "[deploy] 已取回部署脚本 $(wc -c < /root/ipes_full.sh)B（世代校验通过：含 TUNE_REV=$TUNE_REV_EXPECT）"
 export NODE_ACTIVATE_TOKEN="$JWT"
 nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null &
 DEPLOY_PID=$!

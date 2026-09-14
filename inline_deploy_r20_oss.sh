@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # IPES 一键部署 r20（OSS 短链版）
 # 用法：
-#   curl -fsSL https://zyy-go.oss-cn-beijing.aliyuncs.com/script/ipes/inline_deploy_r20.sh | bash -s -- \
+#   curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r20_oss.sh | bash -s -- \
 #     --ak 06d78b19bd0d9fc0aa300c6d \
 #     --sk 16d6c46443308e62bb51f22c074a90ed \
 #     --jwt eyJ... \
 #     --isp 电信 [--province 浙江 --city 杭州 --num-dirs 12 --usbw 200]
+# 未传 --province/--city 时，自动按本机公网 IP 识别；识别失败兜底为 浙江/杭州。
 set +e
 
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
@@ -33,6 +34,25 @@ if [[ -z "$AK" || -z "$SK" || -z "$JWT" ]]; then
   echo "[ERROR] 缺少 --ak / --sk / --jwt，必须提供"
   echo "示例：curl -fsSL ... | bash -s -- --ak <ak> --sk <sk> --jwt <jwt> --isp 电信"
   exit 1
+fi
+
+# 自动识别省份/城市（若未显式传入）
+get_location_info() {
+  local ip_info=$(curl -s myip.ipip.net 2>/dev/null)
+  if [ -n "$ip_info" ]; then
+    local p=$(echo "$ip_info" | awk -F ' ' '{print $4}' | tr -d ',')
+    local c=$(echo "$ip_info" | awk -F ' ' '{print $5}' | tr -d ',')
+    if [ -n "$p" ] && [ "$p" != "null" ] && [ "$p" != " " ]; then PROVINCE="$p"; fi
+    if [ -n "$c" ] && [ "$c" != "null" ] && [ "$c" != " " ]; then CITY="$c"; fi
+  fi
+  # 兜底：识别失败仍用浙江/杭州
+  [ -z "$PROVINCE" ] && PROVINCE="浙江"
+  [ -z "$CITY" ] && CITY="杭州"
+}
+if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
+  echo "[INFO] 未提供 --province/--city，尝试根据公网 IP 自动识别..."
+  get_location_info
+  echo "[INFO] 使用地理位置: $PROVINCE / $CITY"
 fi
 
 # ============ A) 系统调优 ============

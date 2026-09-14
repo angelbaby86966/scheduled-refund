@@ -28,7 +28,14 @@
 set -uo pipefail
 export LC_ALL=C
 
-PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"
+# ★2026-09-14 预热门户收敛★
+#   preheat 原先放在 angelbaby86966/ipes-scripts，与 r21 调优分属两个仓库、互不知情，
+#   导致它把 r21 的 99-ipes.conf 打回旧值。现修复版已收敛到本仓库（scheduled-refund）。
+#   下载后【强制校验共存修复指纹】'OWNER: ipes_tune'：不含则判定旧版、拒绝执行
+#   （宁可不跑预热，也不允许把 r21 调优打回旧值）。ipes-scripts 镜像不再作为来源。
+PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
+PREHEAT_URL2="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
+PREHEAT_FP='OWNER: ipes_tune'
 ALIGN_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_align_uplink.sh"
 
 echo
@@ -70,11 +77,31 @@ fi
 echo
 echo -e "\033[1;36m========== [1/2] 预热调优 + 健康检查安装 ==========\033[0m"
 PREHEAT_OK=0
-if curl -fsSL "$PREHEAT_URL" | bash; then
-  PREHEAT_OK=1
-  echo "[1/2] 预热脚本执行完成"
+_pf=/tmp/ipes_preheat_and_health.sh
+_ok=0
+for _u in "$PREHEAT_URL" "$PREHEAT_URL2"; do
+  if curl -fsSL --connect-timeout 15 --max-time 90 "$_u" -o "$_pf" 2>/dev/null \
+     && [ -s "$_pf" ] && head -1 "$_pf" | grep -q '^#!/bin/bash' && bash -n "$_pf" 2>/dev/null; then
+    if grep -q "$PREHEAT_FP" "$_pf"; then
+      _ok=1; echo "[1/2] 预热脚本已就绪（共存修复指纹校验通过）: $_u"; break
+    fi
+    echo -e "\033[1;33m[WARN] 下载到的预热脚本【缺少共存修复指纹】→ 判定为旧版，拒绝执行\033[0m"
+    echo -e "\033[1;33m       （旧版会把 r21 的 99-ipes.conf 打回旧值；宁可跳过，也不打回调优）\033[0m"
+    rm -f "$_pf"
+  else
+    echo -e "\033[1;33m[WARN] 拉取失败，换下一个源: $_u\033[0m"
+  fi
+done
+if [ "$_ok" = "1" ]; then
+  if bash "$_pf"; then
+    PREHEAT_OK=1
+    echo "[1/2] 预热脚本执行完成"
+  else
+    echo -e "\033[1;33m[WARN] 预热脚本返回非 0（多为个别内核键不支持，可忽略；健康拉起机制已尽力安装）\033[0m"
+  fi
 else
-  echo -e "\033[1;33m[WARN] 预热脚本返回非 0（多为个别内核键不支持，可忽略；健康拉起机制已尽力安装）\033[0m"
+  echo -e "\033[1;33m[WARN] 未能取得带共存修复的预热脚本 → 跳过预热；\033[0m"
+  echo -e "\033[1;33m       下一步的对齐脚本自带互不冲突的兜底调优，并会重放 r21 权威文件。\033[0m"
 fi
 
 echo

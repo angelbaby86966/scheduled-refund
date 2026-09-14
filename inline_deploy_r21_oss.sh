@@ -203,11 +203,40 @@ def node_info(it):
     """绑定信息在 nodeInfo（nominalInfo 恒为空，别读错字段）。"""
     return (it or {}).get('nodeInfo') or {}
 
+def get_business_tag_hostname(node_id):
+    """取后台「业务ID」= business_tags.hostName（该节点的第一条标签记录）。"""
+    try:
+        code, txt = admin_call(f"/api/businessTag/getBusinessTagList?page=1&pageSize=3&nodeId={node_id}")
+        if code != 200:
+            log(f"getBusinessTagList HTTP {code}: {txt[:160]}"); return None
+        lst = (json.loads(txt).get('data') or {}).get('list') or []
+        return (lst[0].get('hostName') or '') if lst else ''
+    except Exception as e:
+        log(f"getBusinessTagList 异常: {e}"); return None
+
 def is_bound(it):
-    """真正绑定成功的判据：业务客户=BUSINESS_ID 且 usbw=NODE_USBW 且 有绑定时间。"""
+    """绑定完成的判据（与 ipes_deploy_full.sh 的 set_node_attributes 校验口径一致）：
+        1) nodeInfo.vendorSuggestCustomers = 业务ID
+        2) nodeInfo.usbw                   = 上行带宽
+        3) nodeInfo.isp / resourceType     = 后台「业务线运营商 / 资源-上网方式」两列
+        4) 业务ID = business_tags.hostName = 容器真实 IPES SN（76hex），不是占位符/UUID
+    注意：**不要用 nodeInfo.ID / nodeInfo.boundTime 判定** —— 实测 updateEdgeNominalInfo
+    返回 code:0 成功也不会写这两个字段（平台侧行为），大量在跑节点 nodeInfo.ID 恒为 0。
+    """
     nfo = node_info(it)
     if not nfo: return False
-    return (nfo.get('vendorSuggestCustomers') == BUSINESS_ID) and (nfo.get('usbw') == NODE_USBW) and bool(nfo.get('boundTime'))
+    if nfo.get('vendorSuggestCustomers') != BUSINESS_ID: return False
+    if nfo.get('usbw') != NODE_USBW: return False
+    if nfo.get('isp') != ISP: return False
+    if str(nfo.get('resourceType')) != str(NODE_RESOURCE_TYPE): return False
+    # 业务标签校验（拿不到 SN 或拿不到标签时视为通过，避免误报）
+    sn = get_ipes_sn()
+    if sn:
+        hn = get_business_tag_hostname((it or {}).get('nodeID') or '')
+        if hn is not None and hn != sn:
+            log(f"  业务ID 不符: business_tags.hostName={hn[:26]}... != IPES SN {sn[:26]}...")
+            return False
+    return True
 
 def do_bind(node_id):
     log(f"为活跃节点 {node_id} 补绑业务 {BUSINESS_ID}")
@@ -261,16 +290,20 @@ def main():
         if it: break
         log(f"等待节点出现在后台... ({i+1}/48)"); time.sleep(10)
     if not it: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
-    nfo = node_info(it)
-    log(f"找到节点: {it.get('nodeID')} stage={it.get('stage')} vendor={nfo.get('vendorSuggestCustomers')} usbw={nfo.get('usbw')} boundTime={nfo.get('boundTime')} ID={nfo.get('ID')}")
+    def describe(it):
+        n = node_info(it)
+        return (f"nodeID={it.get('nodeID')} stage={it.get('stage')} status={it.get('status')} "
+                f"业务={n.get('vendorSuggestCustomers')} usbw={n.get('usbw')} isp={n.get('isp')} "
+                f"resourceType={n.get('resourceType')}（nodeInfo.ID={n.get('ID')} 仅供参考，非绑定判据）")
+
+    log("找到节点: " + describe(it))
     if is_bound(it): log("[OK] 已绑定，无需修复"); sys.exit(0)
     do_bind(it.get('nodeID'))
     time.sleep(2)
     it2 = locate()
     if is_bound(it2): log("[OK] 修复成功"); sys.exit(0)
     else:
-        n2 = node_info(it2)
-        log(f"[ERROR] 修复后仍未达标 vendor={n2.get('vendorSuggestCustomers')} usbw={n2.get('usbw')} boundTime={n2.get('boundTime')}")
+        log("[ERROR] 修复后仍未达标 —— " + describe(it2))
         sys.exit(1)
 
 if __name__ == '__main__':

@@ -17,12 +17,23 @@
 
 ## 🚀 最快路径：短链一键（调优 + 部署）
 
-> ### ⚠️ 复制命令时**千万不要带尖括号 `<>`**
-> `<xxx>` 在 shell 里是**输入重定向**，不是占位符。写成 `--ak <06d78b19...>` 会直接报
-> `06d78b19...: No such file or directory` + `curl: (23) Failed writing body`，脚本**一行都不会执行**。
-> 正确写法就是**光秃秃的值**：`--ak 06d78b19...`。本页占位符一律用中文，不再用 `<>`。
+> ### ⚠️ 两个符号会把命令搞坏：`<>` 和 `$`（都踩过了）
+>
+> **① 尖括号 `<>` 是输入重定向，不是占位符**
+> `--ak <06d78b19...>` 会报 `06d78b19...: No such file or directory` + `curl: (23) Failed writing body`，
+> 脚本**一行都不会执行**（bash 的 stdin 被重定向到不存在的文件）。
+>
+> **② 已经填了值的参数前面，绝对不能再加 `$`**
+> `"$06d78b19..."` → `$0` 展开成**脚本自身路径**并拼到前面 → `/<路径>/t-xxx.sh6d78b19...`
+> `"$16d6c464..."` → `$1` 展开为空 → 值变成 `6d6c464...`（**开头的 `1` 没了**）
+> `"$eyJhbGci..."` → `$eyJhbGci...J9` 被当变量名（未定义）→ 值变成 `.eyJVVUlEIjoi...`（**开头的 `e` 没了**）
+>
+> 这三个值都非空，脚本的「缺参检查」**拦不住**，会一路跑到渠道注册才失败。判别口诀：
+> **`$` 只能出现在「变量名」前面（`"$AK"`），一旦你已经把真值写进去了，`$` 必须删掉。**
+>
+> 正确写法就是**光秃秃的值**（外面包一层双引号是允许且推荐的）：`--ak "06d78b19..."`。
 
-**第一步：填值**（把下面三行的中文换成真实值，**等号右边不要加引号以外的任何符号**）
+**第一步：填值**（只替换等号右边的中文，**不要留 `$`、不要留 `<>`**）
 
 ```bash
 AK=你的渠道AK
@@ -30,13 +41,13 @@ SK=你的渠道SK
 JWT=你的JWT
 ```
 
-**第二步：一条命令跑完**（直接复用上面的变量，不用手工替换，就不会再误带尖括号）
+**第二步：一条命令跑完**（用变量最保险：这里的 `$AK/$SK/$JWT` 是**必须保留**的，因为它们是变量名）
 
 ```bash
 curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh?t=$(date +%s)" | bash -s -- --ak "$AK" --sk "$SK" --jwt "$JWT" --isp 电信
 ```
 
-<details><summary>等价的单行版（把「你的渠道AK」等中文整段替换成值，替换后不应残留任何尖括号）</summary>
+<details><summary>等价的单行版（把「你的渠道AK」等中文整段替换成值；替换后**整条命令里除了 `$(date +%s)` 之外不应再出现任何 `$`，也不应有 `<>`**）</summary>
 
 ```bash
 curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh?t=$(date +%s)" | bash -s -- --ak 你的渠道AK --sk 你的渠道SK --jwt 你的JWT --isp 电信

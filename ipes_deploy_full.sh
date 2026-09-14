@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-13-r18"
+SCRIPT_VERSION="v2026-09-14-r19"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -773,7 +773,22 @@ admin_api_request() {
     log_message "请求: $method $url"
     log_message "请求体: $body"
 
-    # 方式一：Bearer token（若设置 ADMIN_TOKEN 则优先）
+    # 方式零（最可靠，优先）：X-Token JWT（即 NODE_ACTIVATE_TOKEN）。
+    #   后台 admin.zhouyi.top 真实鉴权头就是 x-token（gin-vue-admin 框架），
+    #   该 JWT 既能鉴权 stateflow 也能鉴权 updateEdgeNominalInfo。
+    #   脚本内置的 HMAC(appId/ak/sk) 凭据已被平台轮换（读/写均返回 code 7），
+    #   所以只要设置了 NODE_ACTIVATE_TOKEN 就优先走 X-Token。
+    if [ -n "$NODE_ACTIVATE_TOKEN" ]; then
+        curl -k -s -w "\n%{http_code}" --location --request "$method" "$url" \
+            --header "X-Token: $NODE_ACTIVATE_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body" \
+            --connect-timeout $CURL_CONNECT_TIMEOUT \
+            --max-time $CURL_MAX_TIMEOUT 2>&1
+        return
+    fi
+
+    # 方式一：Bearer token（若设置 ADMIN_TOKEN 则用）
     if [ -n "$ADMIN_TOKEN" ]; then
         curl -k -s -w "\n%{http_code}" --location --request "$method" "$url" \
             --header "Authorization: Bearer $ADMIN_TOKEN" \
@@ -784,7 +799,7 @@ admin_api_request() {
         return
     fi
 
-    # 方式二（默认）：appId + 时间戳 + HMAC-SHA256 签名（test.sh 真实方案）
+    # 方式二（兜底，已失效）：appId + 时间戳 + HMAC-SHA256 签名（test.sh 真实方案）
     local appid="$ADMIN_APPID"
     local ak="$ADMIN_AK"
     local sk="$ADMIN_SK"
@@ -837,8 +852,8 @@ submit_business() {
     # ⚠️ 必须带上 isp / natType / resourceType / dialType / province / city ——
     #    平台的 nodeInfo（后台列表「业务线运营商 / 资源-上网方式」两列）就是靠这些字段生成的；
     #    只传 usbw/bwNum 会让那两列空白（显示「其他」）。
-    #    vendorSuggestCustomers=41 即业务 41（q2）；transMode=1 直传。
-    local request_body="{\"nodeId\":\"$node\",\"province\":\"$province\",\"city\":\"$city\",\"isp\":\"$ISP\",\"natType\":\"$NODE_NAT_TYPE\",\"resourceType\":\"$NODE_RESOURCE_TYPE\",\"dialType\":\"$NODE_DIAL_TYPE\",\"singleIpRadio\":$NODE_SINGLE_IP_RADIO,\"usbw\":$NODE_USBW,\"bwNum\":$NODE_BW_NUM,\"transMode\":1,\"transModeStr\":\"cm:0,ct:0,cu:0\",\"transProvRate\":0,\"isTransProv\":false,\"isIPv6Schedule\":false,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"vendorSuggestCustomers\":$BUSINESS_ID}"
+    #    vendorSuggestCustomers=41 即业务 41（q2）；transMode=0（与镜像克隆模块对齐）。
+    local request_body="{\"nodeId\":\"$node\",\"province\":\"$province\",\"city\":\"$city\",\"isp\":\"$ISP\",\"natType\":\"$NODE_NAT_TYPE\",\"resourceType\":\"$NODE_RESOURCE_TYPE\",\"dialType\":\"$NODE_DIAL_TYPE\",\"singleIpRadio\":$NODE_SINGLE_IP_RADIO,\"usbw\":$NODE_USBW,\"bwNum\":$NODE_BW_NUM,\"transMode\":0,\"transModeStr\":\"cm:0,ct:0,cu:0\",\"transProvRate\":0,\"isTransProv\":true,\"isIPv6Schedule\":false,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"vendorSuggestCustomers\":$BUSINESS_ID}"
 
     local response=$(admin_api_request POST "$ADMIN_NOMINAL_API" "$request_body")
     local http_code=$(echo "$response" | tail -n1)

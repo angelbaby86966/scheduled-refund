@@ -268,16 +268,22 @@ def do_bind(node_id):
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
-    node_id = get_local_node_id()
-    if node_id:
-        log(f"本机真实 nodeId: {node_id}")
-    else:
-        log("[WARN] 未读到本机 nodeId，将退化用公网 IP 反查")
+    # ★本机身份必须每轮 locate() 重读：重跑全量部署时 /etc/.mac、device_code 是在本脚本
+    #   启动之后才重新生成的。若在 main 里只读一次，node_id 恒为空 → 整个进程退化成
+    #   "公网 IP 全量反查" 慢路径（实测每轮 ~9 分钟全量分页 → 48 轮 = 小时级空转）。
+    _st = {"nid": None, "warned": False}
 
     def locate():
-        if node_id:
-            it = find_node_by_id(node_id)
-            if it: return it
+        nid = get_local_node_id()
+        if nid:
+            if nid != _st["nid"]:
+                _st["nid"] = nid
+                log(f"本机真实 nodeId: {nid}")
+            # 精确查询：命中即返回；未命中说明该身份还没在后台注册，直接进下一轮（1 次调用，秒级）
+            return find_node_by_id(nid)
+        if not _st["warned"]:
+            _st["warned"] = True
+            log("[WARN] 未读到本机 nodeId，暂用公网 IP 反查（一旦读到身份会自动改回精确查询）")
         pubip = get_public_ip()
         if pubip:
             log(f"（nodeID 未命中）本机公网 IP: {pubip}")

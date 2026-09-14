@@ -2,6 +2,15 @@
 # =============================================================================
 # IPES 一键对齐「跑量好的节点」 —— 全锥 NAT + 上行最大化
 # -----------------------------------------------------------------------------
+# 【2026-09-14 根治「两套调优打架」】
+#   r21 的 ipes_tune.sh 与本脚本的 NAT/兜底文件会写重叠的内核键（不同文件、相同键名），
+#   本脚本运行期 sysctl -p 会把 r21 刚调好的值打回旧值（实测 udp_rmem_min 32768→16384）。
+#   修复：以 r21 权威文件首部 "OWNER: ipes_tune" 归属标记判定，r21 已接管时本脚本
+#     ① 98-ipes-nat.conf 只写 r21 未管理的键（并在应用后重放 r21 文件，确保它最终胜出）；
+#     ② 兜底文件由 99-ipes-fallback.conf 改名 50-ipes-fallback.conf 并把 dirty 40/30 → 20/10；
+#     ③ /etc/security/limits.d/99-ipes.conf 不再覆盖（避免 1048576 被降级成 1000000）。
+#   未见该标记的机型行为与旧版一致（兼容单跑本脚本的路径）。
+# -----------------------------------------------------------------------------
 # 【为什么要这个脚本】同批阿里云 SWAS 克隆机跑量差异的实测归因：
 #   1) 云防火墙是「实例级」的，不随自定义镜像继承 —— 克隆机默认没放行入向 UDP，
 #      NAT 退化为 restricted；restricted 只能下行，fullcone 才能被 peer 主动连入供上行。
@@ -55,6 +64,32 @@ log(){  echo -e "\033[0;32m[$(ts | cut -d' ' -f2)] INFO\033[0m $*"; }
 warn(){ echo -e "\033[1;33m[$(ts | cut -d' ' -f2)] WARN\033[0m $*"; }
 err(){  echo -e "\033[0;31m[$(ts | cut -d' ' -f2)] ERROR\033[0m $*"; }
 head1(){ echo; echo -e "\033[1;36m===================== $* =====================\033[0m"; }
+
+# -----------------------------------------------------------------------------
+# ★与 r21 权威调优共存（2026-09-14 根治「两套调优打架」）★
+#   r21 的 ipes_tune.sh 写 /etc/sysctl.d/99-ipes.conf，并在首部打 "OWNER: ipes_tune" 归属标记。
+#   本脚本的 NAT 文件（98-ipes-nat.conf）排序在 99 之前 ⇒ 开机时会被 r21 覆盖；
+#   但下面的 sysctl -p 是【运行期立即生效】，若本脚本后跑就会把 r21 的新值短时打回旧值
+#   （实测：udp_rmem_min 32768→16384、rmem_max 等）。故 r21 已接管时只写它【未管理】的键。
+# -----------------------------------------------------------------------------
+R21_SYSCTL=/etc/sysctl.d/99-ipes.conf
+r21_owned(){
+  [ -f "$R21_SYSCTL" ] && grep -q 'OWNER: ipes_tune' "$R21_SYSCTL" 2>/dev/null
+}
+# 从 stdin 过滤出「未被 r21 管理」的键，用于生成互不冲突的补充文件
+filter_owned_by_r21(){
+  local line k keyfile=/tmp/align_r21_keys.txt
+  : > "$keyfile"
+  [ -f "$R21_SYSCTL" ] && sed -n 's/^[[:space:]]*\([A-Za-z0-9._-]*\)[[:space:]]*=.*/\1/p' "$R21_SYSCTL" >> "$keyfile"
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    k=${line%%=*}
+    k=$(printf '%s' "$k" | tr -d '[:space:]')
+    [ -n "$k" ] || continue
+    grep -qxF "$k" "$keyfile" 2>/dev/null && continue
+    printf '%s\n' "$line"
+  done
+}
 
 MODE="run"
 case "${1:-}" in
@@ -269,12 +304,24 @@ net.core.netdev_max_backlog = 100000
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 EOF
+  # —— r21 已接管时剔除同名键，避免运行期 sysctl -p 把它的新值打回旧值 ——
+  if r21_owned; then
+    {
+      echo "# PCDN 全锥 NAT / 上行最大化【只补不覆盖】（本文件由 ipes_align_uplink.sh 生成）"
+      echo "# 本机已有 r21 权威文件 $R21_SYSCTL，故此处只输出它未管理的键，同名键一律让位。"
+      filter_owned_by_r21 < /tmp/align_nat.raw
+    } > /etc/sysctl.d/98-ipes-nat.conf
+    log "r21 已接管内核调优 → NAT 文件仅保留其未管理的键（$(grep -c '=' /etc/sysctl.d/98-ipes-nat.conf 2>/dev/null || echo 0) 项），不再把 r21 新值打回"
+  else
+    cp /tmp/align_nat.raw /etc/sysctl.d/98-ipes-nat.conf
+  fi
+  rm -f /tmp/align_nat.raw /tmp/align_r21_keys.txt
 
   modprobe nf_conntrack 2>/dev/null || true
   local ml=/etc/modules-load.d/ipes-nat.conf
   echo "nf_conntrack" > "$ml" 2>/dev/null || true
 
-  if ! sysctl -p /etc/sysctl.d/98-ipes-nat.conf 2>/tmp/align_nat.err; then
+  if [ -s /etc/sysctl.d/98-ipes-nat.conf ] && ! sysctl -p /etc/sysctl.d/98-ipes-nat.conf 2>/tmp/align_nat.err; then
     warn "部分 NAT 键未生效（内核不支持，已忽略）: $(grep -icE 'unknown|invalid|cannot' /tmp/align_nat.err 2>/dev/null || echo 0) 个"
   fi
   rm -f /tmp/align_nat.err
@@ -348,9 +395,16 @@ run_preheat(){
     log "预热调优已完成（详见 /var/log/batch_preheat_*.log）"
   else
     warn "所有源都拉不到预热脚本，改用内联兜底调优"
-    cat > /etc/sysctl.d/99-ipes-fallback.conf <<'EOF'
+    # ★2026-09-14 修复★
+    #   ① 原文件名 99-ipes-fallback.conf 属 99 族，与 r21 的 99-ipes.conf 同段竞争，
+    #      开机扫描顺序不可控 → 改名 50-ipes-fallback.conf（明确排在 99 之前，r21 恒胜）；
+    #   ② 原文里的 dirty 40/30 是【旧基线】，与 r21 的 20/10 冲突 → 对齐为 20/10；
+    #   ③ r21 已接管时再整体剔除同名键，彻底不再把它的新值打回。
+    cat > /tmp/align_fallback.raw <<'EOF'
 net.core.rmem_max = 33554432
 net.core.wmem_max = 33554432
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
 net.core.netdev_max_backlog = 100000
 net.core.somaxconn = 65535
 net.ipv4.tcp_rmem = 4096 163840 33554432
@@ -366,18 +420,34 @@ net.ipv4.ip_local_port_range = 1024 65535
 fs.file-max = 4000000
 kernel.pid_max = 4194304
 vm.swappiness = 0
-vm.dirty_ratio = 40
-vm.dirty_background_ratio = 30
+vm.dirty_ratio = 20
+vm.dirty_background_ratio = 10
 vm.vfs_cache_pressure = 30
 vm.overcommit_memory = 1
 EOF
-    sysctl -p /etc/sysctl.d/99-ipes-fallback.conf >/dev/null 2>&1 || true
-    cat > /etc/security/limits.d/99-ipes.conf <<'EOF'
-* soft nofile 1000000
-* hard nofile 1000000
-* soft nproc 1000000
-* hard nproc 1000000
-EOF
+    if r21_owned; then
+      {
+        echo "# 内联兜底调优【只补不覆盖】（拉取预热脚本失败时的降级路径）"
+        echo "# 本机已有 r21 权威文件 $R21_SYSCTL，故此处只输出它未管理的键。"
+        filter_owned_by_r21 < /tmp/align_fallback.raw
+      } > /etc/sysctl.d/50-ipes-fallback.conf
+      log "r21 已接管 → 兜底写入 50-ipes-fallback.conf（仅 $(grep -c '=' /etc/sysctl.d/50-ipes-fallback.conf 2>/dev/null || echo 0) 项 r21 未管理的键）"
+    else
+      cp /tmp/align_fallback.raw /etc/sysctl.d/50-ipes-fallback.conf
+    fi
+    # 清掉历史遗留的 99 族兜底文件（旧版会压过 r21 的新值）
+    rm -f /etc/sysctl.d/99-ipes-fallback.conf /tmp/align_fallback.raw /tmp/align_r21_keys.txt 2>/dev/null || true
+    [ -s /etc/sysctl.d/50-ipes-fallback.conf ] && sysctl -e -p /etc/sysctl.d/50-ipes-fallback.conf >/dev/null 2>&1 || true
+    if r21_owned && [ -f "$R21_SYSCTL" ]; then
+      sysctl -e -p "$R21_SYSCTL" >/dev/null 2>&1 || true
+      log "已重放 r21 权威文件 $R21_SYSCTL ⇒ 其新值为最终值"
+    fi
+    # ★同类冲突★ 句柄文件与 r21 同路径，r21 已写则不覆盖（避免 1048576 被降级成 1000000）
+    if r21_owned || grep -q 'IPES PCDN: 高并发连接' /etc/security/limits.d/99-ipes.conf 2>/dev/null; then
+      log "r21 已写 /etc/security/limits.d/99-ipes.conf，兜底不再覆盖以免降级"
+    else
+      printf '%s\n' '* soft nofile 1000000' '* hard nofile 1000000' '* soft nproc 1000000' '* hard nproc 1000000' > /etc/security/limits.d/99-ipes.conf
+    fi
     log "已应用内联兜底调优（建议网络恢复后重跑本脚本以获得完整预热优化）"
   fi
 }

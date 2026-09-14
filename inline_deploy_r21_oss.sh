@@ -112,12 +112,28 @@ CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode 
 def log(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def get_ipes_sn():
-    """读容器内真正的 IPES 业务 SN（76 位 hex），不要用后台 UUID sn。"""
+    """读容器内真正的 IPES 业务 SN（76 位 hex），用于 inService 的 hostname 字段。"""
     for path in ['/app/ipes/bin/ipes_sn', '/opt/soft/disk/IPES_SN']:
         try:
             out = subprocess.check_output(['docker','exec','ipes','cat',path], stderr=subprocess.DEVNULL, timeout=10)
             sn = out.decode('utf-8','replace').strip()
             if sn: return sn
+        except Exception: continue
+    return ''
+
+def get_local_node_id():
+    """读本机真实 nodeId（32 位 hex）：优先 /etc/.mac，其次 edge_zycloud/device_code。"""
+    for path in ['/etc/.mac', '/usr/local/edge_zycloud/device_code', '/opt/soft/disk/device_code']:
+        try:
+            with open(path, 'r', errors='replace') as f:
+                m = re.search(r'\b([0-9a-fA-F]{32})\b', f.read())
+                if m: return m.group(1).lower()
+        except Exception: continue
+    for path in ['/etc/.mac', '/usr/local/edge_zycloud/device_code']:
+        try:
+            out = subprocess.check_output(['docker','exec','ipes','cat',path], stderr=subprocess.DEVNULL, timeout=10)
+            m = re.search(r'\b([0-9a-fA-F]{32})\b', out.decode('utf-8','replace'))
+            if m: return m.group(1).lower()
         except Exception: continue
     return ''
 
@@ -142,7 +158,29 @@ def get_public_ip():
         except Exception: continue
     return None
 
+def node_is_ghost(it):
+    """带 outLineTime 的记录=已下线/幽灵记录（同 IP 多机时最容易误绑），跳过。"""
+    return bool((it or {}).get('outLineTime'))
+
+def find_node_by_id(node_id):
+    """按 nodeID 精确查询：后台支持 ?nodeID=<32hex> 过滤，服务端直接命中、快且唯一。"""
+    try:
+        code, txt = admin_call(f"/api/edgeNode/getEdgeNodeList?page=1&pageSize=20&nodeID={node_id}")
+        if code != 200:
+            log(f"getEdgeNodeList(nodeID) HTTP {code}: {txt[:200]}"); return None
+        d = json.loads(txt)
+        arr = (d.get('data') or {}).get('list', [])
+        hit = [it for it in arr if (it.get('nodeID') or '').lower() == node_id.lower()]
+        live = [it for it in hit if not node_is_ghost(it)]
+        pool = live or hit
+        if not pool: return None
+        pool.sort(key=lambda x: x.get('nodeUpdateTime') or x.get('UpdatedAt') or '', reverse=True)
+        return pool[0]
+    except Exception as e:
+        log(f"find_node_by_id 异常: {e}"); return None
+
 def find_node_by_ip(pubip, max_pages=80):
+    """兜底：按公网 IP 反查（翻页较慢），且必须过滤 outLineTime 幽灵记录。"""
     candidates = []
     for page in range(1, max_pages + 1):
         code, txt = admin_call(f"/api/edgeNode/getEdgeNodeList?page={page}&pageSize=200")
@@ -152,7 +190,7 @@ def find_node_by_ip(pubip, max_pages=80):
         arr = (d.get('data') or {}).get('list', [])
         total = (d.get('data') or {}).get('total', 0)
         for it in arr:
-            if it.get('publicIP') == pubip:
+            if it.get('publicIP') == pubip and not node_is_ghost(it):
                 candidates.append(it)
         if page * 200 >= total: break
         time.sleep(0.15)
@@ -161,17 +199,24 @@ def find_node_by_ip(pubip, max_pages=80):
     candidates.sort(key=lambda x: (stage_rank.get(x.get('stage'), 0), x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
     return candidates[0]
 
-def is_bound(ni):
-    if not ni: return False
-    if ni.get('stage') != 'inService': return False
-    info = ni.get('nominalInfo') or {}
-    return info.get('vendorSuggestCustomers') == BUSINESS_ID and info.get('usbw') == NODE_USBW
+def node_info(it):
+    """绑定信息在 nodeInfo（nominalInfo 恒为空，别读错字段）。"""
+    return (it or {}).get('nodeInfo') or {}
+
+def is_bound(it):
+    """真正绑定成功的判据：业务客户=BUSINESS_ID 且 usbw=NODE_USBW 且 有绑定时间。"""
+    nfo = node_info(it)
+    if not nfo: return False
+    return (nfo.get('vendorSuggestCustomers') == BUSINESS_ID) and (nfo.get('usbw') == NODE_USBW) and bool(nfo.get('boundTime'))
 
 def do_bind(node_id):
     log(f"为活跃节点 {node_id} 补绑业务 {BUSINESS_ID}")
     # 业务 ID 必须取容器内 76hex IPES SN，否则后台会写 UUID 占位符
     biz_sn = get_ipes_sn()
-    log(f"  -> 容器 IPES SN: {biz_sn[:16]}...{biz_sn[-12:]} (len={len(biz_sn)})")
+    if biz_sn:
+        log(f"  -> 容器 IPES SN: {biz_sn[:16]}...{biz_sn[-12:]} (len={len(biz_sn)})")
+    else:
+        log("  -> [WARN] 未读到容器 IPES SN，inService 将不带 hostname")
     for stage in ['configured','configured']:
         code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": stage}, "POST")
         log(f"  -> {stage}: HTTP {code} {txt[:120]}")
@@ -188,34 +233,55 @@ def do_bind(node_id):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
-    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": biz_sn}, "POST")
+    sf = {"nodes": [node_id], "stage": "inService"}
+    if biz_sn: sf["hostname"] = biz_sn
+    code, txt = admin_call("/api/edgeNode/stateflow", sf, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
-    pubip = get_public_ip()
-    if not pubip: log("[ERROR] 无法获取公网 IP"); sys.exit(1)
-    log(f"本机公网 IP: {pubip}")
-    ni = None
+    node_id = get_local_node_id()
+    if node_id:
+        log(f"本机真实 nodeId: {node_id}")
+    else:
+        log("[WARN] 未读到本机 nodeId，将退化用公网 IP 反查")
+
+    def locate():
+        if node_id:
+            it = find_node_by_id(node_id)
+            if it: return it
+        pubip = get_public_ip()
+        if pubip:
+            log(f"（nodeID 未命中）本机公网 IP: {pubip}")
+            return find_node_by_ip(pubip)
+        return None
+
+    it = None
     for i in range(48):
-        ni = find_node_by_ip(pubip)
-        if ni: break
+        it = locate()
+        if it: break
         log(f"等待节点出现在后台... ({i+1}/48)"); time.sleep(10)
-    if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
-    log(f"找到节点: {ni.get('nodeID')} stage={ni.get('stage')} vendor={(ni.get('nominalInfo') or {}).get('vendorSuggestCustomers')} usbw={(ni.get('nominalInfo') or {}).get('usbw')}")
-    if is_bound(ni): log("[OK] 已绑定，无需修复"); sys.exit(0)
-    do_bind(ni.get('nodeID'))
+    if not it: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
+    nfo = node_info(it)
+    log(f"找到节点: {it.get('nodeID')} stage={it.get('stage')} vendor={nfo.get('vendorSuggestCustomers')} usbw={nfo.get('usbw')} boundTime={nfo.get('boundTime')} ID={nfo.get('ID')}")
+    if is_bound(it): log("[OK] 已绑定，无需修复"); sys.exit(0)
+    do_bind(it.get('nodeID'))
     time.sleep(2)
-    ni = find_node_by_ip(pubip)
-    if is_bound(ni): log("[OK] 修复成功"); sys.exit(0)
-    else: log("[ERROR] 修复后仍未达标"); sys.exit(1)
+    it2 = locate()
+    if is_bound(it2): log("[OK] 修复成功"); sys.exit(0)
+    else:
+        n2 = node_info(it2)
+        log(f"[ERROR] 修复后仍未达标 vendor={n2.get('vendorSuggestCustomers')} usbw={n2.get('usbw')} boundTime={n2.get('boundTime')}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
 PY
 
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \
-       NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO \
-       NODE_USBW NODE_BW_NUM
+       NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO
+# 注意：Python 读的是 NODE_USBW / NODE_BW_NUM，而 shell 变量名是 USBW / BW_NUM，
+# 必须显式赋值导出，否则 --usbw/--bw-num 传入的值会被忽略、永远走默认 200/1。
+export NODE_USBW="$USBW" NODE_BW_NUM="$BW_NUM"
 
 nohup setsid python3 /root/ipes_repair_binding.py >/var/log/ipes_repair.log 2>&1 </dev/null &
 REPAIR_PID=$!

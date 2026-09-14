@@ -56,48 +56,84 @@ if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
 fi
 
 # ============ A) 系统调优 ============
+# 单一权威 sysctl 文件（合并 NAT/uplink + 性能项，避免多文件冲突导致重启后值漂移）
 cat > /etc/sysctl.d/99-ipes.conf <<'EOF'
-net.netfilter.nf_conntrack_max = 1048576
-net.netfilter.nf_conntrack_tcp_timeout_established = 600
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
-net.ipv4.ip_local_port_range = 1024 65535
+# ===== IPES PCDN 专属调优 (单一权威文件) =====
+# --- TCP/UDP 缓冲 ---
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.core.rmem_default = 16777216
 net.core.wmem_default = 16777216
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+# --- 连接队列/并发 ---
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 100000
+net.core.netdev_budget = 1000
+net.core.netdev_budget_usecs = 4000
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.rps_sock_flow_entries = 32768
+net.core.busy_poll = 50
+net.core.busy_read = 50
+# --- TCP 行为 ---
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_ecn = 0
-fs.file-max = 4000000
-fs.inotify.max_user_watches = 1048576
-vm.swappiness = 0
-vm.dirty_ratio = 20
-vm.dirty_background_ratio = 10
-vm.dirty_expire_centisecs = 1000
-vm.dirty_writeback_centisecs = 50
-vm.vfs_cache_pressure = 10
-vm.overcommit_memory = 1
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_available_congestion_control = bbr cubic reno
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_notsent_lowat = 16384
-net.core.default_qdisc = fq
-net.core.netdev_budget = 1000
-net.core.rps_sock_flow_entries = 32768
-net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_ecn = 0
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_max_tw_buckets = 1048576
+net.ipv4.tcp_max_orphans = 65536
+net.ipv4.tcp_orphan_retries = 1
+net.ipv4.tcp_retries2 = 10
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_mem = 36134 72268 144537
+net.ipv4.tcp_congestion_control = cubic
+# --- 端口/路由/邻居表 ---
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.route.max_size = 2097152
 net.ipv4.neigh.default.gc_thresh1 = 4096
 net.ipv4.neigh.default.gc_thresh2 = 16384
 net.ipv4.neigh.default.gc_thresh3 = 65536
-net.ipv4.route.max_size = 2097152
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+# --- conntrack ---
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 1200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_udp_timeout = 300
+net.netfilter.nf_conntrack_udp_timeout_stream = 600
+net.netfilter.nf_conntrack_generic_timeout = 600
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 60
+# --- qdisc ---
+net.core.default_qdisc = fq
+# --- 文件/进程句柄 ---
+fs.file-max = 4000000
+fs.aio-max-nr = 1048576
+fs.inotify.max_user_watches = 1048576
+kernel.pid_max = 4194304
+# --- 内存/脏页 ---
+vm.swappiness = 0
+vm.overcommit_memory = 1
+vm.vfs_cache_pressure = 10
+vm.dirty_ratio = 40
+vm.dirty_background_ratio = 30
+vm.dirty_expire_centisecs = 1000
+vm.dirty_writeback_centisecs = 50
+vm.zone_reclaim_mode = 0
+vm.min_free_kbytes = 65536
 EOF
+rm -f /etc/sysctl.d/98-ipes-nat.conf /etc/sysctl.d/99-ipes-perf.conf 2>/dev/null
 modprobe nf_conntrack 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf
 sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
@@ -115,7 +151,8 @@ done
 # 开机自启: 重放磁盘+队列调优(避免重启回到默认)
 cat > /usr/local/bin/ipes-tune.sh <<'EOF2'
 #!/bin/bash
-for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd*; do
+# IPES 磁盘/队列/RPS 调优 - 每次开机重放，避免重启回默认
+for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
   [ -d "$d" ] || continue
   echo 0 > "$d/queue/rotational" 2>/dev/null
   echo none > "$d/queue/scheduler" 2>/dev/null
@@ -123,8 +160,19 @@ for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd*; do
   echo 1024 > "$d/queue/nr_requests" 2>/dev/null
   echo 2 > "$d/queue/nomerges" 2>/dev/null
 done
-nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-[ -n "$nic" ] && tc qdisc replace dev "$nic" root fq 2>/dev/null
+# 拥塞控制：能开 BBR 就开，CentOS7 3.10 内核无 tcp_bbr 则回落 cubic
+sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
+# 所有业务网卡：fq 队列(pacing) + RPS 收包绑全核(单队列 virtio 必做，否则重启丢)
+ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 )))
+for dev in $(ls /sys/class/net/ 2>/dev/null); do
+  case "$dev" in lo|docker*|veth*|br-*|cni*|flannel*|virbr*) continue;; esac
+  tc qdisc replace dev "$dev" root fq 2>/dev/null || true
+  for q in /sys/class/net/$dev/queues/rx-*; do
+    [ -d "$q" ] || continue
+    echo "$mask" > "$q/rps_cpus" 2>/dev/null
+    echo 4096 > "$q/rps_flow_cnt" 2>/dev/null
+  done
+done
 EOF2
 chmod +x /usr/local/bin/ipes-tune.sh
 cat > /etc/systemd/system/ipes-tune.service <<'EOF2'
@@ -293,3 +341,49 @@ echo "已后台启动绑定自修复 PID=$REPAIR_PID"
 echo ""
 echo "部署日志：  tail -f /var/log/ipes_nohup.log"
 echo "修复日志：  tail -f /var/log/ipes_repair.log"
+
+# ============ D) 部署后容器调优 + 健康看门狗（后台等容器起来再应用） ============
+cat > /root/ipes_postopt.sh <<'EOF3'
+#!/bin/bash
+# 等 ipes 容器起来（最多 5 分钟）
+for i in $(seq 1 60); do
+  docker inspect ipes >/dev/null 2>&1 && break
+  sleep 5
+done
+# 容器 I/O/CPU 优先级（live 生效，不重建容器、不动缓存）
+docker update --blkio-weight 1000 --cpu-shares 1024 ipes 2>/dev/null
+# 健康看门狗：容器挂了自动拉起 + /data 超 85% 告警
+cat > /usr/local/bin/ipes-health.sh <<'HEOF'
+#!/bin/bash
+running=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)
+if [ "$running" != "true" ]; then
+  logger -t ipes-health "ipes not running -> restart"
+  docker start ipes 2>/dev/null || { systemctl restart docker >/dev/null 2>&1; docker start ipes 2>/dev/null; }
+fi
+use=$(df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+[ -n "$use" ] && [ "$use" -ge 85 ] && logger -t ipes-health "WARN /data usage ${use}% >= 85%"
+HEOF
+chmod +x /usr/local/bin/ipes-health.sh
+cat > /etc/systemd/system/ipes-health.service <<'HEOF'
+[Unit]
+Description=IPES health & disk watchdog
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ipes-health.sh
+HEOF
+cat > /etc/systemd/system/ipes-health.timer <<'HEOF'
+[Unit]
+Description=Run IPES health watchdog every 2 min
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
+HEOF
+systemctl daemon-reload 2>/dev/null
+systemctl enable --now ipes-health.timer 2>/dev/null
+echo "[postopt] blkio/cpu-priority + health watchdog applied at $(date)"
+EOF3
+chmod +x /root/ipes_postopt.sh
+nohup setsid bash /root/ipes_postopt.sh >/var/log/ipes_postopt.log 2>&1 </dev/null &
+echo "已后台启动容器调优/看门狗 PID=$!"

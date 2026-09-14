@@ -60,7 +60,7 @@ fi
 #   独立脚本 ipes_tune.sh：磁盘队列 / 挂载参数 / 内核 sysctl / 网卡 / nofile
 #   幂等、可重复执行、装机后由 ipes-tune.service 开机自动重放
 #   主脚本 r21 内嵌同一份调优作兜底（这里先跑一遍，后面所有步骤都受益）
-TUNE_SHA="4082428fe8df7c9fcbf5ac524d6af2249eafd871"
+TUNE_SHA="98ca67875e38b965120526a4bdfdb9d2d4611100"
 TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
 TUNE2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
 TUNE_OK=0

@@ -60,7 +60,7 @@ fi
 #   独立脚本 ipes_tune.sh：磁盘队列 / 挂载参数 / 内核 sysctl / 网卡 / nofile
 #   幂等、可重复执行、装机后由 ipes-tune.service 开机自动重放
 #   主脚本 r21 内嵌同一份调优作兜底（这里先跑一遍，后面所有步骤都受益）
-TUNE_SHA="b5273491850289df3ac2ce476decedef7c68129d"
+TUNE_SHA="43f2f11a06a9d747bfbc48881a1bb080844a44a0"
 TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
 TUNE2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
 TUNE_OK=0
@@ -348,7 +348,14 @@ if [ "$running" != "true" ]; then
   docker start ipes 2>/dev/null || { systemctl restart docker >/dev/null 2>&1; docker start ipes 2>/dev/null; }
 fi
 use=$(df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
-[ -n "$use" ] && [ "$use" -ge 85 ] && logger -t ipes-health "WARN /data usage ${use}% >= 85%"
+if [ -n "$use" ] && [ "$use" -ge 85 ] 2>/dev/null; then
+  logger -t ipes-health "WARN /data usage ${use}% >= 85%"
+fi
+# ★必须显式 exit 0★：service 是 Type=oneshot，systemd 以【脚本退出码】判定成败。
+#   旧版末行写作 `[ -n "$use" ] && [ "$use" -ge 85 ] && logger ...`：
+#   磁盘用量低于 85%（即绝大多数健康机器）时整条 && 链返回 1 ⇒
+#   每 2 分钟被 systemd 记一次 "Failed to start IPES health & disk watchdog"。
+exit 0
 HEOF
 chmod +x /usr/local/bin/ipes-health.sh
 cat > /etc/systemd/system/ipes-health.service <<'HEOF'

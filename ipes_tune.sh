@@ -27,6 +27,11 @@ touch "$LOG" 2>/dev/null
 exec > >(tee -a "$LOG") 2>&1 || exec >>"$LOG" 2>&1
 
 TUNE_VER="v2026-09-14-r21"
+# ★版本指纹★：inline_deploy_r21_oss.sh 会强制校验这一行（TUNE_REV_EXPECT 必须与之相等）。
+#   原因：ghproxy.net 对上游 raw 有 CDN 缓存，?t= 只能绕过【它自己】那层，
+#         部署脚本曾因此静默下发到旧版 tune（实测 28428B 旧版 vs 29404B 新版）。
+#   ⇒ 每次改动 tune 必须同步抬高这个值，并让 push 脚本回写 inline 的 TUNE_REV_EXPECT。
+TUNE_REV="20260915a"
 NCPU=$(nproc 2>/dev/null || echo 1)
 echo ""
 echo "=============================================================="

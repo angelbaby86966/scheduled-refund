@@ -99,7 +99,7 @@ SRC1="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@4082428fe8df7c
 | 6 | **IPES 部署** | `ipes` 容器 |
 | 6.5 | 看门狗 | cron 每分钟防 master 掉线 |
 | 6.6 | `olmt.sh` | `--skip-olmt` 则跳过（本机不限速） |
-| 7 | **`ipes_onekey`** | **happy 拉满 9/9**、NAT/对齐/缓存/镜像重建 |
+| 7 | **`ipes_onekey`** | **happy 补齐到 `TARGET_HAPP`（默认 6）**、NAT/对齐/缓存/镜像重建 |
 | 8 | nload | 流量观测 |
 | 9 | **降级 → 业务41+节点属性 → 流转(带业务ID) → 校验** | 见下 |
 | 10 | SSH 安全收尾 | 禁 root 登录、清 root `.ssh`、改 root 密码 |

@@ -1,16 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# IPES 业务 41（q2）整体部署脚本 —— 绑定 + 部署 + happy 9/9 + 状态流转
+# IPES 业务 41（q2）整体部署脚本 —— 绑定 + 部署 + happy 6/6 + 状态流转
 # =============================================================================
 # 融合来源：
 #   1) zyy_init_max.sh       —— 官方 zycloud agent 安装、SSH/用户安全配置、设备注册
-#   2) ipes_onekey.sh        —— IPES 预热/对齐/拉满（happy 9/9）
+#   2) ipes_onekey.sh        —— IPES 预热/对齐/拉满（happy 6/6）
 #   3) ecache 部署脚本       —— Docker + IPES 容器初始化
 #
 # 用途：
 #   在云主机上一站式完成：
 #     系统初始化 → zycloud agent → SSH/用户安全 → 设备注册
-#     → Docker 安装 → IPES 部署 → 预热对齐拉满 happy 9/9
+#     → Docker 安装 → IPES 部署 → 预热对齐拉满 happy 6/6
 #     → 提交业务 41 → admin token 注入 → 从「待配置」流转到「服务中」。
 #
 # 用法：
@@ -26,7 +26,7 @@
 # 可选参数：
 #   --remark <备注>         设备注册备注，默认 "<isp>-<设备SN前8位>"
 #   --business <业务ID>     提交给平台的业务编号，默认 41（q2）
-#   --target-happ <N>       happy 进程数，默认 9
+#   --target-happ <N>       happy 进程数，默认 6
 #   --skip-onekey           跳过 ipes_onekey 预热对齐
 #   --skip-olmt             跳过 olmt.sh 限速（节点跑满不封顶时加）
 #   --help                  显示帮助
@@ -142,7 +142,7 @@ ISP=""
 NUM_DIRS=""
 REMARK=""
 BUSINESS_ID="41"
-TARGET_HAPP="9"
+TARGET_HAPP="6"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
 
@@ -165,7 +165,7 @@ show_help() {
   --num-dirs <数量>       云环境固定目录数量 (必需，如: 12)
   --remark <备注>         设备注册备注 (可选)
   --business <业务ID>     提交的业务编号 (默认: 41)
-  --target-happ <N>       happy 进程数 (默认: 9)
+  --target-happ <N>       happy 进程数 (默认: 6)
   --skip-onekey           跳过 ipes_onekey 预热对齐
   --skip-olmt             跳过 olmt.sh 限速（希望节点跑满不封顶时加）
   --node-token <token>    节点激活 token（待配置→服务中）

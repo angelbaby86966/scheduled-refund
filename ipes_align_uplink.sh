@@ -35,7 +35,7 @@
 #   curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_align_uplink.sh | bash -s -- --check
 #
 #   # 可选环境变量
-#   #   TARGET_HAPP=9       happ 实例数对齐目标（默认 9；当前 >= 目标则不动，否则默认补齐到 9）
+#   #   TARGET_HAPP=6       happ 实例数对齐目标（默认 6；当前 >= 目标则不动，否则默认补齐到 6）
 #   #   TARGET_TAG=1.3.0    IPES 镜像 tag 对齐目标（默认 1.3.0）
 #   #   ALIGN_HAPP=0        设为 0 可跳过 happ 结构对齐（默认 1=自动补齐 happ 到 TARGET_HAPP）
 #   #   FORCE_CLEAR_TC=1    检测到出向硬限速时真的清掉（默认只报告）
@@ -62,7 +62,7 @@ case "${1:-}" in
   --help|-h) [ -f "$0" ] && sed -n '2,45p' "$0"; exit 0 ;;
 esac
 
-TARGET_HAPP="${TARGET_HAPP:-9}"
+TARGET_HAPP="${TARGET_HAPP:-6}"
 TARGET_TAG="${TARGET_TAG:-1.3.0}"
 IMG_BASE="${IMG_BASE:-ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest}"
 TARGET_IMG="${IMG_BASE}:${TARGET_TAG}"

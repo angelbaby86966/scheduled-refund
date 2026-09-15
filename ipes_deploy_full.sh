@@ -1446,24 +1446,24 @@ if ! docker exec ipes sh -c 'ps -ef | grep -q "[i]pes start"' 2>/dev/null; then
   docker exec ipes /app/ipes/bin/ipes start >/dev/null 2>&1
   logger -t ipes_watchdog "ipes master was down -> restarted"
 fi
-# 2) happ 路数防回弹（后台重推 12 路模板时自动裁回 TARGET_HAPP）
-#    带 10 分钟冷却：防止「后台重推->裁剪重启->再重推」形成重启风暴
+# 2) happ 路数防回弹（后台重推 12 路 / 配置被改回时自动裁回 TARGET_HAPP）
+#    直接改【宿主文件】（custom.yml 是单文件 bind-mount 的源，docker cp 写不回），再重启容器。
+#    带 10 分钟冷却：防止「裁剪重启->再被改回->再重启」形成重启风暴
 WANT="${TARGET_HAPP:-9}"
-CFG="/app/ipes/var/db/ipes/happ-conf/custom.yml"
-docker exec ipes test -f "$CFG" 2>/dev/null || CFG="/app/ipses/var/db/ipses/happ-conf/custom.yml"
-docker exec ipes test -f "$CFG" 2>/dev/null || exit 0
-CUR=$(docker exec ipes sh -c "grep -oE 'happ\.[0-9]+' $CFG | sort -u | wc -l" 2>/dev/null | tr -d ' ')
+CFG="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
+[ -f "$CFG" ] || exit 0
+CUR=$(grep -oE 'happ[.][0-9]+' "$CFG" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ -n "$CUR" ] && [ "$CUR" -gt "$WANT" ] || exit 0
 NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_align.last 2>/dev/null || echo 0)
 [ $((NOW - LAST)) -lt 600 ] && exit 0
-docker cp "ipes:$CFG" /tmp/_w_custom.yml >/dev/null 2>&1 || exit 0
-awk -v w="$WANT" 'match($0,/happ\.[0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ\.[0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' /tmp/_w_custom.yml > /tmp/_w_custom.new
-if docker cp /tmp/_w_custom.new "ipes:$CFG" >/dev/null 2>&1; then
+awk -v w="$WANT" 'match($0,/happ[.][0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ[.][0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' "$CFG" > /tmp/_w_custom.new
+if [ -s /tmp/_w_custom.new ]; then
+  cat /tmp/_w_custom.new > "$CFG"
   docker restart ipes >/dev/null 2>&1
   echo "$NOW" > /var/run/ipes_happ_align.last 2>/dev/null
   logger -t ipes_watchdog "happ rebound ${CUR}->${WANT}, trimmed & restarted"
 fi
-rm -f /tmp/_w_custom.yml /tmp/_w_custom.new
+rm -f /tmp/_w_custom.new
 WATCHDOG
     chmod +x /usr/local/bin/ipes_watchdog.sh
     ( crontab -l 2>/dev/null | grep -v ipes_watchdog; echo "* * * * * /usr/local/bin/ipes_watchdog.sh >/dev/null 2>&1" ) | crontab -
@@ -1483,50 +1483,54 @@ run_ipes_onekey() {
 # 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（默认 9）
 # 背景：后台默认下发的 custom.yml 多为 12 路（通用大内存模板），
 #       在 1GB 小内存机上 12 路 happ:vod 空载就吃 ~240MB，跑量后易 OOM 杀进程失联。
-#       这里在部署完成后把容器配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 9」。
-# 注：用 docker cp 读改写回，绕开 bind-mount 不允许 sed -i(rename) 的 Device busy 限制。
+#       这里在部署完成后把配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 9」。
+# r20-fix3【关键修复】custom.yml 是【宿主单文件 bind-mount】的源（/opt/ipes/... 挂到容器 /app/ipes/...）。
+#       对 bind-mount 的单文件用 docker cp 写回【不会落盘】（只在容器 overlay 生效，重启即失效）→ 裁剪空转。
+#       正确做法：直接原地改宿主文件（保 inode），再 docker restart ipes。老镜像无宿主文件时回退 docker cp。
 align_happ_count() {
     local want="${TARGET_HAPP:-9}"
-    local cfg="/app/ipes/var/db/ipes/happ-conf/custom.yml"
-    # 不同镜像路径兜底
-    docker exec ipes test -f "$cfg" 2>/dev/null || cfg="/app/ipses/var/db/ipses/happ-conf/custom.yml"
     if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
         return 0
     fi
-    if ! docker exec ipes test -f "$cfg" 2>/dev/null; then
-        log_message "${YELLOW}[对齐]${NC} 未找到 custom.yml（$cfg），跳过 happ 对齐"
-        return 0
-    fi
-    if ! docker cp "ipes:$cfg" /tmp/_happ_custom.yml >/dev/null 2>&1; then
-        log_message "${YELLOW}[对齐]${NC} 取出容器配置失败，跳过 happ 对齐"
-        return 0
+    local host_cfg="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
+    local mode="host"
+    if [ -f "$host_cfg" ]; then
+        cp -a "$host_cfg" "${host_cfg}.align.bak" 2>/dev/null || true
+    else
+        # 老镜像兜底：容器内路径 + docker cp
+        mode="docker"
+        host_cfg="/tmp/_happ_custom.yml"
+        docker cp "ipes:/app/ipes/var/db/ipes/happ-conf/custom.yml" "$host_cfg" >/dev/null 2>&1 || {
+            log_message "${YELLOW}[对齐]${NC} 未找到 custom.yml，跳过 happ 对齐"; return 0; }
     fi
     local cur
-    # r20-fix3：兼容两种 custom.yml 格式 —— 老格式行首 "happ.0: xxx" / 新镜像列表格式 "  - /data/happ/happ.0"
-    cur=$(grep -oE 'happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null | sort -u | wc -l | tr -d ' ')
-    log_message "[对齐] 当前 happ 条目数=$cur，目标=$want"
+    # 兼容两种格式 —— 老格式行首 "happ.0: xxx" / 新镜像列表格式 "  - /data/happ/happ.0"
+    cur=$(grep -oE 'happ\.[0-9]+' "$host_cfg" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    log_message "[对齐] 当前 happ 条目数=$cur，目标=$want（模式=$mode）"
     if [ "$cur" -le "$want" ]; then
         log_message "${GREEN}[对齐]${NC} 当前($cur) <= 目标($want)，无需裁剪"
-        rm -f /tmp/_happ_custom.yml
         return 0
     fi
     # 条目行判定：含 "happ.N:"（老格式）或以 "-" 开头的列表项（新格式）且编号 >= want 则删除
-    awk -v w="$want" 'match($0,/happ\.[0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ\.[0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' /tmp/_happ_custom.yml > /tmp/_happ_custom.new
-    if ! docker cp /tmp/_happ_custom.new "ipes:$cfg" >/dev/null 2>&1; then
-        log_message "${YELLOW}[对齐]${NC} 写回容器配置失败，跳过"
-        rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new
-        return 0
+    awk -v w="$want" 'match($0,/happ[.][0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ[.][0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' "$host_cfg" > /tmp/_happ_custom.new
+    if [ "$mode" = "host" ]; then
+        cat /tmp/_happ_custom.new > "$host_cfg"   # 原地写，保留 bind-mount inode
+    else
+        docker cp /tmp/_happ_custom.new "ipes:/app/ipes/var/db/ipes/happ-conf/custom.yml" >/dev/null 2>&1 || {
+            log_message "${YELLOW}[对齐]${NC} 写回失败，跳过"; rm -f /tmp/_happ_custom.new; return 0; }
     fi
     log_message "${GREEN}[对齐]${NC} 已裁剪到 $want 路，重启 ipes 容器使配置生效"
     docker restart ipes >/dev/null 2>&1
-    sleep 10
+    sleep 20
     local new=0
-    if docker cp "ipes:$cfg" /tmp/_happ_custom.yml >/dev/null 2>&1; then
-        new=$(grep -oE 'happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    if [ "$mode" = "host" ]; then
+        new=$(grep -oE 'happ\.[0-9]+' "$host_cfg" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    else
+        new=$(docker exec ipes sh -c "grep -oE 'happ[.][0-9]+' /app/ipes/var/db/ipes/happ-conf/custom.yml | sort -u | wc -l" 2>/dev/null | tr -d ' ')
     fi
     log_message "[对齐] 重启后 happ 条目数=$new"
-    rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new
+    rm -f /tmp/_happ_custom.new
     return 0
 }
 
@@ -1772,10 +1776,10 @@ main() {
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务提交与状态流转"
     fi
 
-    # [9.5] 二次对齐 happ（r20-fix2 关键修复）
-    # 背景：[7.5] 裁到 9 后，[9] 提交业务41/流转「服务中」时后台会重新下发 12 路模板
-    #       覆盖 custom.yml，导致「刷出来还是 12」。必须在业务注册完成之后再裁一次。
-    # 兜底：后续若再回弹，由看门狗（ipes_watchdog.sh，每分钟）自动裁回，冷却10分钟。
+    # [9.5] 二次对齐 happ（r20-fix2）
+    # 背景：[7.5] 裁剪后，[9] 提交业务41/流转「服务中」时后台可能重新下发 12 路模板覆盖配置，导致回弹。
+    #       必须在业务注册完成之后再裁一次（r20-fix3 起改为直接改宿主文件，真正落盘生效）。
+    # 兜底：后续若再被改回，由看门狗（ipes_watchdog.sh，每分钟）自动裁回，冷却10分钟。
     print_step "二次对齐 happ 路数（业务注册后回弹修复）"
     sleep 15   # 等后台配置下发落盘
     align_happ_count

@@ -175,6 +175,7 @@ fetch_race() {
     # 后台任务若继承 stdin 会把后面的脚本文本叼走。
     ( curl -fsSL --connect-timeout 4 -m 25 "$u" -o "/root/.rc.$n.part" 2>/dev/null \
       && mv -f "/root/.rc.$n.part" "/root/.rc.$n"; : > "/root/.rc.$n.done" ) </dev/null &
+    disown 2>/dev/null   # 摘出作业表：后面 pkill 掉落败镜像时，bash 不会再打一堆 "Terminated" 吓人
   done
   echo "   [fy] $(basename "$dst")：并发 ${n} 个镜像，先到先用（单源上限 25s）"
   w=0

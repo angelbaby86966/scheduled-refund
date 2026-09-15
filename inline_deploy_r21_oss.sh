@@ -60,7 +60,7 @@ fi
 #   独立脚本 ipes_tune.sh：磁盘队列 / 挂载参数 / 内核 sysctl / 网卡 / nofile
 #   幂等、可重复执行、装机后由 ipes-tune.service 开机自动重放
 #   主脚本 r21 内嵌同一份调优作兜底（这里先跑一遍，后面所有步骤都受益）
-TUNE_SHA="c8d50974658acc3ba261fffe66b4c33207c6fa59"
+TUNE_SHA="424a49c66886a7f3a93a6377d7ed6451436dca42"
 # ★防"静默下发旧版"★：ghproxy.net 对上游 raw 有 CDN 缓存（?t= 只绕它自己那层），
 #   实测曾取回 28428B 旧版而不是 29404B 新版。故除"含 IPES TUNE"外，
 #   还强制要求版本指纹相等；不相等即判过期 → 换下一个源（jsdelivr 按 commit SHA 取，不可变）。
@@ -98,7 +98,7 @@ else
 fi
 
 # ============ B) 完整部署（r21：真实 nodeId 绑定 + 内嵌调优兜底）============
-SRC_SHA="62f573d138451499b455b7f5f8a013f2469e6c20"
+SRC_SHA="424a49c66886a7f3a93a6377d7ed6451436dca42"
 SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
 SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${SRC_SHA}/ipes_deploy_full.sh"
 for u in "$SRC1" "$SRC2"; do

@@ -1674,6 +1674,11 @@ main() {
         log_message "${RED}[错误]${NC} docker 安装/启动失败"; exit 1
     fi
 
+    # [5.5] PCDN 专用优化前置：先拉满磁盘/内核吞吐，再部署业务
+    # 关键顺序：让 ipes 容器在「已调优的内核」上启动，使首启预热、任何初始探测、业务提交
+    # 都跑在 wbt=off / 脏页放大 / vfs 缓存保活 / 页缓存预读放大的环境里，给后台更干净的优质初评。
+    pcdn_disk_tune
+
     # [6] IPES 初始部署
     local deploy_retry=0
     while [ $deploy_retry -lt 3 ]; do
@@ -1717,10 +1722,6 @@ main() {
     # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 9）
     # 后台默认下发 12 路时，这里裁到 9 并重启容器，确保「刷出来就是 9」，小内存机不再 OOM。
     align_happ_count
-
-    # [7.6] PCDN 专用激进磁盘强化（wbt 关 / 脏页放大 / vfs 缓存保活 / 页缓存预读放大）
-    # 只跑 PCDN 缓存的机器专用：把拉缓存写盘、缓存读命中的吞吐全部拉满，并持久化开机自启。
-    pcdn_disk_tune
 
     # [8] 安装 nload（可选观测工具，r15 起改为**后台并行安装**，不再阻塞主流程）
     print_step "安装 nload（后台并行，不阻塞）"

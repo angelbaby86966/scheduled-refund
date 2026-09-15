@@ -3,7 +3,7 @@
 # ipes_onekey_bind.sh v20260915a — 一键全流程（严格按序执行）
 #   1) 官方 zyy_init_max.sh：装 agent(/etc/.mac, edge_client, frpc, admin用户) + 识别省市 + create2 渠道绑定
 #   2) 内核优化：BBR / RPS / sysctl（无 NOTRACK——20260915 上海断网事故版已弃用）
-#   3) IPES 部署：r21 inline（20260915g，09f401a7 定点，无 NOTRACK）后台运行
+#   3) IPES 部署：r19 恢复版 full.sh（29fd754 定点）后台运行
 #   4) 收尾：ipes_bind_auto.sh 后台运行（等容器就绪 → HMAC 改41/200M → 填业务ID → 流转服务中 → 终验）
 # 用法:
 #   curl -fsSL "<本脚本短链>" | bash -s -- --ak <渠道AK> --sk <渠道SK> --jwt <JWT> --isp 电信 [--num-dirs 12] [--province 省] [--city 市]
@@ -11,8 +11,7 @@
 # ==============================================================================
 set -u
 CH_AK=""; CH_SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS="12"
-FULL_COMMIT="29fd754ff6711cd1f7834eb779c4ab44f63a3768"
-R21_COMMIT="09f401a77ef81da6eb10a87fc5890a044c36a5da"  # inline_deploy_r21_oss.sh 20260915g（无 NOTRACK 修复版）
+FULL_COMMIT="29fd754ff6711cd1f7834eb779c4ab44f63a3768"  # r19 恢复版 ipes_deploy_full.sh（9-14 下午 3 点同版）
 REPO_RAW="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund"
 ZY_INIT_URL="https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh"
 LOG="/var/log/ipes_onekey.log"
@@ -121,22 +120,23 @@ fi
 # 清理可能残留的 NOTRACK 规则（历史事故兜底）
 iptables -t raw -F 2>/dev/null || true
 
-# ---------- 步骤4: IPES 部署（r21 20260915g，09f401a7 定点：repo修复+8镜像竞速+tune20260915d+绑定自修复；后台运行；已有容器则跳过） ----------
+# ---------- 步骤4: IPES 部署（r19 恢复版 full.sh，29fd754 定点；后台运行；已有容器则跳过） ----------
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ipes'; then
   log "[4/5] 检测到 ipes 容器已存在，跳过部署"
 else
-  log "[4/5] 下载 r21 inline 部署脚本（09f401a7 定点）并后台部署..."
+  log "[4/5] 下载 r19 full.sh（29fd754 定点）并后台部署..."
   DOWNED=0
-  for u in "${REPO_RAW}/${R21_COMMIT}/inline_deploy_r21_oss.sh" \
-           "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${R21_COMMIT:0:7}/inline_deploy_r21_oss.sh"; do
-    if curl -fsSL -m 60 "${u}" -o /root/inline_r21.sh && grep -q 'R21_REV="20260915g"' /root/inline_r21.sh; then DOWNED=1; break; fi
+  for u in "${REPO_RAW}/${FULL_COMMIT}/ipes_deploy_full.sh" \
+           "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${FULL_COMMIT:0:7}/ipes_deploy_full.sh"; do
+    if curl -fsSL -m 60 "${u}" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh; then DOWNED=1; break; fi
   done
   if [[ ${DOWNED} -eq 1 ]]; then
-    nohup setsid bash /root/inline_r21.sh --ak "${CH_AK}" --sk "${CH_SK}" --jwt "${JWT}" --isp "${ISP}" \
-      >/var/log/ipes_inline.log 2>&1 </dev/null &
-    log "[4/5] r21 部署已后台启动 PID=$! （日志 /var/log/ipes_inline.log）"
+    export NODE_ACTIVATE_TOKEN="${JWT}"
+    nohup setsid bash /root/ipes_full.sh --ak "${CH_AK}" --sk "${CH_SK}" --isp "${ISP}" --num-dirs "${NUM_DIRS}" --skip-olmt \
+      >/var/log/ipes_nohup.log 2>&1 </dev/null &
+    log "[4/5] r19 部署已后台启动 PID=$! （日志 /var/log/ipes_nohup.log）"
   else
-    log "[ERROR] r21 脚本两源下载/版本校验均失败，部署未启动"; exit 1
+    log "[ERROR] full.sh 两源下载/校验均失败，部署未启动"; exit 1
   fi
 fi
 

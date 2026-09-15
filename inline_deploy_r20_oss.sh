@@ -56,145 +56,49 @@ if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
 fi
 
 # ============ A) 系统调优 ============
-# 单一权威 sysctl 文件（合并 NAT/uplink + 性能项，避免多文件冲突导致重启后值漂移）
 cat > /etc/sysctl.d/99-ipes.conf <<'EOF'
-# ===== IPES PCDN 专属调优 (单一权威文件) =====
-# --- TCP/UDP 缓冲 ---
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 600
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.ipv4.ip_local_port_range = 1024 65535
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.core.rmem_default = 16777216
 net.core.wmem_default = 16777216
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-# --- 连接队列/并发 ---
 net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 100000
-net.core.netdev_budget = 1000
-net.core.netdev_budget_usecs = 4000
-net.ipv4.tcp_max_syn_backlog = 65535
-net.core.rps_sock_flow_entries = 32768
-net.core.busy_poll = 50
-net.core.busy_read = 50
-# --- TCP 行为 ---
+net.core.netdev_max_backlog = 65535
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_ecn = 0
+fs.file-max = 2097152
+fs.inotify.max_user_watches = 524288
+vm.swappiness = 0
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+vm.overcommit_memory = 1
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_available_congestion_control = bbr cubic reno
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_window_scaling = 1
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 4000
+net.core.rps_sock_flow_entries = 32768
 net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_ecn = 0
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_max_tw_buckets = 1048576
-net.ipv4.tcp_max_orphans = 65536
-net.ipv4.tcp_orphan_retries = 1
-net.ipv4.tcp_retries2 = 10
-net.ipv4.tcp_no_metrics_save = 1
-net.ipv4.tcp_adv_win_scale = 1
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_mem = 36134 72268 144537
-net.ipv4.tcp_congestion_control = cubic
-# --- 端口/路由/邻居表 ---
-net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.route.max_size = 2097152
-net.ipv4.neigh.default.gc_thresh1 = 4096
-net.ipv4.neigh.default.gc_thresh2 = 16384
-net.ipv4.neigh.default.gc_thresh3 = 65536
-net.ipv4.conf.all.rp_filter = 0
-net.ipv4.conf.default.rp_filter = 0
-# --- conntrack ---
-net.netfilter.nf_conntrack_max = 1048576
-net.netfilter.nf_conntrack_tcp_timeout_established = 1200
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
-net.netfilter.nf_conntrack_udp_timeout = 300
-net.netfilter.nf_conntrack_udp_timeout_stream = 600
-net.netfilter.nf_conntrack_generic_timeout = 600
-net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 60
-# --- qdisc ---
-net.core.default_qdisc = fq
-# --- 文件/进程句柄 ---
-fs.file-max = 4000000
-fs.aio-max-nr = 1048576
-fs.inotify.max_user_watches = 1048576
-kernel.pid_max = 4194304
-# --- 内存/脏页 ---
-vm.swappiness = 0
-vm.overcommit_memory = 1
-vm.vfs_cache_pressure = 10
-vm.dirty_ratio = 40
-vm.dirty_background_ratio = 30
-vm.dirty_expire_centisecs = 1000
-vm.dirty_writeback_centisecs = 50
-vm.zone_reclaim_mode = 0
-vm.min_free_kbytes = 65536
+net.ipv4.tcp_window_scaling = 1
 EOF
-rm -f /etc/sysctl.d/98-ipes-nat.conf /etc/sysctl.d/99-ipes-perf.conf 2>/dev/null
-modprobe nf_conntrack 2>/dev/null
+modprobe nf_conntrack tcp_bbr 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf
 sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-if [ -n "$nic" ]; then ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 ))); for q in /sys/class/net/$nic/queues/rx-*; do echo "$mask" > "$q/rps_cpus" 2>/dev/null; echo 4096 > "$q/rps_flow_cnt" 2>/dev/null; done; tc qdisc replace dev "$nic" root fq 2>/dev/null; fi
-# 磁盘识别为SSD + 调度器/nomerges/read_ahead 优化(缓存读写更低延迟)
-for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd*; do
-  [ -d "$d" ] || continue
-  echo 0 > "$d/queue/rotational" 2>/dev/null
-  echo none > "$d/queue/scheduler" 2>/dev/null
-  echo 2048 > "$d/queue/read_ahead_kb" 2>/dev/null
-  echo 1024 > "$d/queue/nr_requests" 2>/dev/null
-  echo 2 > "$d/queue/nomerges" 2>/dev/null
-done
-# 开机自启: 重放磁盘+队列调优(避免重启回到默认)
-cat > /usr/local/bin/ipes-tune.sh <<'EOF2'
-#!/bin/bash
-# IPES 磁盘/队列/RPS 调优 - 每次开机重放，避免重启回默认
-for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
-  [ -d "$d" ] || continue
-  echo 0 > "$d/queue/rotational" 2>/dev/null
-  echo none > "$d/queue/scheduler" 2>/dev/null
-  echo 2048 > "$d/queue/read_ahead_kb" 2>/dev/null
-  echo 1024 > "$d/queue/nr_requests" 2>/dev/null
-  echo 2 > "$d/queue/nomerges" 2>/dev/null
-done
-# 拥塞控制：能开 BBR 就开，CentOS7 3.10 内核无 tcp_bbr 则回落 cubic
-sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
-# 所有业务网卡：fq 队列(pacing) + RPS 收包绑全核(单队列 virtio 必做，否则重启丢)
-ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 )))
-for dev in $(ls /sys/class/net/ 2>/dev/null); do
-  case "$dev" in lo|docker*|veth*|br-*|cni*|flannel*|virbr*) continue;; esac
-  tc qdisc replace dev "$dev" root fq 2>/dev/null || true
-  for q in /sys/class/net/$dev/queues/rx-*; do
-    [ -d "$q" ] || continue
-    echo "$mask" > "$q/rps_cpus" 2>/dev/null
-    echo 4096 > "$q/rps_flow_cnt" 2>/dev/null
-  done
-done
-EOF2
-chmod +x /usr/local/bin/ipes-tune.sh
-cat > /etc/systemd/system/ipes-tune.service <<'EOF2'
-[Unit]
-Description=IPES disk and qdisc tuning
-After=network.target local-fs.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/ipes-tune.sh
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-systemctl daemon-reload 2>/dev/null
-systemctl enable ipes-tune.service 2>/dev/null
+if [ -n "$nic" ]; then ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 ))); for q in /sys/class/net/$nic/queues/rx-*; do echo "$mask" > "$q/rps_cpus" 2>/dev/null; echo 4096 > "$q/rps_flow_cnt" 2>/dev/null; done; fi
 iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null; iptables -t raw -A OUTPUT -j NOTRACK 2>/dev/null
 
 # ============ B) 完整部署（r20：用真实 nodeId 绑定，根治业务没落盘） ============
-SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
+SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-success-0914/ipes_deploy_full.sh?t=$(date +%s)"
 SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@a214464/ipes_deploy_full.sh"
 for u in "$SRC1" "$SRC2"; do
   curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break
@@ -205,9 +109,13 @@ nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-di
 DEPLOY_PID=$!
 echo "已后台启动部署 PID=$DEPLOY_PID"
 
-# ============ C) 业务绑定自修复 ============
+# ============ C) 业务绑定自修复（r20-fix4 根治版） ============
+# 三大修复：
+#   1) is_bound 读 nodeInfo（vendor/usbw 真正所在），不再读 nominalInfo（恒 0，导致永远误判未绑定→反复重绑）
+#   2) 节点匹配优先用本机 device_code（32hex nodeID）精确匹配；按 IP 兜底时排除 status=offline 的孤儿记录
+#   3) stateflow 的 hostname 必须用 76hex 真业务SN（ipes_sn），绝不用后台 sn 字段（那是 UUID，会毁掉业务标签）
 cat > /root/ipes_repair_binding.py <<'PY'
-import json, os, re, ssl, subprocess, sys, time, urllib.request, urllib.error
+import json, os, re, ssl, sys, time, urllib.request, urllib.error
 
 JWT = os.environ.get('NODE_ACTIVATE_TOKEN','')
 if not JWT:
@@ -228,16 +136,6 @@ NODE_BW_NUM = int(os.environ.get('NODE_BW_NUM','1'))
 CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode = ssl.CERT_NONE
 
 def log(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-def get_ipes_sn():
-    """读容器内真正的 IPES 业务 SN（76 位 hex），不要用后台 UUID sn。"""
-    for path in ['/app/ipes/bin/ipes_sn', '/opt/soft/disk/IPES_SN']:
-        try:
-            out = subprocess.check_output(['docker','exec','ipes','cat',path], stderr=subprocess.DEVNULL, timeout=10)
-            sn = out.decode('utf-8','replace').strip()
-            if sn: return sn
-        except Exception: continue
-    return ''
 
 def admin_call(path, body=None, method="GET"):
     req = urllib.request.Request(BASE + path, method=method)
@@ -260,8 +158,27 @@ def get_public_ip():
         except Exception: continue
     return None
 
-def find_node_by_ip(pubip, max_pages=80):
-    candidates = []
+def get_local_node_id():
+    # edge_client 的 device_code 即后台 32hex nodeID（r19+ 已验证）
+    for f in ["/usr/local/edge_zycloud/device_code"]:
+        try:
+            v = open(f).read().strip()
+            if re.fullmatch(r'[0-9a-f]{32}', v): return v
+        except Exception: pass
+    return None
+
+def get_real_sn():
+    # 76hex 业务SN：只认容器内 ipes_sn / 宿主 IPES_SN，绝不用后台 sn（UUID）
+    for cmd in ["docker exec ipes cat /app/ipes/bin/ipes_sn",
+                "cat /opt/soft/disk/IPES_SN"]:
+        try:
+            v = os.popen(cmd + " 2>/dev/null").read().strip()
+            if len(v) >= 60: return v
+        except Exception: pass
+    return None
+
+def fetch_all_nodes(max_pages=80):
+    out = []
     for page in range(1, max_pages + 1):
         code, txt = admin_call(f"/api/edgeNode/getEdgeNodeList?page={page}&pageSize=200")
         if code != 200:
@@ -269,27 +186,39 @@ def find_node_by_ip(pubip, max_pages=80):
         d = json.loads(txt)
         arr = (d.get('data') or {}).get('list', [])
         total = (d.get('data') or {}).get('total', 0)
-        for it in arr:
-            if it.get('publicIP') == pubip:
-                candidates.append(it)
+        out.extend(arr)
         if page * 200 >= total: break
         time.sleep(0.15)
-    if not candidates: return None
+    return out
+
+def pick_node(pubip, local_nid):
+    nodes = fetch_all_nodes()
+    if local_nid:
+        for it in nodes:
+            if it.get('nodeID') == local_nid:
+                log(f"按 device_code 精确匹配到本机节点: {local_nid}")
+                return it
+        log(f"device_code={local_nid} 尚未出现在后台，等待注册...")
+        return None
+    # 兜底：按 IP 匹配，排除 offline 孤儿，优先 inService
+    cands = [it for it in nodes if it.get('publicIP') == pubip and it.get('status') != 'offline']
+    if not cands: return None
     stage_rank = {'inService': 3, 'configured': 2, 'waitAudit': 1}
-    candidates.sort(key=lambda x: (stage_rank.get(x.get('stage'), 0), x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
-    return candidates[0]
+    cands.sort(key=lambda x: (stage_rank.get(x.get('stage'), 0), x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
+    return cands[0]
 
 def is_bound(ni):
     if not ni: return False
     if ni.get('stage') != 'inService': return False
-    info = ni.get('nominalInfo') or {}
+    info = ni.get('nodeInfo') or {}          # ★ 绑定信息在 nodeInfo，nominalInfo 恒空是正常形态
     return info.get('vendorSuggestCustomers') == BUSINESS_ID and info.get('usbw') == NODE_USBW
 
-def do_bind(node_id):
-    log(f"为活跃节点 {node_id} 补绑业务 {BUSINESS_ID}")
-    # 业务 ID 必须取容器内 76hex IPES SN，否则后台会写 UUID 占位符
-    biz_sn = get_ipes_sn()
-    log(f"  -> 容器 IPES SN: {biz_sn[:16]}...{biz_sn[-12:]} (len={len(biz_sn)})")
+def tag_ok(ni, sn):
+    tags = ni.get('business_tags') or []
+    return bool(tags) and any(t.get('hostName') == sn for t in tags)
+
+def do_bind(node_id, sn):
+    log(f"为本机节点 {node_id} 补绑业务 {BUSINESS_ID}")
     for stage in ['configured','configured']:
         code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": stage}, "POST")
         log(f"  -> {stage}: HTTP {code} {txt[:120]}")
@@ -306,25 +235,35 @@ def do_bind(node_id):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
-    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": biz_sn}, "POST")
+    # ★ hostname 必须是 76hex 真业务SN（写后台 hostName/业务标签），传 UUID 会毁标签
+    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
     pubip = get_public_ip()
     if not pubip: log("[ERROR] 无法获取公网 IP"); sys.exit(1)
     log(f"本机公网 IP: {pubip}")
+    local_nid = get_local_node_id()
+    log(f"本机 device_code(nodeID): {local_nid or '未读到，走IP兜底'}")
+    sn = None
     ni = None
     for i in range(48):
-        ni = find_node_by_ip(pubip)
-        if ni: break
-        log(f"等待节点出现在后台... ({i+1}/48)"); time.sleep(10)
+        if not sn:
+            sn = get_real_sn()
+            if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
+        ni = pick_node(pubip, local_nid)
+        if ni and sn: break
+        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(10)
     if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
-    log(f"找到节点: {ni.get('nodeID')} stage={ni.get('stage')} vendor={(ni.get('nominalInfo') or {}).get('vendorSuggestCustomers')} usbw={(ni.get('nominalInfo') or {}).get('usbw')}")
-    if is_bound(ni): log("[OK] 已绑定，无需修复"); sys.exit(0)
-    do_bind(ni.get('nodeID'))
-    time.sleep(2)
-    ni = find_node_by_ip(pubip)
-    if is_bound(ni): log("[OK] 修复成功"); sys.exit(0)
+    info = ni.get('nodeInfo') or {}
+    log(f"节点: {ni.get('nodeID')} stage={ni.get('stage')} status={ni.get('status')} nodeInfo.vendor={info.get('vendorSuggestCustomers')} usbw={info.get('usbw')}")
+    if is_bound(ni) and (not sn or tag_ok(ni, sn)):
+        log("[OK] 已绑定且业务标签正确，无需修复"); sys.exit(0)
+    do_bind(ni.get('nodeID'), sn or "")
+    time.sleep(3)
+    ni = pick_node(pubip, local_nid)
+    if is_bound(ni) and (not sn or tag_ok(ni, sn)):
+        log("[OK] 修复成功"); sys.exit(0)
     else: log("[ERROR] 修复后仍未达标"); sys.exit(1)
 
 if __name__ == '__main__':
@@ -341,53 +280,3 @@ echo "已后台启动绑定自修复 PID=$REPAIR_PID"
 echo ""
 echo "部署日志：  tail -f /var/log/ipes_nohup.log"
 echo "修复日志：  tail -f /var/log/ipes_repair.log"
-
-# ============ D) 部署后容器调优 + 健康看门狗（后台等容器起来再应用） ============
-cat > /root/ipes_postopt.sh <<'EOF3'
-#!/bin/bash
-# 等 ipes 容器起来（最多 5 分钟）
-for i in $(seq 1 60); do
-  docker inspect ipes >/dev/null 2>&1 && break
-  sleep 5
-done
-# 容器 I/O/CPU 优先级（live 生效，不重建容器、不动缓存）
-docker update --blkio-weight 1000 --cpu-shares 1024 ipes 2>/dev/null
-# 健康看门狗：容器挂了自动拉起 + /data 超 85% 告警
-cat > /usr/local/bin/ipes-health.sh <<'HEOF'
-#!/bin/bash
-running=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)
-if [ "$running" != "true" ]; then
-  logger -t ipes-health "ipes not running -> restart"
-  docker start ipes 2>/dev/null || { systemctl restart docker >/dev/null 2>&1; docker start ipes 2>/dev/null; }
-fi
-use=$(df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
-if [ -n "$use" ] && [ "$use" -ge 85 ] 2>/dev/null; then
-  logger -t ipes-health "WARN /data usage ${use}% >= 85%"
-fi
-# ★必须显式 exit 0★：Type=oneshot 以脚本退出码判定成败，否则磁盘 <85% 时服务恒被判 failed
-exit 0
-HEOF
-chmod +x /usr/local/bin/ipes-health.sh
-cat > /etc/systemd/system/ipes-health.service <<'HEOF'
-[Unit]
-Description=IPES health & disk watchdog
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/ipes-health.sh
-HEOF
-cat > /etc/systemd/system/ipes-health.timer <<'HEOF'
-[Unit]
-Description=Run IPES health watchdog every 2 min
-[Timer]
-OnBootSec=3min
-OnUnitActiveSec=2min
-[Install]
-WantedBy=timers.target
-HEOF
-systemctl daemon-reload 2>/dev/null
-systemctl enable --now ipes-health.timer 2>/dev/null
-echo "[postopt] blkio/cpu-priority + health watchdog applied at $(date)"
-EOF3
-chmod +x /root/ipes_postopt.sh
-nohup setsid bash /root/ipes_postopt.sh >/var/log/ipes_postopt.log 2>&1 </dev/null &
-echo "已后台启动容器调优/看门狗 PID=$!"

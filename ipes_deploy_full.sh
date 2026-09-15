@@ -1452,12 +1452,12 @@ WANT="${TARGET_HAPP:-9}"
 CFG="/app/ipes/var/db/ipes/happ-conf/custom.yml"
 docker exec ipes test -f "$CFG" 2>/dev/null || CFG="/app/ipses/var/db/ipses/happ-conf/custom.yml"
 docker exec ipes test -f "$CFG" 2>/dev/null || exit 0
-CUR=$(docker exec ipes sh -c "grep -cE '^happ\\.[0-9]+' $CFG" 2>/dev/null)
+CUR=$(docker exec ipes sh -c "grep -oE 'happ\.[0-9]+' $CFG | sort -u | wc -l" 2>/dev/null | tr -d ' ')
 [ -n "$CUR" ] && [ "$CUR" -gt "$WANT" ] || exit 0
 NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_align.last 2>/dev/null || echo 0)
 [ $((NOW - LAST)) -lt 600 ] && exit 0
 docker cp "ipes:$CFG" /tmp/_w_custom.yml >/dev/null 2>&1 || exit 0
-awk -v w="$WANT" '/^happ\.[0-9]+/{n=$0; sub(/:.*/,"",n); sub(/^happ\./,"",n); if(n+0<w)print; next} {print}' /tmp/_w_custom.yml > /tmp/_w_custom.new
+awk -v w="$WANT" 'match($0,/happ\.[0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ\.[0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' /tmp/_w_custom.yml > /tmp/_w_custom.new
 if docker cp /tmp/_w_custom.new "ipes:$CFG" >/dev/null 2>&1; then
   docker restart ipes >/dev/null 2>&1
   echo "$NOW" > /var/run/ipes_happ_align.last 2>/dev/null
@@ -1503,14 +1503,16 @@ align_happ_count() {
         return 0
     fi
     local cur
-    cur=$(grep -cE '^happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null || echo 0)
+    # r20-fix3：兼容两种 custom.yml 格式 —— 老格式行首 "happ.0: xxx" / 新镜像列表格式 "  - /data/happ/happ.0"
+    cur=$(grep -oE 'happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null | sort -u | wc -l | tr -d ' ')
     log_message "[对齐] 当前 happ 条目数=$cur，目标=$want"
     if [ "$cur" -le "$want" ]; then
         log_message "${GREEN}[对齐]${NC} 当前($cur) <= 目标($want)，无需裁剪"
         rm -f /tmp/_happ_custom.yml
         return 0
     fi
-    awk -v w="$want" '/^happ\.[0-9]+/{n=$0; sub(/:.*/,"",n); sub(/^happ\./,"",n); if(n+0<w)print; next} {print}' /tmp/_happ_custom.yml > /tmp/_happ_custom.new
+    # 条目行判定：含 "happ.N:"（老格式）或以 "-" 开头的列表项（新格式）且编号 >= want 则删除
+    awk -v w="$want" 'match($0,/happ\.[0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ\.[0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' /tmp/_happ_custom.yml > /tmp/_happ_custom.new
     if ! docker cp /tmp/_happ_custom.new "ipes:$cfg" >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} 写回容器配置失败，跳过"
         rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new
@@ -1521,7 +1523,7 @@ align_happ_count() {
     sleep 10
     local new=0
     if docker cp "ipes:$cfg" /tmp/_happ_custom.yml >/dev/null 2>&1; then
-        new=$(grep -cE '^happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null || echo 0)
+        new=$(grep -oE 'happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null | sort -u | wc -l | tr -d ' ')
     fi
     log_message "[对齐] 重启后 happ 条目数=$new"
     rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new

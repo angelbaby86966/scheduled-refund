@@ -1623,6 +1623,60 @@ UNIT_EOF
     log_message "${GREEN}[磁盘强化]${NC} PCDN 磁盘调优已应用（wbt=off, dirty 放大, vfs_cache=50, page-cluster=8）"
 }
 
+enable_bbr_kernel() {
+    print_step "BBR 内核保障（无 BBR 内核时自动装 kernel-lt 5.4，下次重启生效）"
+    # 已支持 BBR：直接启用
+    if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+        modprobe tcp_bbr 2>/dev/null
+        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+        log_message "${GREEN}[BBR]${NC} 当前内核 $(uname -r) 已支持并启用 BBR"
+        return 0
+    fi
+    log_message "[BBR] 当前内核 $(uname -r) 无 BBR，安装 kernel-lt 5.4.278（el7 最后 LTS）"
+    local F="kernel-lt-5.4.278-1.el7.elrepo.x86_64.rpm"
+    local OK=0
+    # elrepo 官方已下架 el7 内核，走历史归档镜像（coreix 主 / viethosting 备）
+    for u in "https://mirrors.coreix.net/elrepo-archive-archive/kernel/el7/x86_64/RPMS/$F" \
+             "https://mirrors.viethosting.com/centos/kernel-lt/$F"; do
+        curl -fsSL --connect-timeout 15 -m 420 -o /tmp/$F "$u" && [ -s /tmp/$F ] && OK=1 && break
+        rm -f /tmp/$F
+    done
+    if [ $OK -eq 0 ]; then
+        log_message "${YELLOW}[BBR]${NC} 内核包下载失败，跳过 BBR（不影响本次部署）"
+        return 0
+    fi
+    rpm -ivh /tmp/$F >/dev/null 2>&1
+    rm -f /tmp/$F
+    if [ -f /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 ]; then
+        grubby --set-default /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 2>/dev/null
+        # 开机自动：加载 BBR + 确保 docker/ipes 容器起来（SWAS 的 /etc/sysctl.d、/etc/systemd/system 为只读，走 crontab @reboot）
+        cat > /usr/local/bin/bbr_boot.sh <<'BBRBOOT'
+#!/bin/bash
+# BBR 开机自启 + docker/容器恢复（部署脚本固化）
+(
+  sleep 30
+  modprobe tcp_bbr 2>/dev/null
+  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+  for i in 1 2 3 4 5 6; do
+    systemctl is-active docker >/dev/null 2>&1 && break
+    systemctl start docker >/dev/null 2>&1; sleep 10
+  done
+  docker inspect ipes >/dev/null 2>&1 && docker start ipes >/dev/null 2>&1
+  logger -t bbr_boot "kernel=$(uname -r) cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+) >/dev/null 2>&1 &
+BBRBOOT
+        chmod +x /usr/local/bin/bbr_boot.sh
+        ( crontab -l 2>/dev/null | grep -v bbr_boot; echo "@reboot /usr/local/bin/bbr_boot.sh" ) | crontab -
+        systemctl enable crond >/dev/null 2>&1 || true
+        log_message "${GREEN}[BBR]${NC} kernel-lt 5.4.278 已安装并设为默认启动内核"
+        log_message "[BBR] 本次部署在当前内核继续（cubic），下次重启自动进入 5.4 并启用 BBR"
+    else
+        log_message "${YELLOW}[BBR]${NC} 内核安装异常，跳过 BBR"
+    fi
+}
+
 check_ipes_containers() {
     local count
     count=$(docker ps 2>/dev/null | grep -c ipes || true)
@@ -1647,6 +1701,9 @@ main() {
     fi
 
     log_message "${GREEN}开始业务 ${BUSINESS_ID}（q2）全拉满部署...${NC}"
+
+    # [0.9] BBR 内核保障（在一切业务动作之前装好 5.4 内核并设默认启动项）
+    enable_bbr_kernel
 
     # [1] zycloud agent
     print_step "检测服务器环境并部署 zycloud agent"

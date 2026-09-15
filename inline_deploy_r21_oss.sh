@@ -17,7 +17,7 @@
 #      改成「落盘 + 每 10s 心跳 + timeout 480 硬上限」，全程可见、有界。
 #   ③ 下载：统一加 --connect-timeout，并多一个国内可达镜像源。
 set +e
-R21_REV="20260915e"
+R21_REV="20260915f"
 
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
@@ -119,42 +119,121 @@ else
   echo "[INFO] 使用指定地理位置: $PROVINCE / $CITY"
 fi
 
-# ============ A) 系统调优（r21：磁盘吞吐 + 上下行）============
-#   独立脚本 ipes_tune.sh：磁盘队列 / 挂载参数 / 内核 sysctl / 网卡 / nofile
-#   幂等、可重复执行、装机后由 ipes-tune.service 开机自动重放
-#   主脚本 r21 内嵌同一份调优作兜底（这里先跑一遍，后面所有步骤都受益）
-TUNE_SHA="477dc50494d42f7675233f0cd75be52cef1cb5d9"
-# ★防"静默下发旧版"★：ghproxy.net 对上游 raw 有 CDN 缓存（?t= 只绕它自己那层），
-#   实测曾取回 28428B 旧版而不是 29404B 新版。故除"含 IPES TUNE"外，
-#   还强制要求版本指纹相等；不相等即判过期 → 换下一个源（jsdelivr 按 commit SHA 取，不可变）。
-TUNE_REV_EXPECT="20260915c"
-TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
-TUNE2="https://ghfast.top/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
-TUNE3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
-TUNE_OK=0
-echo "[step 1/2][tune] 拉取调优脚本（3 个源依次尝试，每个源 --connect-timeout 5 -m 30）..."
-for u in "$TUNE1" "$TUNE2" "$TUNE3"; do
-  echo "  [tune] 尝试源: $(printf '%s' "$u" | sed -e 's|?t=[0-9]*||' | cut -c1-64)..."
-  # 先下到临时文件：否则源不可达时 /root/ipes_tune.sh 会残留上一版，
-  # 而后面 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记 → 会复用这个过期副本
-  rm -f /root/.tune.try
-  if curl -fsSL --connect-timeout 5 -m 30 "$u" -o /root/.tune.try 2>/dev/null \
-     && grep -q "IPES TUNE" /root/.tune.try \
-     && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.tune.try; then
-    mv -f /root/.tune.try /root/ipes_tune.sh
-    TUNE_OK=1; break
+# ============ A) 取回脚本（★并发竞速多镜像 + SHA 定点 + 本地缓存复用★）============
+#   为什么这么改（针对"又卡住 / 太慢"）：
+#   ① 原来 3 个源是"串行"试：源1 最长等 30s（full 是 60s）才换源，三段串起来最坏
+#      90s+180s 全程无输出 —— 日志停着不动，主观就是"卡死"。现在 8 个镜像"并发"发出，
+#      谁先回谁算，全程最多只等一轮 25s。
+#   ② 原来 URL 都带 ?t=$(date +%s)。这会让 ghproxy 每次都回源 raw.githubusercontent.com
+#      （它自己那层 CDN 缓存永远打不中）—— 这才是慢的根因。现在统一按 commit SHA 取，
+#      URL 不可变 → 各镜像能长期缓存 → 从第二台机器起基本秒回，同时天然防"下发旧版"。
+#   ③ 原来先下 tune(33KB) 再下 full(110KB)，两次下载、两个失败点。现在只下 full，
+#      再把里面内嵌的同一份 tune 抽出来先跑（两者逐字节一致），少一次下载。
+#   ④ 已成功下过、且世代匹配的机器，重跑直接复用本地文件，零网络。
+REPO="angelbaby86966/scheduled-refund"
+SRC_SHA="477dc50494d42f7675233f0cd75be52cef1cb5d9"
+SRC_REV_EXPECT="20260915e"     # ipes_deploy_full.sh 的 FULL_REV
+TUNE_REV_EXPECT="20260915c"    # ipes_tune.sh 的 TUNE_REV
+
+mk_urls() {   # $1=文件名  $2=commit
+  printf '%s\n' \
+    "https://ghproxy.net/https://raw.githubusercontent.com/${REPO}/$2/$1" \
+    "https://ghfast.top/https://raw.githubusercontent.com/${REPO}/$2/$1" \
+    "https://gh-proxy.com/https://raw.githubusercontent.com/${REPO}/$2/$1" \
+    "https://hub.gitmirror.com/https://raw.githubusercontent.com/${REPO}/$2/$1" \
+    "https://fastly.jsdelivr.net/gh/${REPO}@$2/$1" \
+    "https://gcore.jsdelivr.net/gh/${REPO}@$2/$1" \
+    "https://cdn.jsdelivr.net/gh/${REPO}@$2/$1" \
+    "https://raw.githubusercontent.com/${REPO}/$2/$1"
+}
+
+# 毫秒时间戳（GNU date 支持 %N；BSD/精简环境退化为秒×1000，只为打印好看）
+_now_ms() {
+  local t
+  t=$(date +%s%N 2>/dev/null)
+  case "$t" in
+    ''|*[!0-9]*) printf '%s' "$(( $(date +%s) * 1000 ))" ;;
+    *)           printf '%s' "$(( t / 1000000 ))" ;;
+  esac
+}
+
+# fetch_race <目标> <结构标记> <版本指纹> <url...>
+#   并发拉全部镜像；第一个"完整且标记+指纹都对"的胜出，其余立即掐断。
+#   每个 curl 先写 .part、成功才 rename → 半截文件永远不会被当成产物。
+fetch_race() {
+  local dst="$1" marker="$2" rev="$3"; shift 3
+  if [ -s "$dst" ] && grep -q -- "$marker" "$dst" 2>/dev/null && grep -qF -- "$rev" "$dst" 2>/dev/null; then
+    echo "   [fy] 本机已有 $(basename "$dst") 且世代匹配 → 跳过下载"
+    return 0
   fi
-  if [ -s /root/.tune.try ] && grep -q "IPES TUNE" /root/.tune.try; then
-    echo "[tune][WARN] 该源返回的 tune 版本过期（缺 TUNE_REV=${TUNE_REV_EXPECT}，多为 CDN 缓存），换下一个源"
+  rm -f /root/.rc.* 2>/dev/null
+  local n=0 u T0 w k fin
+  T0=$(_now_ms)
+  for u in "$@"; do
+    n=$((n+1))
+    # </dev/null 必须加：r21 是 `curl | bash` 跑的，stdin 就是脚本本身，
+    # 后台任务若继承 stdin 会把后面的脚本文本叼走。
+    ( curl -fsSL --connect-timeout 4 -m 25 "$u" -o "/root/.rc.$n.part" 2>/dev/null \
+      && mv -f "/root/.rc.$n.part" "/root/.rc.$n"; : > "/root/.rc.$n.done" ) </dev/null &
+  done
+  echo "   [fy] $(basename "$dst")：并发 ${n} 个镜像，先到先用（单源上限 25s）"
+  w=0
+  while [ "$w" -lt 270 ]; do
+    k=1; fin=0
+    while [ "$k" -le "$n" ]; do
+      if [ -s "/root/.rc.$k" ] && grep -q -- "$marker" "/root/.rc.$k" 2>/dev/null \
+         && grep -qF -- "$rev" "/root/.rc.$k" 2>/dev/null; then
+        mv -f "/root/.rc.$k" "$dst"
+        echo "   [fy] 命中镜像 #${k}，用时 $(( $(_now_ms) - T0 ))ms，$(wc -c < "$dst")B"
+        pkill -f '/root/\.rc\.' 2>/dev/null
+        rm -f /root/.rc.* 2>/dev/null
+        return 0
+      fi
+      [ -f "/root/.rc.$k.done" ] && fin=$((fin+1))
+      k=$((k+1))
+    done
+    # 全部镜像都已结束、且没一个合格 → 立即放弃，不空等到 27s
+    [ "$fin" -ge "$n" ] && break
+    sleep 0.1; w=$((w+1))
+  done
+  pkill -f '/root/\.rc\.' 2>/dev/null
+  rm -f /root/.rc.* 2>/dev/null
+  return 1
+}
+
+echo "[step 1/2] 取回部署脚本（并发多镜像竞速）..."
+FULL_URLS=( $(mk_urls ipes_deploy_full.sh "$SRC_SHA") )
+if ! fetch_race /root/ipes_full.sh singleIpRadio "FULL_REV=\"$SRC_REV_EXPECT\"" "${FULL_URLS[@]}"; then
+  echo "[deploy][ERROR] 8 个镜像都没取到正确世代的部署脚本，已终止（稍后原样重跑即可）"
+  exit 1
+fi
+
+# ---------- 从 full.sh 抽出内嵌的同一份 tune（省掉一次 33KB 下载）----------
+awk 'index($0,"ipes-tune.sh <<"){f=1;next} f && /^IPES_TUNE_EOF[[:space:]]*$/{f=0} f' \
+    /root/ipes_full.sh > /root/.tune.extract 2>/dev/null
+if [ -s /root/.tune.extract ] && grep -q "IPES TUNE" /root/.tune.extract \
+   && grep -qF "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.tune.extract; then
+  mv -f /root/.tune.extract /root/ipes_tune.sh
+  echo "[tune] 已从部署脚本内嵌副本提取（$(wc -c < /root/ipes_tune.sh)B，免单独下载）"
+else
+  rm -f /root/.tune.extract 2>/dev/null
+  echo "[tune] 内嵌抽取失败，回退为单独下载（同样并发竞速）..."
+  TUNE_URLS=( $(mk_urls ipes_tune.sh "$SRC_SHA") )
+  if ! fetch_race /root/ipes_tune.sh "IPES TUNE" "TUNE_REV=\"$TUNE_REV_EXPECT\"" "${TUNE_URLS[@]}"; then
+    echo "[tune][WARN] 调优脚本没取到；部署脚本内嵌有同一份，full 会自己补跑"
+    # 关键：清掉"世代不对"的旧副本，否则 full.sh 的一致性闸门会把它当成可用版本复用
+    if [ -f /root/ipes_tune.sh ] && ! grep -qF "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/ipes_tune.sh; then
+      rm -f /root/ipes_tune.sh
+      echo "[tune][WARN] 已移除过期副本 /root/ipes_tune.sh，避免被一致性闸门复用"
+    fi
   fi
-  rm -f /root/.tune.try
-done
-if [ "$TUNE_OK" = "1" ]; then
-  echo "[tune] $(grep -o 'TUNE_REV="[^"]*"' /root/ipes_tune.sh | head -1) $(grep -o 'TUNE_VER="[^"]*"' /root/ipes_tune.sh | head -1) applying ..."
-  # ★不再 `| tail -30`★：管道会把 tune 的全部输出憋到进程结束才吐 → 云助手日志定在上一行
-  #   不动，看着像卡死。改为落盘 + 心跳（每 10s 一行）+ timeout 480 硬上限。
+fi
+
+# ============ B) 先跑调优（独立脚本，幂等、可重复执行）============
+if [ -s /root/ipes_tune.sh ] && grep -q "IPES TUNE" /root/ipes_tune.sh; then
+  echo "[tune] $(grep -o 'TUNE_VER="[^"]*"' /root/ipes_tune.sh | head -1) $(grep -o 'TUNE_REV="[^"]*"' /root/ipes_tune.sh | head -1) applying ..."
   : > /var/log/ipes_tune_run.log
-  timeout 480 bash /root/ipes_tune.sh >>/var/log/ipes_tune_run.log 2>&1 &
+  timeout 480 bash /root/ipes_tune.sh </dev/null >>/var/log/ipes_tune_run.log 2>&1 &
   TUNE_PID=$!
   while kill -0 "$TUNE_PID" 2>/dev/null; do
     sleep 10
@@ -165,49 +244,15 @@ if [ "$TUNE_OK" = "1" ]; then
   if [ "$TUNE_RC" = "124" ]; then
     echo "[tune][WARN] 480s 超时被强制结束 —— 调优可能只做了一半（不阻塞部署；可事后单跑 /usr/local/bin/ipes-tune.sh）"
   fi
-  echo "[tune] 结束 rc=${TUNE_RC}，日志末尾 25 行："
-  tail -25 /var/log/ipes_tune_run.log 2>/dev/null
+  echo "[tune] 结束 rc=${TUNE_RC}，日志末尾 15 行："
+  tail -15 /var/log/ipes_tune_run.log 2>/dev/null
 else
-  echo "[tune][WARN] 调优脚本下载失败（或两个源的内容都过期）；主脚本 r21 内嵌同一份，部署时会补做"
-  # ★关键★：把过期副本删掉。否则下方 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记，
-  # 会把这个旧版 cp 过去 —— 等于缓存过期照样上线。
-  # 删掉后闸门回落到"内嵌正文"，而内嵌正文随 full_deploy 一起下发（下方 SRC 循环已校验其世代）。
-  if [ -f /root/ipes_tune.sh ] && ! grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/ipes_tune.sh; then
-    rm -f /root/ipes_tune.sh
-    echo "[tune][WARN] 已移除过期副本 /root/ipes_tune.sh，避免被版本一致性闸门复用"
-  fi
+  echo "[tune][WARN] 没拿到调优脚本；部署脚本内嵌同一份，部署过程中会补做"
 fi
 
-# ============ B) 完整部署（r21：真实 nodeId 绑定 + 内嵌调优兜底）============
-SRC_SHA="477dc50494d42f7675233f0cd75be52cef1cb5d9"
-SRC_REV_EXPECT="20260915e"
-SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
-SRC2="https://ghfast.top/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
-SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${SRC_SHA}/ipes_deploy_full.sh"
-echo "[step 2/2][deploy] 拉取部署脚本（约 110KB，3 个源依次尝试）..."
-for u in "$SRC1" "$SRC2" "$SRC3"; do
-  # 同样要求"含当前世代的内嵌 tune"：full_deploy 里内嵌的正是 tune 全文，含 TUNE_REV 指纹。
-  # 这样即使 ghproxy 命中旧缓存，也会被识别并换源（jsdelivr 按 commit SHA 取，不可变）。
-  rm -f /root/.full.try
-  if curl -fsSL --connect-timeout 5 -m 60 "$u" -o /root/.full.try 2>/dev/null \
-     && grep -q singleIpRadio /root/.full.try \
-     && grep -q "FULL_REV=\"$SRC_REV_EXPECT\"" /root/.full.try \
-     && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.full.try; then
-    mv -f /root/.full.try /root/ipes_full.sh
-    break
-  fi
-  if [ -s /root/.full.try ] && grep -q singleIpRadio /root/.full.try; then
-    echo "[deploy][WARN] 该源返回的部署脚本世代过期（缺 FULL_REV=${SRC_REV_EXPECT}），换下一个源"
-  fi
-  rm -f /root/.full.try
-done
+# ============ C) 完整部署（真实 nodeId 绑定 + 内嵌调优兜底）============
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
-# 三个源都拿不到正确世代的部署脚本时，宁可明确失败，也不要拿旧副本/空文件去做半套部署
-if [ ! -s /root/ipes_full.sh ]; then
-  echo "[deploy][ERROR] 三个源的部署脚本都不可用或已过期，已终止（请稍后重试或检查网络/镜像）"
-  exit 1
-fi
-echo "[deploy] 已取回部署脚本 $(wc -c < /root/ipes_full.sh)B（世代校验通过：含 TUNE_REV=${TUNE_REV_EXPECT}）"
+echo "[step 2/2][deploy] 启动部署（世代已校验：FULL_REV=${SRC_REV_EXPECT} + TUNE_REV=${TUNE_REV_EXPECT}）..."
 export NODE_ACTIVATE_TOKEN="$JWT"
 # ★关键★ --province/--city 必须显式透传：否则 full.sh 会自己再识别一次（且它识别失败兜底是"北京"），
 #   同一台机器两处地区对不上（r21 绑业务用一个地区、注册设备用另一个）。
@@ -219,7 +264,7 @@ sleep 5
 echo "[deploy] 启动 5s 后日志预览（完整日志：tail -f /var/log/ipes_nohup.log）："
 tail -6 /var/log/ipes_nohup.log 2>/dev/null || echo "  (日志还没落盘)"
 
-# ============ C) 业务绑定自修复 ============
+# ============ D) 业务绑定自修复 ============
 cat > /root/ipes_repair_binding.py <<'PY'
 import json, os, re, ssl, subprocess, sys, time, urllib.request, urllib.error
 

@@ -3,11 +3,18 @@
 > **✅ 部署链路已在 2026-09-13 乾亿益-4-* 深圳克隆机 60 台全量实战验证**：60/60 服务中、业务 41、属性全落上、业务ID 全回填（详见 `IPES全量部署验收报告-60台-20260913.md`）
 > **✅ r21 调优项已在黄金机（cn-hangzhou 9f2adaf7）逐项实测标定**（2026-09-14，数据见文末「性能调优」）
 >
-> 脚本：`ipes_deploy_full.sh`（**v2026-09-14-r21**，commit `4082428fe8`）
+> 脚本：`ipes_deploy_full.sh`（**v20260915e**，commit `477dc50494`）
 > 新增：`ipes_tune.sh`（独立调优脚本，可单独对已跑量机器热应用）
 >
+> 🆕 **2026-09-15 修复「日志总卡在识别地区」**（commit `477dc50494` / r21 rev `20260915e`）
+> 1. 地区识别改为**多源 + 每源都带超时**：`myip.ipip.net`（主，`--max-time 8`）→ `ip-api.com`（备，中文，含"天津市→天津"归一）→ 阿里云元数据 `100.100.100.200` 的 `region-id`（备，内网免 DNS）→ 兜底 `浙江/杭州`。每一步都打印实际取值。
+> 2. 调优步骤不再 `bash ipes_tune.sh | tail -30`（管道会把输出憋到进程结束才吐 → 日志看着像卡死），改为**落盘 `/var/log/ipes_tune_run.log` + 每 10s 心跳 + `timeout 480` 硬上限**，结束时打印末尾 25 行。
+> 3. r21 把识别到的 `--province/--city` **透传给 full.sh**（full.sh 新增该参数），一次识别、两处一致；否则 full.sh 会自己再识别一次，兜底值是"北京"，容易和 r21 打架。
+> 4. 下载源扩为 3 个（ghproxy.net / ghfast.top / jsdelivr@commit），统一 `--connect-timeout 5`；full.sh 新增 `FULL_REV` 世代指纹，拒绝 CDN 缓存的旧版。
+> 5. 修掉一个隐蔽坑：**UTF-8 locale 下 bash 会把紧跟变量的中文当成变量名的一部分**（`"$X，日志"` → 整段变空），全仓 echo/log 里的 `$VAR` 已统一改成 `${VAR}`。
+>
 > 主源（jsDelivr，锁定 commit）：
-> `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@4082428fe8df7c9fcbf5ac524d6af2249eafd871/ipes_deploy_full.sh`
+> `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@477dc50494d42f7675233f0cd75be52cef1cb5d9/ipes_deploy_full.sh`
 > 备源（ghproxy，带时间戳穿透缓存）：
 > `https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)`
 >

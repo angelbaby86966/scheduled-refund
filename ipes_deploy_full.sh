@@ -1437,20 +1437,39 @@ run_ecache_deploy() {
 
 # IPES 稳定性看门狗：容器在但容器内 master 挂掉时自动拉起（每分钟一次）
 install_ipes_watchdog() {
-    print_step "安装 IPES 看门狗（master 挂掉自动拉起）"
+    print_step "安装 IPES 看门狗（master 挂掉自动拉起 + happ 路数防回弹）"
     cat > /usr/local/bin/ipes_watchdog.sh <<'WATCHDOG'
 #!/bin/bash
+# 1) ipes master 挂掉自动拉起
 docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ipes$' || exit 0
 if ! docker exec ipes sh -c 'ps -ef | grep -q "[i]pes start"' 2>/dev/null; then
   docker exec ipes /app/ipes/bin/ipes start >/dev/null 2>&1
   logger -t ipes_watchdog "ipes master was down -> restarted"
 fi
+# 2) happ 路数防回弹（后台重推 12 路模板时自动裁回 TARGET_HAPP）
+#    带 10 分钟冷却：防止「后台重推->裁剪重启->再重推」形成重启风暴
+WANT="${TARGET_HAPP:-9}"
+CFG="/app/ipes/var/db/ipes/happ-conf/custom.yml"
+docker exec ipes test -f "$CFG" 2>/dev/null || CFG="/app/ipses/var/db/ipses/happ-conf/custom.yml"
+docker exec ipes test -f "$CFG" 2>/dev/null || exit 0
+CUR=$(docker exec ipes sh -c "grep -cE '^happ\\.[0-9]+' $CFG" 2>/dev/null)
+[ -n "$CUR" ] && [ "$CUR" -gt "$WANT" ] || exit 0
+NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_align.last 2>/dev/null || echo 0)
+[ $((NOW - LAST)) -lt 600 ] && exit 0
+docker cp "ipes:$CFG" /tmp/_w_custom.yml >/dev/null 2>&1 || exit 0
+awk -v w="$WANT" '/^happ\.[0-9]+/{n=$0; sub(/:.*/,"",n); sub(/^happ\./,"",n); if(n+0<w)print; next} {print}' /tmp/_w_custom.yml > /tmp/_w_custom.new
+if docker cp /tmp/_w_custom.new "ipes:$CFG" >/dev/null 2>&1; then
+  docker restart ipes >/dev/null 2>&1
+  echo "$NOW" > /var/run/ipes_happ_align.last 2>/dev/null
+  logger -t ipes_watchdog "happ rebound ${CUR}->${WANT}, trimmed & restarted"
+fi
+rm -f /tmp/_w_custom.yml /tmp/_w_custom.new
 WATCHDOG
     chmod +x /usr/local/bin/ipes_watchdog.sh
     ( crontab -l 2>/dev/null | grep -v ipes_watchdog; echo "* * * * * /usr/local/bin/ipes_watchdog.sh >/dev/null 2>&1" ) | crontab -
     systemctl enable crond >/dev/null 2>&1 || true
     systemctl start crond >/dev/null 2>&1 || true
-    log_message "${GREEN}[成功]${NC} 看门狗已安装（cron 每分钟检查一次）"
+    log_message "${GREEN}[成功]${NC} 看门狗已安装（cron 每分钟检查：master 拉起 + happ 防回弹，冷却10分钟）"
 }
 
 run_ipes_onekey() {
@@ -1750,6 +1769,14 @@ main() {
     else
         log_message "${YELLOW}[警告]${NC} 无设备SN，跳过业务提交与状态流转"
     fi
+
+    # [9.5] 二次对齐 happ（r20-fix2 关键修复）
+    # 背景：[7.5] 裁到 9 后，[9] 提交业务41/流转「服务中」时后台会重新下发 12 路模板
+    #       覆盖 custom.yml，导致「刷出来还是 12」。必须在业务注册完成之后再裁一次。
+    # 兜底：后续若再回弹，由看门狗（ipes_watchdog.sh，每分钟）自动裁回，冷却10分钟。
+    print_step "二次对齐 happ 路数（业务注册后回弹修复）"
+    sleep 15   # 等后台配置下发落盘
+    align_happ_count
 
     # [10] SSH 安全收尾
     disable_root_ssh_login

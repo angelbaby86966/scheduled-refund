@@ -182,8 +182,8 @@ fetch_race() {
     # </dev/null 必须加：r21 是 `curl | bash` 跑的，stdin 就是脚本本身，
     # 后台任务若继承 stdin 会把后面的脚本文本叼走。
     ( curl -fsSL --connect-timeout 4 -m 25 "$u" -o "/root/.rc.$n.part" 2>/dev/null \
-      && mv -f "/root/.rc.$n.part" "/root/.rc.$n"; : > "/root/.rc.$n.done" ) </dev/null &
-    disown 2>/dev/null   # 摘出作业表：后面 pkill 掉落败镜像时，bash 不会再打一堆 "Terminated" 吓人
+      && mv -f "/root/.rc.$n.part" "/root/.rc.$n"; : > "/root/.rc.$n.done" ) </dev/null 2>/dev/null &
+    disown 2>/dev/null   # 摘出作业表；子 shell 的 stderr 也丢弃（curl 被 pkill 时子 shell 自己会打 "Terminated"，disown 挡不住这个）
   done
   echo "   [fy] $(basename "$dst")：并发 ${n} 个镜像，先到先用（单源上限 25s）"
   w=0

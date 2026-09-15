@@ -31,7 +31,7 @@ TUNE_VER="v2026-09-14-r21"
 #   原因：ghproxy.net 对上游 raw 有 CDN 缓存，?t= 只能绕过【它自己】那层，
 #         部署脚本曾因此静默下发到旧版 tune（实测 28428B 旧版 vs 29404B 新版）。
 #   ⇒ 每次改动 tune 必须同步抬高这个值，并让 push 脚本回写 inline 的 TUNE_REV_EXPECT。
-TUNE_REV="20260915c"
+TUNE_REV="20260915d"
 NCPU=$(nproc 2>/dev/null || echo 1)
 echo ""
 echo "=============================================================="
@@ -257,7 +257,7 @@ net.ipv4.neigh.default.gc_thresh2 = 16384
 net.ipv4.neigh.default.gc_thresh3 = 65536
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
-# --- conntrack（配合 raw NOTRACK，只兜底）---
+# --- conntrack（hashsize 调优；NOTRACK 已于 20260915d 移除）---
 net.netfilter.nf_conntrack_max = 1048576
 net.netfilter.nf_conntrack_tcp_timeout_established = 1200
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
@@ -421,7 +421,7 @@ tune_egress_route(){
 tune_egress_route
 
 # -----------------------------------------------------------------------------
-# 7) conntrack hashsize + raw NOTRACK（高并发下省 CPU）
+# 7) conntrack hashsize（高并发下省 CPU；全局 NOTRACK 已于 20260915d 移除）
 # -----------------------------------------------------------------------------
 echo "--- [7/8] conntrack ---"
 if ! grep -q hashsize /etc/modprobe.d/ipes-conntrack.conf 2>/dev/null; then
@@ -430,37 +430,16 @@ if ! grep -q hashsize /etc/modprobe.d/ipes-conntrack.conf 2>/dev/null; then
 else
   echo "  [conntrack] hashsize already set"
 fi
-# ★20260915 断网事故修复 v2★：CentOS 公共镜像 firewalld 默认 active，其回包放行依赖
-# conntrack 状态（ctstate ESTABLISHED,RELATED）。NOTRACK 一上，出站连接的回包全部
-# 无状态 → INPUT 丢弃 → 实例出站断（curl 卡死 / 阿里云 agent ClientNetworkBlocked）。
-# 三重保险：①NOTRACK 前先关 firewalld；②"死人开关"——150s 内没确认出站正常就无条件回滚
-#（脚本被杀/卡死/中途断线一律不例外）；③多径探活（TCP 直连 IP 免 DNS + 域名 HTTPS）。
+# ★20260915d 根治决策：彻底移除全局 NOTRACK★
+#   历史：424a49c / 6fbf453 曾两次给 NOTRACK 加保险（关 firewalld + 死人开关 + 多径探活），
+#   但 2026-09-15 上海全新 CentOS 公共镜像仍复现断网——8s 一次性探活通过 ≠ 安全：
+#   大包分片 / HTTPS 长连接在 NOTRACK 下随后断流，云助手 agent / SSH 全瘫；
+#   且 ipes-tune.service 开机重放会再次打上 NOTRACK，重启也救不回来。
+#   结论：全局 NOTRACK 省的那点 CPU 远不够赔一次断网——彻底移除，不再有例外。
+#   firewalld 保留停用（对齐深圳金标准；PCDN 以出站为主，避免默认 zone 挡服务端口）。
 systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null
-NET_OK_FLAG=/run/ipes_net_ok.flag
-rm -f "$NET_OK_FLAG"
-if timeout 6 bash -c 'echo > /dev/tcp/223.5.5.5/443' 2>/dev/null; then
-  echo "  [conntrack] baseline egress: OK"
-else
-  echo "  [conntrack] baseline egress: FAIL（加 NOTRACK 前就不通，非本次调优所致）"
-fi
-setsid bash -c 'for i in $(seq 1 30); do sleep 5; [ -f /run/ipes_net_ok.flag ] && exit 0; done; iptables -t raw -F 2>/dev/null; echo "[DEADMAN] 150s 未确认出站，已自动回滚 NOTRACK" >> /var/log/ipes_net_guard.log 2>/dev/null' >/dev/null 2>&1 &
-iptables -t raw -C PREROUTING -j NOTRACK 2>/dev/null || iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null
-iptables -t raw -C OUTPUT     -j NOTRACK 2>/dev/null || iptables -t raw -A OUTPUT     -j NOTRACK 2>/dev/null
-sleep 8
-egress_ok=0
-if timeout 6 bash -c 'echo > /dev/tcp/223.5.5.5/443' 2>/dev/null; then egress_ok=1
-elif curl -fsSL -m 8 -o /dev/null https://admin.zhouyi.top 2>/dev/null; then egress_ok=1
-elif curl -fsSL -m 8 -o /dev/null https://www.aliyun.com 2>/dev/null; then egress_ok=1
-fi
-if [ "$egress_ok" = "1" ]; then
-  touch "$NET_OK_FLAG"
-  echo "  [conntrack] NOTRACK rules: $(iptables -t raw -S 2>/dev/null | grep -c NOTRACK) (egress check passed)"
-else
-  echo "  [conntrack][ROLLBACK] NOTRACK 后出站探活失败，已回滚 NOTRACK（保留 conntrack）"
-  iptables -t raw -F 2>/dev/null
-  touch "$NET_OK_FLAG"
-  echo "[ROLLBACK] NOTRACK 后出站探活失败，已清空 raw 表" >> /var/log/ipes_net_guard.log 2>/dev/null
-fi
+# 兜底：清空 raw 表，把旧版本（或上次中断部署）残留的 NOTRACK 一并清掉（幂等、安全）
+iptables -t raw -F 2>/dev/null
 
 # -----------------------------------------------------------------------------
 # 7.5) 空间回收 —— ext4 接近满盘会明显劣化写入（黄金机实测根分区 93% 满）

@@ -50,6 +50,9 @@
 
 set -uo pipefail
 export LC_ALL=C
+# 世代指纹：r21 会 grep 这一行来确认"下发的不是 CDN 缓存里的旧版"。
+#   20260915e = 支持 --province/--city（由 r21 一次识别后透传）+ 地区识别加超时/元数据兜底。
+FULL_REV="20260915e"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -163,6 +166,8 @@ show_help() {
   --sk <secretKey>       设置密钥 (必需)
   --isp <运营商>          设置运营商 (必需，如: 电信、联通、移动)
   --num-dirs <数量>       云环境固定目录数量 (必需，如: 12)
+  --province <省>         省份 (可选；不传则自动按公网 IP 识别，识别失败兜底 北京)
+  --city <市>             城市 (可选；同上)
   --remark <备注>         设备注册备注 (可选)
   --business <业务ID>     提交的业务编号 (默认: 41)
   --target-happ <N>       happy 进程数 (默认: 6)
@@ -223,6 +228,8 @@ parse_arguments() {
             --sk)          SECRET_KEY="$2"; shift 2 ;;
             --isp)         ISP="$2"; shift 2 ;;
             --num-dirs)    NUM_DIRS="$2"; shift 2 ;;
+            --province)    province="$2"; shift 2 ;;
+            --city)        city="$2"; shift 2 ;;
             --remark)      REMARK="$2"; shift 2 ;;
             --business)    BUSINESS_ID="$2"; shift 2 ;;
             --target-happ) TARGET_HAPP="$2"; shift 2 ;;
@@ -747,9 +754,37 @@ show_installer_contents() {
 # =============================================================================
 get_location_info() {
     print_step "获取地理位置信息"
-    local ip_info=$(curl -s --retry 3 --retry-delay 2 --connect-timeout 5 --max-time 10 myip.ipip.net)
+    # 上层脚本（r21 等）已识别过就直接复用：一次识别、两处一致，也不再白等一次网络
+    if [ -n "${province:-}" ] && [ -n "${city:-}" ]; then
+        log_message "${GREEN}[成功]${NC} 地理位置(由上层传入): ${province} / ${city}"
+        return 0
+    fi
+    local ip_info=$(curl -s --retry 2 --retry-delay 1 --connect-timeout 4 --max-time 8 myip.ipip.net)
     province=$(echo "$ip_info" | awk -F ' ' '{print $4}' | tr -d ',')
     city=$(echo "$ip_info" | awk -F ' ' '{print $5}' | tr -d ',')
+
+    # 备源：阿里云元数据 region-id（内网 100.100.100.200，免 DNS/免公网）——比"默认北京"靠谱得多
+    if [ -z "$province" ] || [ -z "$city" ] || [ "$province" = "null" ] || [ "$city" = "null" ]; then
+        local rid loc
+        rid=$(curl -s --connect-timeout 2 --max-time 3 http://100.100.100.200/latest/meta-data/region-id 2>/dev/null | tr -d '\r\n')
+        case "$rid" in
+            cn-shenzhen)    loc="广东 深圳" ;;
+            cn-guangzhou)   loc="广东 广州" ;;
+            cn-heyuan)      loc="广东 河源" ;;
+            cn-hangzhou)    loc="浙江 杭州" ;;
+            cn-shanghai)    loc="上海 上海" ;;
+            cn-beijing)     loc="北京 北京" ;;
+            cn-qingdao)     loc="山东 青岛" ;;
+            cn-wuhan*)      loc="湖北 武汉" ;;
+            cn-chengdu)     loc="四川 成都" ;;
+            cn-hongkong)    loc="中国香港 中国香港" ;;
+            *)              loc="" ;;
+        esac
+        if [ -n "$loc" ]; then
+            province=${loc%% *}; city=${loc##* }
+            log_message "${YELLOW}[提示]${NC} myip.ipip.net 不可用，改用云元数据 region-id=$rid ⇒ ${province} / ${city}"
+        fi
+    fi
 
     if [ -z "$province" ] || [ "$province" = "null" ]; then
         province="北京"; log_message "${YELLOW}[警告]${NC} 省份获取失败，使用默认值: 北京"
@@ -1261,7 +1296,7 @@ ensure_docker_healthy() {
 # 【r18】带格式校验 + 重试的 SN 读取：流转前必须拿到合法 SN（76 位 hex）。
 # ⚠️ /etc/.mac 里的 32 位设备码（nodeID）不是 SN，必须用长度排除；
 # docker 被弄挂时先自愈再读，最多等 12×10s=120s。
-# 注意：本函数会被 $() 捕获，诊断信息直接写 $LOG_FILE，stdout 只输出 SN。
+# 注意：本函数会被 $() 捕获，诊断信息直接写 ${LOG_FILE}，stdout 只输出 SN。
 get_valid_sn() {
     local sn="" try=0
     while [ $try -lt 12 ]; do
@@ -1382,7 +1417,7 @@ run_ipes_deploy() {
         fi
     fi
 
-    log_message "部署命令: ecache_docker_install_ali_ten.sh -t 2 -i 1 -n $NUM_DIRS（已打补丁：镜像 -> $IPES_IMAGE_MIRROR）"
+    log_message "部署命令: ecache_docker_install_ali_ten.sh -t 2 -i 1 -n ${NUM_DIRS}（已打补丁：镜像 -> ${IPES_IMAGE_MIRROR}）"
     run_ecache_deploy
     return $?
 }
@@ -1542,7 +1577,7 @@ echo "=============================================================="
 # -----------------------------------------------------------------------------
 deconflict_sysctl_files(){
   local mine=/etc/sysctl.d/99-ipes.conf
-  [ -f "$mine" ] || { echo "  [deconf] 缺 $mine，跳过"; return 0; }
+  [ -f "$mine" ] || { echo "  [deconf] 缺 ${mine}，跳过"; return 0; }
   # r21 自己声明的「键 <TAB> 值」映射（只取未注释的生效行）
   local kvf=/tmp/ipes_mine_kv.txt
   awk -F= '/^[ \t]*[A-Za-z0-9._-]+[ \t]*=/{
@@ -2017,7 +2052,7 @@ echo ""
 echo "--- [guard] sysctl assert + self-heal ---"
 sctl_guard(){
   local conf=/etc/sysctl.d/99-ipes.conf
-  [ -f "$conf" ] || { echo "  [guard] 缺少 $conf，跳过"; return 0; }
+  [ -f "$conf" ] || { echo "  [guard] 缺少 ${conf}，跳过"; return 0; }
   # 归属标记做兜底自补（老节点升级上来时可能没有这一行）
   grep -q 'OWNER: ipes_tune' "$conf" 2>/dev/null || \
     sed -i '1i # OWNER: ipes_tune (r21)' "$conf" 2>/dev/null || true

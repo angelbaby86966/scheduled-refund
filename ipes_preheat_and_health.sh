@@ -243,11 +243,11 @@ EOF
   if [ "$POOLED" = "1" ]; then
     {
       echo "# PCDN 预热调优【只补不覆盖】"
-      echo "# 本机已存在 r21 权威文件 $R21_SYSCTL（OWNER: ipes_tune），故此处只输出它未管理的键；"
+      echo "# 本机已存在 r21 权威文件 ${R21_SYSCTL}（OWNER: ipes_tune），故此处只输出它未管理的键；"
       echo "# 同名键一律让位 —— 避免后跑的本脚本把 r21 的新值打回旧值。"
       filter_owned_by_r21 < /tmp/ipes_preheat_sysctl.raw
     } > "$SYSCTL_TARGET"
-    log "检测到 r21 归属标记 → 切换【只补不覆盖】：$SYSCTL_TARGET（补充键 $(grep -c '=' "$SYSCTL_TARGET" 2>/dev/null || echo 0) 项，排序在 99 之前故 r21 恒胜）"
+    log "检测到 r21 归属标记 → 切换【只补不覆盖】：${SYSCTL_TARGET}（补充键 $(grep -c '=' "$SYSCTL_TARGET" 2>/dev/null || echo 0) 项，排序在 99 之前故 r21 恒胜）"
   else
     cp /tmp/ipes_preheat_sysctl.raw "$SYSCTL_TARGET"
     log "未检测到 r21 归属标记 → 沿用原行为写入 $SYSCTL_TARGET"
@@ -279,7 +279,7 @@ EOF
   sysctl -e -p "$SYSCTL_TARGET" >>/tmp/ipes_sysctl.err 2>&1 || true
   if [ "$POOLED" = "1" ] && [ -f "$R21_SYSCTL" ]; then
     sysctl -e -p "$R21_SYSCTL" >>/tmp/ipes_sysctl.err 2>&1 || true
-    log "已按「先 $SYSCTL_TARGET → 后 $R21_SYSCTL」顺序重放 ⇒ r21 新值为最终值"
+    log "已按「先 $SYSCTL_TARGET → 后 ${R21_SYSCTL}」顺序重放 ⇒ r21 新值为最终值"
   fi
   if [ -s /tmp/ipes_sysctl.err ]; then
     _e=$(grep -iE 'unknown|error|cannot|invalid' /tmp/ipes_sysctl.err 2>/dev/null | head -3 | tr '\n' ' ')

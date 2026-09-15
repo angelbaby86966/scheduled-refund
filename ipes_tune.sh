@@ -50,7 +50,7 @@ echo "=============================================================="
 # -----------------------------------------------------------------------------
 deconflict_sysctl_files(){
   local mine=/etc/sysctl.d/99-ipes.conf
-  [ -f "$mine" ] || { echo "  [deconf] 缺 $mine，跳过"; return 0; }
+  [ -f "$mine" ] || { echo "  [deconf] 缺 ${mine}，跳过"; return 0; }
   # r21 自己声明的「键 <TAB> 值」映射（只取未注释的生效行）
   local kvf=/tmp/ipes_mine_kv.txt
   awk -F= '/^[ \t]*[A-Za-z0-9._-]+[ \t]*=/{
@@ -525,7 +525,7 @@ echo ""
 echo "--- [guard] sysctl assert + self-heal ---"
 sctl_guard(){
   local conf=/etc/sysctl.d/99-ipes.conf
-  [ -f "$conf" ] || { echo "  [guard] 缺少 $conf，跳过"; return 0; }
+  [ -f "$conf" ] || { echo "  [guard] 缺少 ${conf}，跳过"; return 0; }
   # 归属标记做兜底自补（老节点升级上来时可能没有这一行）
   grep -q 'OWNER: ipes_tune' "$conf" 2>/dev/null || \
     sed -i '1i # OWNER: ipes_tune (r21)' "$conf" 2>/dev/null || true

@@ -6,8 +6,18 @@
 #     --sk 16d6c46443308e62bb51f22c074a90ed \
 #     --jwt eyJ... \
 #     --isp 电信 [--province 浙江 --city 杭州 --num-dirs 12 --usbw 200]
-# 未传 --province/--city 时，自动按本机公网 IP 识别；识别失败兜底为 浙江/杭州。
+# 未传 --province/--city 时，自动按本机公网 IP 识别（多源、每个源都带超时）；
+# 识别失败兜底为 浙江/杭州，并把结果透传给 ipes_deploy_full.sh（一次识别、两处一致）。
+#
+# ★20260915 修复"总卡在识别地区 / 看着没反应"★
+#   ① 地区识别：官方 zyy_init 那行 `curl -s myip.ipip.net` 没带超时，机房侧一抖就无限等；
+#      这里每个源都带 --max-time，主源失败自动换备源（ip-api 中文 / 云元数据 region-id）。
+#   ② 调优步骤：原来 `bash ipes_tune.sh 2>&1 | tail -30` —— 管道会把 tune 的全部输出
+#      憋到进程结束才吐，云助手日志就永远定在"使用地理位置"那一行，看起来像卡死。
+#      改成「落盘 + 每 10s 心跳 + timeout 480 硬上限」，全程可见、有界。
+#   ③ 下载：统一加 --connect-timeout，并多一个国内可达镜像源。
 set +e
+R21_REV="20260915e"
 
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
@@ -37,14 +47,65 @@ if [[ -z "$AK" || -z "$SK" || -z "$JWT" ]]; then
   exit 1
 fi
 
+echo "[r21] rev=$R21_REV  $(date '+%F %T')  host=$(hostname)  pid=$$"
+echo "[r21] 本次参数: isp=$ISP num-dirs=$NUM_DIRS usbw=$USBW province=${PROVINCE:-自动} city=${CITY:-自动}"
+
+# -----------------------------------------------------------------------------
 # 自动识别省份/城市（若未显式传入）
+#   与官方 zyy_init_max.sh 同源同算法：curl myip.ipip.net → awk -F' ' '{print $4/$5}'
+#   （实测字段：[1]=当前 [2]=IP：x.x.x.x [3]=来自于：中国 [4]=省 [5]=市 [6]=运营商）
+#   但官方那行没超时 —— 机房侧一抖就无限等，表现就是"卡在识别地区"。
+#   这里每个源都带 --max-time；主源失败换备源；最后才落兜底值。
+# -----------------------------------------------------------------------------
+# 省名归一：ip-api 会返回"天津市/广东省"，而 ipip 返回"天津/广东"，统一成后者
+geo_norm_prov() {
+  printf '%s' "$1" | sed -e 's/省$//' -e 's/市$//' -e 's/壮族自治区$//' \
+    -e 's/回族自治区$//' -e 's/维吾尔自治区$//' -e 's/自治区$//' -e 's/特别行政区$//'
+}
+geo_norm_city() { printf '%s' "$1" | sed -e 's/市$//'; }
+# region-id（cn-shenzhen）→ 省市：内网元数据是最后的可靠兜底
+geo_map_region() {
+  case "$1" in
+    cn-shenzhen)    echo "广东 深圳" ;;
+    cn-guangzhou)   echo "广东 广州" ;;
+    cn-heyuan)      echo "广东 河源" ;;
+    cn-hangzhou)    echo "浙江 杭州" ;;
+    cn-shanghai)    echo "上海 上海" ;;
+    cn-beijing)     echo "北京 北京" ;;
+    cn-qingdao)     echo "山东 青岛" ;;
+    cn-wuhan*)      echo "湖北 武汉" ;;
+    cn-chengdu)     echo "四川 成都" ;;
+    cn-zhangjiakou) echo "河北 张家口" ;;
+    cn-hongkong)    echo "中国香港 中国香港" ;;
+    *)              echo "" ;;
+  esac
+}
 get_location_info() {
-  local ip_info=$(curl -s myip.ipip.net 2>/dev/null)
+  local ip_info p c rid loc j
+  # ① 主源：myip.ipip.net（与官方一致）
+  ip_info=$(curl -s --connect-timeout 4 --max-time 8 myip.ipip.net 2>/dev/null)
   if [ -n "$ip_info" ]; then
-    local p=$(echo "$ip_info" | awk -F ' ' '{print $4}' | tr -d ',')
-    local c=$(echo "$ip_info" | awk -F ' ' '{print $5}' | tr -d ',')
-    if [ -n "$p" ] && [ "$p" != "null" ] && [ "$p" != " " ]; then PROVINCE="$p"; fi
-    if [ -n "$c" ] && [ "$c" != "null" ] && [ "$c" != " " ]; then CITY="$c"; fi
+    p=$(printf '%s\n' "$ip_info" | awk -F ' ' '{print $4}' | tr -d ',')
+    c=$(printf '%s\n' "$ip_info" | awk -F ' ' '{print $5}' | tr -d ',')
+    [ -n "$p" ] && [ "$p" != "null" ] && PROVINCE="$p"
+    [ -n "$c" ] && [ "$c" != "null" ] && CITY="$c"
+  fi
+  echo "[geo] 主源 myip.ipip.net      -> ${PROVINCE:-?} / ${CITY:-?}"
+  # ② 备源：ip-api.com（中文 JSON，海外但常年可达）
+  if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
+    j=$(curl -s --connect-timeout 4 --max-time 8 "http://ip-api.com/json/?lang=zh-CN&fields=regionName,city" 2>/dev/null)
+    p=$(printf '%s' "$j" | sed -n 's/.*"regionName":"\([^"]*\)".*/\1/p')
+    c=$(printf '%s' "$j" | sed -n 's/.*"city":"\([^"]*\)".*/\1/p')
+    [ -n "$p" ] && PROVINCE="$(geo_norm_prov "$p")"
+    [ -n "$c" ] && CITY="$(geo_norm_city "$c")"
+    echo "[geo] 备源 ip-api.com(zh-CN)  -> ${PROVINCE:-?} / ${CITY:-?}"
+  fi
+  # ③ 备源：阿里云元数据 region-id（内网 100.100.100.200，免 DNS、免公网）
+  if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
+    rid=$(curl -s --connect-timeout 2 --max-time 3 "http://100.100.100.200/latest/meta-data/region-id" 2>/dev/null | tr -d '\r\n')
+    loc=$(geo_map_region "$rid")
+    if [ -n "$loc" ]; then PROVINCE=${loc%% *}; CITY=${loc##* }; fi
+    echo "[geo] 备源 region-id(${rid:-无响应}) -> ${PROVINCE:-?} / ${CITY:-?}"
   fi
   # 兜底：识别失败仍用浙江/杭州
   [ -z "$PROVINCE" ] && PROVINCE="浙江"
@@ -54,6 +115,8 @@ if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
   echo "[INFO] 未提供 --province/--city，尝试根据公网 IP 自动识别..."
   get_location_info
   echo "[INFO] 使用地理位置: $PROVINCE / $CITY"
+else
+  echo "[INFO] 使用指定地理位置: $PROVINCE / $CITY"
 fi
 
 # ============ A) 系统调优（r21：磁盘吞吐 + 上下行）============
@@ -66,26 +129,44 @@ TUNE_SHA="6fbf453cc1e2c729931f892f5db835b80d26e272"
 #   还强制要求版本指纹相等；不相等即判过期 → 换下一个源（jsdelivr 按 commit SHA 取，不可变）。
 TUNE_REV_EXPECT="20260915c"
 TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
-TUNE2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
+TUNE2="https://ghfast.top/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
+TUNE3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
 TUNE_OK=0
-for u in "$TUNE1" "$TUNE2"; do
+echo "[step 1/2][tune] 拉取调优脚本（3 个源依次尝试，每个源 --connect-timeout 5 -m 30）..."
+for u in "$TUNE1" "$TUNE2" "$TUNE3"; do
+  echo "  [tune] 尝试源: $(printf '%s' "$u" | sed -e 's|?t=[0-9]*||' | cut -c1-64)..."
   # 先下到临时文件：否则源不可达时 /root/ipes_tune.sh 会残留上一版，
   # 而后面 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记 → 会复用这个过期副本
   rm -f /root/.tune.try
-  if curl -fsSL -m 30 "$u" -o /root/.tune.try 2>/dev/null \
+  if curl -fsSL --connect-timeout 5 -m 30 "$u" -o /root/.tune.try 2>/dev/null \
      && grep -q "IPES TUNE" /root/.tune.try \
      && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.tune.try; then
     mv -f /root/.tune.try /root/ipes_tune.sh
     TUNE_OK=1; break
   fi
   if [ -s /root/.tune.try ] && grep -q "IPES TUNE" /root/.tune.try; then
-    echo "[tune][WARN] 该源返回的 tune 版本过期（缺 TUNE_REV=$TUNE_REV_EXPECT，多为 CDN 缓存），换下一个源"
+    echo "[tune][WARN] 该源返回的 tune 版本过期（缺 TUNE_REV=${TUNE_REV_EXPECT}，多为 CDN 缓存），换下一个源"
   fi
   rm -f /root/.tune.try
 done
 if [ "$TUNE_OK" = "1" ]; then
-  echo "[tune] $(grep -o 'TUNE_REV=\"[^\"]*\"' /root/ipes_tune.sh | head -1) $(grep -o 'TUNE_VER=\"[^\"]*\"' /root/ipes_tune.sh | head -1) applying ..."
-  bash /root/ipes_tune.sh 2>&1 | tail -30
+  echo "[tune] $(grep -o 'TUNE_REV="[^"]*"' /root/ipes_tune.sh | head -1) $(grep -o 'TUNE_VER="[^"]*"' /root/ipes_tune.sh | head -1) applying ..."
+  # ★不再 `| tail -30`★：管道会把 tune 的全部输出憋到进程结束才吐 → 云助手日志定在上一行
+  #   不动，看着像卡死。改为落盘 + 心跳（每 10s 一行）+ timeout 480 硬上限。
+  : > /var/log/ipes_tune_run.log
+  timeout 480 bash /root/ipes_tune.sh >>/var/log/ipes_tune_run.log 2>&1 &
+  TUNE_PID=$!
+  while kill -0 "$TUNE_PID" 2>/dev/null; do
+    sleep 10
+    kill -0 "$TUNE_PID" 2>/dev/null || break
+    echo "[tune] 运行中 $(date '+%H:%M:%S') | 最近: $(tail -1 /var/log/ipes_tune_run.log 2>/dev/null | cut -c1-90)"
+  done
+  wait "$TUNE_PID"; TUNE_RC=$?
+  if [ "$TUNE_RC" = "124" ]; then
+    echo "[tune][WARN] 480s 超时被强制结束 —— 调优可能只做了一半（不阻塞部署；可事后单跑 /usr/local/bin/ipes-tune.sh）"
+  fi
+  echo "[tune] 结束 rc=${TUNE_RC}，日志末尾 25 行："
+  tail -25 /var/log/ipes_tune_run.log 2>/dev/null
 else
   echo "[tune][WARN] 调优脚本下载失败（或两个源的内容都过期）；主脚本 r21 内嵌同一份，部署时会补做"
   # ★关键★：把过期副本删掉。否则下方 ipes_deploy_full.sh 的"版本一致性闸门"只认 OWNER 标记，
@@ -99,34 +180,44 @@ fi
 
 # ============ B) 完整部署（r21：真实 nodeId 绑定 + 内嵌调优兜底）============
 SRC_SHA="6fbf453cc1e2c729931f892f5db835b80d26e272"
+SRC_REV_EXPECT="20260915e"
 SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
-SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${SRC_SHA}/ipes_deploy_full.sh"
-for u in "$SRC1" "$SRC2"; do
+SRC2="https://ghfast.top/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_deploy_full.sh?t=$(date +%s)"
+SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${SRC_SHA}/ipes_deploy_full.sh"
+echo "[step 2/2][deploy] 拉取部署脚本（约 110KB，3 个源依次尝试）..."
+for u in "$SRC1" "$SRC2" "$SRC3"; do
   # 同样要求"含当前世代的内嵌 tune"：full_deploy 里内嵌的正是 tune 全文，含 TUNE_REV 指纹。
   # 这样即使 ghproxy 命中旧缓存，也会被识别并换源（jsdelivr 按 commit SHA 取，不可变）。
   rm -f /root/.full.try
-  if curl -fsSL -m 60 "$u" -o /root/.full.try 2>/dev/null \
+  if curl -fsSL --connect-timeout 5 -m 60 "$u" -o /root/.full.try 2>/dev/null \
      && grep -q singleIpRadio /root/.full.try \
+     && grep -q "FULL_REV=\"$SRC_REV_EXPECT\"" /root/.full.try \
      && grep -q "TUNE_REV=\"$TUNE_REV_EXPECT\"" /root/.full.try; then
     mv -f /root/.full.try /root/ipes_full.sh
     break
   fi
   if [ -s /root/.full.try ] && grep -q singleIpRadio /root/.full.try; then
-    echo "[deploy][WARN] 该源返回的部署脚本世代过期（缺 TUNE_REV=$TUNE_REV_EXPECT），换下一个源"
+    echo "[deploy][WARN] 该源返回的部署脚本世代过期（缺 FULL_REV=${SRC_REV_EXPECT}），换下一个源"
   fi
   rm -f /root/.full.try
 done
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
-# 两个源都拿不到正确世代的部署脚本时，宁可明确失败，也不要拿旧副本/空文件去做半套部署
+# 三个源都拿不到正确世代的部署脚本时，宁可明确失败，也不要拿旧副本/空文件去做半套部署
 if [ ! -s /root/ipes_full.sh ]; then
-  echo "[deploy][ERROR] 两个源的部署脚本都不可用或已过期，已终止（请稍后重试或检查网络/镜像）"
+  echo "[deploy][ERROR] 三个源的部署脚本都不可用或已过期，已终止（请稍后重试或检查网络/镜像）"
   exit 1
 fi
-echo "[deploy] 已取回部署脚本 $(wc -c < /root/ipes_full.sh)B（世代校验通过：含 TUNE_REV=$TUNE_REV_EXPECT）"
+echo "[deploy] 已取回部署脚本 $(wc -c < /root/ipes_full.sh)B（世代校验通过：含 TUNE_REV=${TUNE_REV_EXPECT}）"
 export NODE_ACTIVATE_TOKEN="$JWT"
-nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null &
+# ★关键★ --province/--city 必须显式透传：否则 full.sh 会自己再识别一次（且它识别失败兜底是"北京"），
+#   同一台机器两处地区对不上（r21 绑业务用一个地区、注册设备用另一个）。
+nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" \
+  --province "$PROVINCE" --city "$CITY" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null &
 DEPLOY_PID=$!
 echo "已后台启动部署 PID=$DEPLOY_PID"
+sleep 5
+echo "[deploy] 启动 5s 后日志预览（完整日志：tail -f /var/log/ipes_nohup.log）："
+tail -6 /var/log/ipes_nohup.log 2>/dev/null || echo "  (日志还没落盘)"
 
 # ============ C) 业务绑定自修复 ============
 cat > /root/ipes_repair_binding.py <<'PY'

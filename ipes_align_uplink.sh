@@ -308,7 +308,7 @@ EOF
   if r21_owned; then
     {
       echo "# PCDN 全锥 NAT / 上行最大化【只补不覆盖】（本文件由 ipes_align_uplink.sh 生成）"
-      echo "# 本机已有 r21 权威文件 $R21_SYSCTL，故此处只输出它未管理的键，同名键一律让位。"
+      echo "# 本机已有 r21 权威文件 ${R21_SYSCTL}，故此处只输出它未管理的键，同名键一律让位。"
       filter_owned_by_r21 < /tmp/align_nat.raw
     } > /etc/sysctl.d/98-ipes-nat.conf
     log "r21 已接管内核调优 → NAT 文件仅保留其未管理的键（$(grep -c '=' /etc/sysctl.d/98-ipes-nat.conf 2>/dev/null || echo 0) 项），不再把 r21 新值打回"
@@ -438,7 +438,7 @@ EOF
     if r21_owned; then
       {
         echo "# 内联兜底调优【只补不覆盖】（拉取预热脚本失败时的降级路径）"
-        echo "# 本机已有 r21 权威文件 $R21_SYSCTL，故此处只输出它未管理的键。"
+        echo "# 本机已有 r21 权威文件 ${R21_SYSCTL}，故此处只输出它未管理的键。"
         filter_owned_by_r21 < /tmp/align_fallback.raw
       } > /etc/sysctl.d/50-ipes-fallback.conf
       log "r21 已接管 → 兜底写入 50-ipes-fallback.conf（仅 $(grep -c '=' /etc/sysctl.d/50-ipes-fallback.conf 2>/dev/null || echo 0) 项 r21 未管理的键）"
@@ -493,7 +493,7 @@ align_cache(){
       case "$fs" in
         ext4|ext3|ext2) resize2fs "$root_dev" >/dev/null 2>&1 || warn "resize2fs 失败" ;;
         xfs)            xfs_growfs / >/dev/null 2>&1 || warn "xfs_growfs 失败" ;;
-        *)              warn "未知文件系统 $fs，未扩容" ;;
+        *)              warn "未知文件系统 ${fs}，未扩容" ;;
       esac
       log "在线扩容后 /data 可用: $(df -h /data 2>/dev/null | awk 'NR==2{print $4"/"$2}')"
     else
@@ -534,7 +534,7 @@ reduce_happ_to_target(){
   local cur="$1" tgt="$TARGET_HAPP" cfg="$2" i nums pat
   [ -z "$tgt" ] || [ "$tgt" -lt 1 ] 2>/dev/null && { log "TARGET_HAPP 无效($tgt)，跳过削减"; return 0; }
   [ "$cur" -gt "$tgt" ] 2>/dev/null || return 0
-  log "happ 数 $cur > $tgt，开始削减至精确目标（保留 happ.0..happ.$((tgt-1))，删多余数据目录）"
+  log "happ 数 $cur > ${tgt}，开始削减至精确目标（保留 happ.0..happ.$((tgt-1))，删多余数据目录）"
   # 1) 备份 custom.yml
   [ -n "$cfg" ] && { cp -a "$cfg" "${cfg}.reduce.bak" 2>/dev/null; CFG_BAK="${cfg}.reduce.bak"; }
   # 2) 构造待删索引正则 happ.{tgt}..happ.{cur-1}
@@ -556,7 +556,7 @@ reduce_happ_to_target(){
     rm -rf "/data/happ/happ.$i" 2>/dev/null || true
   done
   # 5) 重启容器重读 custom.yml（identity 在 /data 卷，不重置）
-  log "重启容器 $C 以重读 custom.yml（happ 精确对齐到 $tgt）"
+  log "重启容器 $C 以重读 custom.yml（happ 精确对齐到 ${tgt}）"
   docker restart "$C" >/dev/null 2>&1 || true
   sleep 3
   return 0
@@ -581,7 +581,7 @@ align_ipes(){
   if [ "$ALIGN_HAPP" != "1" ]; then
     log "ALIGN_HAPP!=1，跳过 happ 结构对齐"
   elif [ "$cur_happ" -lt "$TARGET_HAPP" ] 2>/dev/null; then
-    log "happ 数 $cur_happ < $TARGET_HAPP，开始补齐（建目录 + 改 custom.yml args + 注入 docker_run 挂载，保活安全）"
+    log "happ 数 $cur_happ < ${TARGET_HAPP}，开始补齐（建目录 + 改 custom.yml args + 注入 docker_run 挂载，保活安全）"
     local i base xbi
     # 1) 建缺失的 happ 目录 + 身份文件（必须是文件，建成目录会让 IPES 读配置失败）
     for i in $(seq "$cur_happ" $((TARGET_HAPP-1))); do
@@ -629,17 +629,17 @@ align_ipes(){
       log "原始 docker_run 已含全部 happ 挂载，无需改动"
     fi
   elif [ "$cur_happ" -gt "$TARGET_HAPP" ] 2>/dev/null; then
-    log "happ 数 $cur_happ > $TARGET_HAPP，削减至精确目标（TARGET_HAPP 为精确目标而非仅下限）"
+    log "happ 数 $cur_happ > ${TARGET_HAPP}，削减至精确目标（TARGET_HAPP 为精确目标而非仅下限）"
     reduce_happ_to_target "$cur_happ" "$CFG"
   else
-    log "happ 数已精确对齐（$cur_happ == $TARGET_HAPP），不动结构"
+    log "happ 数已精确对齐（$cur_happ == ${TARGET_HAPP}），不动结构"
   fi
 
   # (b) 镜像 tag 不一致 → 只替换 tag（作用域极小，先备份）
   if [ -n "$cur_img" ] && [ "$cur_img" != "$TARGET_IMG" ]; then
     cp -a "$DR" "${DR}.imgbak.$(date +%s)" 2>/dev/null || true
     if sed -i -E "s#${IMG_BASE}:[A-Za-z0-9._-]+#${TARGET_IMG}#g" "$DR" 2>/dev/null; then
-      log "已把 docker_run 内镜像 tag 对齐为 $TARGET_TAG（原文件已备份）"
+      log "已把 docker_run 内镜像 tag 对齐为 ${TARGET_TAG}（原文件已备份）"
       need=1
     fi
   fi
@@ -759,7 +759,7 @@ TODO
 # =============================================================================
 main(){
   SECONDS=0
-  echo -e "\033[1;36m########## IPES 对齐「跑量好的节点」开始（模式: $MODE） ##########\033[0m"
+  echo -e "\033[1;36m########## IPES 对齐「跑量好的节点」开始（模式: ${MODE}） ##########\033[0m"
   log "目标: happ=${TARGET_HAPP}  镜像=$TARGET_IMG  ALIGN_HAPP=${ALIGN_HAPP}  FORCE_CLEAR_TC=${FORCE_CLEAR_TC}  SKIP_IPES=${SKIP_IPES}"
 
   take_snapshot "0/6 对齐前快照"

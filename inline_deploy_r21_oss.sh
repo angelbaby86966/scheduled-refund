@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # IPES 一键部署 r21（OSS 短链版：调优 + 部署）
 # 用法：
-#   curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh | bash -s -- \
+#   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/inline_deploy_r21_oss.sh | bash -s -- \
 #     --ak 06d78b19bd0d9fc0aa300c6d \
 #     --sk 16d6c46443308e62bb51f22c074a90ed \
 #     --jwt eyJ... \
@@ -17,9 +17,9 @@
 #      改成「落盘 + 每 10s 心跳 + timeout 480 硬上限」，全程可见、有界。
 #   ③ 下载：统一加 --connect-timeout，并多一个国内可达镜像源。
 set +e
-R21_REV="20260915f"
+R21_REV="20260915g"
 
-AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
+AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1; DRY_RUN=0
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
 ADMIN_API_HOST="https://admin.zhouyi.top"; BUSINESS_ID=41
 
@@ -36,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --bw-num) BW_NUM="$2"; shift 2 ;;
     --business-id) BUSINESS_ID="$2"; shift 2 ;;
     --admin-host) ADMIN_API_HOST="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done
@@ -130,21 +131,28 @@ fi
 #   ③ 原来先下 tune(33KB) 再下 full(110KB)，两次下载、两个失败点。现在只下 full，
 #      再把里面内嵌的同一份 tune 抽出来先跑（两者逐字节一致），少一次下载。
 #   ④ 已成功下过、且世代匹配的机器，重跑直接复用本地文件，零网络。
+#   ⑤ 镜像表按实测重排（2026-09-15，阿里云杭州 SWAS 实测）：
+#      gh-proxy.com 1.6s ≈ ghfast.top 2.4s < ghproxy.net 3.0s < jsdelivr 3.4s；
+#      hub.gitmirror.com / gcore.jsdelivr.net 实测已死（连接 000），直接剔除；
+#      每个镜像同时给「commit 定点」（不可变→CDN 长期命中）与「main+?t=」（强制最新）
+#      两种地址，让竞速自己挑 —— 旧版会被下面的世代指纹闸门直接淘汰。
 REPO="angelbaby86966/scheduled-refund"
 SRC_SHA="477dc50494d42f7675233f0cd75be52cef1cb5d9"
 SRC_REV_EXPECT="20260915e"     # ipes_deploy_full.sh 的 FULL_REV
 TUNE_REV_EXPECT="20260915c"    # ipes_tune.sh 的 TUNE_REV
+TS=$(date +%s)
 
-mk_urls() {   # $1=文件名  $2=commit
+mk_urls() {   # $1=文件名
   printf '%s\n' \
-    "https://ghproxy.net/https://raw.githubusercontent.com/${REPO}/$2/$1" \
-    "https://ghfast.top/https://raw.githubusercontent.com/${REPO}/$2/$1" \
-    "https://gh-proxy.com/https://raw.githubusercontent.com/${REPO}/$2/$1" \
-    "https://hub.gitmirror.com/https://raw.githubusercontent.com/${REPO}/$2/$1" \
-    "https://fastly.jsdelivr.net/gh/${REPO}@$2/$1" \
-    "https://gcore.jsdelivr.net/gh/${REPO}@$2/$1" \
-    "https://cdn.jsdelivr.net/gh/${REPO}@$2/$1" \
-    "https://raw.githubusercontent.com/${REPO}/$2/$1"
+    "https://gh-proxy.com/https://raw.githubusercontent.com/${REPO}/${SRC_SHA}/$1" \
+    "https://gh-proxy.com/https://raw.githubusercontent.com/${REPO}/main/$1?t=${TS}" \
+    "https://ghfast.top/https://raw.githubusercontent.com/${REPO}/${SRC_SHA}/$1" \
+    "https://ghfast.top/https://raw.githubusercontent.com/${REPO}/main/$1?t=${TS}" \
+    "https://ghproxy.net/https://raw.githubusercontent.com/${REPO}/${SRC_SHA}/$1" \
+    "https://ghproxy.net/https://raw.githubusercontent.com/${REPO}/main/$1?t=${TS}" \
+    "https://cdn.jsdelivr.net/gh/${REPO}@${SRC_SHA}/$1" \
+    "https://fastly.jsdelivr.net/gh/${REPO}@${SRC_SHA}/$1" \
+    "https://raw.githubusercontent.com/${REPO}/${SRC_SHA}/$1"
 }
 
 # 毫秒时间戳（GNU date 支持 %N；BSD/精简环境退化为秒×1000，只为打印好看）
@@ -203,9 +211,9 @@ fetch_race() {
 }
 
 echo "[step 1/2] 取回部署脚本（并发多镜像竞速）..."
-FULL_URLS=( $(mk_urls ipes_deploy_full.sh "$SRC_SHA") )
+FULL_URLS=( $(mk_urls ipes_deploy_full.sh) )
 if ! fetch_race /root/ipes_full.sh singleIpRadio "FULL_REV=\"$SRC_REV_EXPECT\"" "${FULL_URLS[@]}"; then
-  echo "[deploy][ERROR] 8 个镜像都没取到正确世代的部署脚本，已终止（稍后原样重跑即可）"
+  echo "[deploy][ERROR] ${#FULL_URLS[@]} 个镜像都没取到正确世代的部署脚本，已终止（稍后原样重跑即可）"
   exit 1
 fi
 
@@ -219,7 +227,7 @@ if [ -s /root/.tune.extract ] && grep -q "IPES TUNE" /root/.tune.extract \
 else
   rm -f /root/.tune.extract 2>/dev/null
   echo "[tune] 内嵌抽取失败，回退为单独下载（同样并发竞速）..."
-  TUNE_URLS=( $(mk_urls ipes_tune.sh "$SRC_SHA") )
+  TUNE_URLS=( $(mk_urls ipes_tune.sh) )
   if ! fetch_race /root/ipes_tune.sh "IPES TUNE" "TUNE_REV=\"$TUNE_REV_EXPECT\"" "${TUNE_URLS[@]}"; then
     echo "[tune][WARN] 调优脚本没取到；部署脚本内嵌有同一份，full 会自己补跑"
     # 关键：清掉"世代不对"的旧副本，否则 full.sh 的一致性闸门会把它当成可用版本复用
@@ -228,6 +236,20 @@ else
       echo "[tune][WARN] 已移除过期副本 /root/ipes_tune.sh，避免被一致性闸门复用"
     fi
   fi
+fi
+
+# ---------- 干跑开关：只验证「地区识别 + 脚本下载」，机器状态零改动 ----------
+if [ "$DRY_RUN" = "1" ]; then
+  echo "[dry-run] 仅验证「地区识别 + 脚本下载」链路；不执行调优/部署/绑定，机器状态零改动"
+  for f in ipes_full.sh ipes_tune.sh; do
+    if [ -s "/root/$f" ]; then
+      echo "[dry-run]   $f  $(wc -c < "/root/$f")B  $(grep -oE '(FULL|TUNE)_REV="[^"]*"' "/root/$f" | head -1)"
+    else
+      echo "[dry-run]   $f  缺失 ❌"
+    fi
+  done
+  echo "[dry-run] 通过 ✅（正式执行请去掉 --dry-run）"
+  exit 0
 fi
 
 # ============ B) 先跑调优（独立脚本，幂等、可重复执行）============

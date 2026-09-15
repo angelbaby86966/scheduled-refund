@@ -1461,6 +1461,54 @@ run_ipes_onekey() {
     return $?
 }
 
+# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（默认 9）
+# 背景：后台默认下发的 custom.yml 多为 12 路（通用大内存模板），
+#       在 1GB 小内存机上 12 路 happ:vod 空载就吃 ~240MB，跑量后易 OOM 杀进程失联。
+#       这里在部署完成后把容器配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 9」。
+# 注：用 docker cp 读改写回，绕开 bind-mount 不允许 sed -i(rename) 的 Device busy 限制。
+align_happ_count() {
+    local want="${TARGET_HAPP:-9}"
+    local cfg="/app/ipes/var/db/ipes/happ-conf/custom.yml"
+    # 不同镜像路径兜底
+    docker exec ipes test -f "$cfg" 2>/dev/null || cfg="/app/ipses/var/db/ipses/happ-conf/custom.yml"
+    if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
+        log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
+        return 0
+    fi
+    if ! docker exec ipes test -f "$cfg" 2>/dev/null; then
+        log_message "${YELLOW}[对齐]${NC} 未找到 custom.yml（$cfg），跳过 happ 对齐"
+        return 0
+    fi
+    if ! docker cp "ipes:$cfg" /tmp/_happ_custom.yml >/dev/null 2>&1; then
+        log_message "${YELLOW}[对齐]${NC} 取出容器配置失败，跳过 happ 对齐"
+        return 0
+    fi
+    local cur
+    cur=$(grep -cE '^happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null || echo 0)
+    log_message "[对齐] 当前 happ 条目数=$cur，目标=$want"
+    if [ "$cur" -le "$want" ]; then
+        log_message "${GREEN}[对齐]${NC} 当前($cur) <= 目标($want)，无需裁剪"
+        rm -f /tmp/_happ_custom.yml
+        return 0
+    fi
+    awk -v w="$want" '/^happ\.[0-9]+/{n=$0; sub(/:.*/,"",n); sub(/^happ\./,"",n); if(n+0<w)print; next} {print}' /tmp/_happ_custom.yml > /tmp/_happ_custom.new
+    if ! docker cp /tmp/_happ_custom.new "ipes:$cfg" >/dev/null 2>&1; then
+        log_message "${YELLOW}[对齐]${NC} 写回容器配置失败，跳过"
+        rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new
+        return 0
+    fi
+    log_message "${GREEN}[对齐]${NC} 已裁剪到 $want 路，重启 ipes 容器使配置生效"
+    docker restart ipes >/dev/null 2>&1
+    sleep 10
+    local new=0
+    if docker cp "ipes:$cfg" /tmp/_happ_custom.yml >/dev/null 2>&1; then
+        new=$(grep -cE '^happ\.[0-9]+' /tmp/_happ_custom.yml 2>/dev/null || echo 0)
+    fi
+    log_message "[对齐] 重启后 happ 条目数=$new"
+    rm -f /tmp/_happ_custom.yml /tmp/_happ_custom.new
+    return 0
+}
+
 check_ipes_containers() {
     local count
     count=$(docker ps 2>/dev/null | grep -c ipes || true)
@@ -1576,6 +1624,10 @@ main() {
     else
         log_message "${YELLOW}[信息]${NC} 跳过 ipes_onekey（--skip-onekey）"
     fi
+
+    # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 9）
+    # 后台默认下发 12 路时，这里裁到 9 并重启容器，确保「刷出来就是 9」，小内存机不再 OOM。
+    align_happ_count
 
     # [8] 安装 nload（可选观测工具，r15 起改为**后台并行安装**，不再阻塞主流程）
     print_step "安装 nload（后台并行，不阻塞）"

@@ -1702,8 +1702,11 @@ main() {
 
     log_message "${GREEN}开始业务 ${BUSINESS_ID}（q2）全拉满部署...${NC}"
 
-    # [0.9] BBR 内核保障（在一切业务动作之前装好 5.4 内核并设默认启动项）
-    enable_bbr_kernel
+    # [0.9] BBR 内核保障（r20-fix5：改为后台安装，不阻塞部署 —— 内核包走海外源最慢 7 分钟，
+    #       同步等待会让「重置→注册→绑定」整体拖到 10 分钟。后台装完自动设默认启动项，下次重启生效。）
+    enable_bbr_kernel &
+    BBR_PID=$!
+    log_message "[BBR] 内核安装已转入后台 (PID=$BBR_PID)，部署继续不等待"
 
     # [1] zycloud agent
     print_step "检测服务器环境并部署 zycloud agent"

@@ -109,7 +109,11 @@ nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-di
 DEPLOY_PID=$!
 echo "已后台启动部署 PID=$DEPLOY_PID"
 
-# ============ C) 业务绑定自修复 ============
+# ============ C) 业务绑定自修复（r20-fix4 根治版） ============
+# 三大修复：
+#   1) is_bound 读 nodeInfo（vendor/usbw 真正所在），不再读 nominalInfo（恒 0，导致永远误判未绑定→反复重绑）
+#   2) 节点匹配优先用本机 device_code（32hex nodeID）精确匹配；按 IP 兜底时排除 status=offline 的孤儿记录
+#   3) stateflow 的 hostname 必须用 76hex 真业务SN（ipes_sn），绝不用后台 sn 字段（那是 UUID，会毁掉业务标签）
 cat > /root/ipes_repair_binding.py <<'PY'
 import json, os, re, ssl, sys, time, urllib.request, urllib.error
 
@@ -154,8 +158,27 @@ def get_public_ip():
         except Exception: continue
     return None
 
-def find_node_by_ip(pubip, max_pages=80):
-    candidates = []
+def get_local_node_id():
+    # edge_client 的 device_code 即后台 32hex nodeID（r19+ 已验证）
+    for f in ["/usr/local/edge_zycloud/device_code"]:
+        try:
+            v = open(f).read().strip()
+            if re.fullmatch(r'[0-9a-f]{32}', v): return v
+        except Exception: pass
+    return None
+
+def get_real_sn():
+    # 76hex 业务SN：只认容器内 ipes_sn / 宿主 IPES_SN，绝不用后台 sn（UUID）
+    for cmd in ["docker exec ipes cat /app/ipes/bin/ipes_sn",
+                "cat /opt/soft/disk/IPES_SN"]:
+        try:
+            v = os.popen(cmd + " 2>/dev/null").read().strip()
+            if len(v) >= 60: return v
+        except Exception: pass
+    return None
+
+def fetch_all_nodes(max_pages=80):
+    out = []
     for page in range(1, max_pages + 1):
         code, txt = admin_call(f"/api/edgeNode/getEdgeNodeList?page={page}&pageSize=200")
         if code != 200:
@@ -163,24 +186,39 @@ def find_node_by_ip(pubip, max_pages=80):
         d = json.loads(txt)
         arr = (d.get('data') or {}).get('list', [])
         total = (d.get('data') or {}).get('total', 0)
-        for it in arr:
-            if it.get('publicIP') == pubip:
-                candidates.append(it)
+        out.extend(arr)
         if page * 200 >= total: break
         time.sleep(0.15)
-    if not candidates: return None
+    return out
+
+def pick_node(pubip, local_nid):
+    nodes = fetch_all_nodes()
+    if local_nid:
+        for it in nodes:
+            if it.get('nodeID') == local_nid:
+                log(f"按 device_code 精确匹配到本机节点: {local_nid}")
+                return it
+        log(f"device_code={local_nid} 尚未出现在后台，等待注册...")
+        return None
+    # 兜底：按 IP 匹配，排除 offline 孤儿，优先 inService
+    cands = [it for it in nodes if it.get('publicIP') == pubip and it.get('status') != 'offline']
+    if not cands: return None
     stage_rank = {'inService': 3, 'configured': 2, 'waitAudit': 1}
-    candidates.sort(key=lambda x: (stage_rank.get(x.get('stage'), 0), x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
-    return candidates[0]
+    cands.sort(key=lambda x: (stage_rank.get(x.get('stage'), 0), x.get('nodeUpdateTime') or x.get('UpdatedAt') or ''), reverse=True)
+    return cands[0]
 
 def is_bound(ni):
     if not ni: return False
     if ni.get('stage') != 'inService': return False
-    info = ni.get('nominalInfo') or {}
+    info = ni.get('nodeInfo') or {}          # ★ 绑定信息在 nodeInfo，nominalInfo 恒空是正常形态
     return info.get('vendorSuggestCustomers') == BUSINESS_ID and info.get('usbw') == NODE_USBW
 
+def tag_ok(ni, sn):
+    tags = ni.get('business_tags') or []
+    return bool(tags) and any(t.get('hostName') == sn for t in tags)
+
 def do_bind(node_id, sn):
-    log(f"为活跃节点 {node_id} 补绑业务 {BUSINESS_ID}")
+    log(f"为本机节点 {node_id} 补绑业务 {BUSINESS_ID}")
     for stage in ['configured','configured']:
         code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": stage}, "POST")
         log(f"  -> {stage}: HTTP {code} {txt[:120]}")
@@ -197,6 +235,7 @@ def do_bind(node_id, sn):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
+    # ★ hostname 必须是 76hex 真业务SN（写后台 hostName/业务标签），传 UUID 会毁标签
     code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
@@ -204,18 +243,27 @@ def main():
     pubip = get_public_ip()
     if not pubip: log("[ERROR] 无法获取公网 IP"); sys.exit(1)
     log(f"本机公网 IP: {pubip}")
+    local_nid = get_local_node_id()
+    log(f"本机 device_code(nodeID): {local_nid or '未读到，走IP兜底'}")
+    sn = None
     ni = None
     for i in range(48):
-        ni = find_node_by_ip(pubip)
-        if ni: break
-        log(f"等待节点出现在后台... ({i+1}/48)"); time.sleep(10)
+        if not sn:
+            sn = get_real_sn()
+            if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
+        ni = pick_node(pubip, local_nid)
+        if ni and sn: break
+        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(10)
     if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
-    log(f"找到节点: {ni.get('nodeID')} stage={ni.get('stage')} vendor={(ni.get('nominalInfo') or {}).get('vendorSuggestCustomers')} usbw={(ni.get('nominalInfo') or {}).get('usbw')}")
-    if is_bound(ni): log("[OK] 已绑定，无需修复"); sys.exit(0)
-    do_bind(ni.get('nodeID'), ni.get('sn', ''))
-    time.sleep(2)
-    ni = find_node_by_ip(pubip)
-    if is_bound(ni): log("[OK] 修复成功"); sys.exit(0)
+    info = ni.get('nodeInfo') or {}
+    log(f"节点: {ni.get('nodeID')} stage={ni.get('stage')} status={ni.get('status')} nodeInfo.vendor={info.get('vendorSuggestCustomers')} usbw={info.get('usbw')}")
+    if is_bound(ni) and (not sn or tag_ok(ni, sn)):
+        log("[OK] 已绑定且业务标签正确，无需修复"); sys.exit(0)
+    do_bind(ni.get('nodeID'), sn or "")
+    time.sleep(3)
+    ni = pick_node(pubip, local_nid)
+    if is_bound(ni) and (not sn or tag_ok(ni, sn)):
+        log("[OK] 修复成功"); sys.exit(0)
     else: log("[ERROR] 修复后仍未达标"); sys.exit(1)
 
 if __name__ == '__main__':

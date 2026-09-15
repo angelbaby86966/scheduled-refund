@@ -64,7 +64,7 @@ TUNE_SHA="424a49c66886a7f3a93a6377d7ed6451436dca42"
 # ★防"静默下发旧版"★：ghproxy.net 对上游 raw 有 CDN 缓存（?t= 只绕它自己那层），
 #   实测曾取回 28428B 旧版而不是 29404B 新版。故除"含 IPES TUNE"外，
 #   还强制要求版本指纹相等；不相等即判过期 → 换下一个源（jsdelivr 按 commit SHA 取，不可变）。
-TUNE_REV_EXPECT="20260915b"
+TUNE_REV_EXPECT="20260915c"
 TUNE1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_tune.sh?t=$(date +%s)"
 TUNE2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${TUNE_SHA}/ipes_tune.sh"
 TUNE_OK=0

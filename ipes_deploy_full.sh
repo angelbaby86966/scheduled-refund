@@ -1509,6 +1509,95 @@ align_happ_count() {
     return 0
 }
 
+# 【r20-fix+】PCDN 专用激进磁盘强化（写缓存吞吐放大器）
+# 背景：r21 ipes_tune.sh 已做基础队列/挂载调优，但偏保守——刻意把 read_ahead_kb 钉在 256
+#       （实证并发读大预读是负优化），且未触碰真正决定「拉缓存写盘速度」的三大杠杆：
+#         ① 写回限流 wbt（内核默认会限制写带宽，对大块顺序写是天花板级负优化）
+#         ② 脏页缓冲比例（太小→频繁小写入；放大→在 RAM 聚合成大块再落盘，吞吐更高）
+#         ③ vfs 元数据缓存（PCDN 海量小缓存文件，保住 dentry/inode 缓存=查找/命中更快）
+#       本函数在 r21 基础上补齐这三点，并加 page-cluster 放大页缓存预读。
+# 适用：纯 PCDN 缓存节点（只跑缓存、不跑其他业务）。幂等、可反复执行；/sys 值重启即失，
+#       故同时安装 systemd 服务 pcdn-disk-tune.service 开机自动重放。
+pcdn_disk_tune() {
+    log_message "${GREEN}[磁盘强化]${NC} 应用 PCDN 激进磁盘调优（wbt 关 / 脏页放大 / vfs 缓存保活）..."
+    local tune=/usr/local/bin/pcdn_disk_tune.sh
+    cat > "$tune" <<'PCDN_TUNE_EOF'
+#!/bin/bash
+# PCDN 专用激进磁盘强化（幂等、可反复执行）
+set +e
+echo "[pcdn-disk-tune] $(date '+%F %T') start"
+# --- 1. 块层吞吐优先（在 r21 基础上叠加 wbt 关闭） ---
+for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
+  [ -d "$d" ] || continue
+  b=$(basename "$d")
+  echo none > "$d/queue/scheduler" 2>/dev/null
+  echo 0    > "$d/queue/rotational" 2>/dev/null
+  echo 0    > "$d/queue/add_random" 2>/dev/null
+  echo 256  > "$d/queue/read_ahead_kb" 2>/dev/null   # 并发读：保持 256（r21 实证更大更慢）
+  for _v in 8192 4096 1024; do echo "$_v" > "$d/queue/nr_requests" 2>/dev/null; [ "$(cat $d/queue/nr_requests 2>/dev/null)" = "$_v" ] && break; done
+  echo 0    > "$d/queue/nomerges" 2>/dev/null           # 允许请求合并，顺序写大幅减 IO 次数
+  hw=$(cat "$d/queue/max_hw_sectors_kb" 2>/dev/null); want=1024; [ -n "$hw" ] && [ "$hw" -lt "$want" ] 2>/dev/null && want=$hw
+  echo "$want" > "$d/queue/max_sectors_kb" 2>/dev/null
+  echo 2    > "$d/queue/rq_affinity" 2>/dev/null
+  # ★新增★ 关闭写回限流：内核默认 wbt 会限制写带宽，对「拉缓存大块顺序写」是天花板级负优化
+  [ -e "$d/queue/wbt_lat_usec" ] && echo 0 > "$d/queue/wbt_lat_usec" 2>/dev/null
+  echo "  [$b] sched=$(cat $d/queue/scheduler 2>/dev/null|tr -d '[]') ra=256K nr=$(cat $d/queue/nr_requests 2>/dev/null) nomerges=$(cat $d/queue/nomerges 2>/dev/null) wbt=off"
+done
+# --- 2. 文件系统挂载（ext4 减日志开销；xfs 提速日志） ---
+FSTYPE=$(findmnt -no FSTYPE / 2>/dev/null); CUR=$(findmnt -no OPTIONS / 2>/dev/null)
+if [ "$FSTYPE" = "ext4" ]; then ADD="noatime,nodiratime,commit=60,barrier=0,data=writeback"
+elif [ "$FSTYPE" = "xfs" ]; then ADD="logbsize=256k"
+else ADD=""; fi
+if [ -n "$ADD" ]; then
+  case "$CUR" in *data=writeback*) echo "  [fstab] already active";; *)
+    [ -f /etc/fstab ] && ! grep -q "data=writeback" /etc/fstab 2>/dev/null && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4")$4="defaults,noatime,nodiratime,commit=60,barrier=0,data=writeback"; if($2=="/"&&$3=="xfs")$4="defaults,logbsize=256k"; print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
+    mount -o "remount,$ADD" / 2>/dev/null && echo "  [remount] OK" || echo "  [remount] 下次重启由 fstab 生效"
+  esac
+fi
+# --- 3. 内核 VM：脏页放大 + vfs 缓存保活 + 页缓存预读（纯 PCDN 写缓存关键） ---
+cat > /etc/sysctl.d/99-pcdn-disk.conf <<'SYSCTL_EOF'
+# OWNER: pcdn_disk_tune —— PCDN 磁盘强化（脏页/缓存）
+vm.swappiness = 0
+vm.overcommit_memory = 1
+# 脏页缓冲放大：让「拉缓存写盘」先在 RAM 聚合成大块再落盘，吞吐更高（小内存机用比例，避免写风暴卡死）
+vm.dirty_background_ratio = 10
+vm.dirty_ratio = 30
+vm.dirty_expire_centisecs = 3000
+vm.dirty_writeback_centisecs = 1000
+# 元数据缓存保活：PCDN 海量小缓存文件，保住 dentry/inode 缓存=查找更快=命中更快
+vm.vfs_cache_pressure = 50
+# 页缓存预读放大：缓存读 miss 时一次多读 2MB 进 page cache（默认 128KB）
+vm.page-cluster = 8
+# 降低内存碎片：大块顺序写更容易凑出连续页
+vm.min_free_kbytes = 65536
+SYSCTL_EOF
+sysctl -e -p /etc/sysctl.d/99-pcdn-disk.conf >/dev/null 2>&1
+echo "[pcdn-disk-tune] done"
+PCDN_TUNE_EOF
+    chmod +x "$tune"
+    bash "$tune"
+    # 持久化：开机自动重放（/sys 重启即失）
+    if command -v systemctl >/dev/null 2>&1; then
+        cat > /etc/systemd/system/pcdn-disk-tune.service <<'UNIT_EOF'
+[Unit]
+Description=PCDN aggressive disk tune (reapply on boot)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pcdn_disk_tune.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable pcdn-disk-tune.service >/dev/null 2>&1
+        log_message "${GREEN}[磁盘强化]${NC} 已安装开机自启服务 pcdn-disk-tune.service"
+    fi
+    log_message "${GREEN}[磁盘强化]${NC} PCDN 磁盘调优已应用（wbt=off, dirty 放大, vfs_cache=50, page-cluster=8）"
+}
+
 check_ipes_containers() {
     local count
     count=$(docker ps 2>/dev/null | grep -c ipes || true)
@@ -1628,6 +1717,10 @@ main() {
     # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 9）
     # 后台默认下发 12 路时，这里裁到 9 并重启容器，确保「刷出来就是 9」，小内存机不再 OOM。
     align_happ_count
+
+    # [7.6] PCDN 专用激进磁盘强化（wbt 关 / 脏页放大 / vfs 缓存保活 / 页缓存预读放大）
+    # 只跑 PCDN 缓存的机器专用：把拉缓存写盘、缓存读命中的吞吐全部拉满，并持久化开机自启。
+    pcdn_disk_tune
 
     # [8] 安装 nload（可选观测工具，r15 起改为**后台并行安装**，不再阻塞主流程）
     print_step "安装 nload（后台并行，不阻塞）"

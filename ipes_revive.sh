@@ -45,15 +45,15 @@ say(){ echo "[$(ts)] $*"; }
 do_restart(){
   local why="$1"
   now=$(date +%s)
-  if [ "$DRY_RUN" = "1" ]; then say "DRY_RUN：本应重启（原因：$why），未执行"; return 0; fi
-  say "执行恢复重启（原因：$why）—— docker restart ipes，不重建容器 → SN 不变、缓存不丢"
+  if [ "$DRY_RUN" = "1" ]; then say "DRY_RUN：本应重启（原因：${why}），未执行"; return 0; fi
+  say "执行恢复重启（原因：${why}）—— docker restart ipes，不重建容器 → SN 不变、缓存不丢"
   echo "$now" > "$STATE"
   if docker restart ipes >/dev/null 2>&1; then
     say "已重启，等待服务恢复（约 3~5 分钟）..."
     for i in $(seq 1 30); do
       sleep 20
       h=$(docker exec ipes ./bin/ipes health 2>/dev/null | grep -oE 'happ:[0-9]+/[0-9]+' | head -1)
-      if [ -n "$h" ]; then say "服务已就绪（$h），第 $((i*20))s"; break; fi
+      if [ -n "$h" ]; then say "服务已就绪（${h}），第 $((i*20))s"; break; fi
       [ "$i" = "30" ] && say "⚠️ 10 分钟内未探到 happ，请人工检查"
     done
   else
@@ -73,7 +73,7 @@ HAPP=$(echo "$HEALTH_OUT" | grep -oE 'happ:[0-9]+/[0-9]+' | head -1)
 if [ -n "$HAPP" ]; then
   _cur=${HAPP#happ:}; _cur=${_cur%%/*}; _exp=${HAPP##*/}
   if [ "${_cur:-0}" -lt "${_exp:-0}" ]; then
-    say "⚠️ happy 进程不足（$HAPP）—— 真故障，执行恢复重启"
+    say "⚠️ happy 进程不足（${HAPP}）—— 真故障，执行恢复重启"
     do_restart "happ ${_cur}/${_exp} 掉线"; exit 0
   fi
 fi

@@ -139,7 +139,7 @@ fi
 REPO="angelbaby86966/scheduled-refund"
 SRC_SHA="477dc50494d42f7675233f0cd75be52cef1cb5d9"
 SRC_REV_EXPECT="20260915e"     # ipes_deploy_full.sh 的 FULL_REV
-TUNE_REV_EXPECT="20260915c"    # ipes_tune.sh 的 TUNE_REV
+TUNE_REV_EXPECT="20260915d"    # ipes_tune.sh 的 TUNE_REV
 TS=$(date +%s)
 
 mk_urls() {   # $1=文件名

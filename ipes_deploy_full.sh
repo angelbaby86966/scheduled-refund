@@ -1523,7 +1523,7 @@ TUNE_VER="v2026-09-14-r21"
 #   原因：ghproxy.net 对上游 raw 有 CDN 缓存，?t= 只能绕过【它自己】那层，
 #         部署脚本曾因此静默下发到旧版 tune（实测 28428B 旧版 vs 29404B 新版）。
 #   ⇒ 每次改动 tune 必须同步抬高这个值，并让 push 脚本回写 inline 的 TUNE_REV_EXPECT。
-TUNE_REV="20260915a"
+TUNE_REV="20260915b"
 NCPU=$(nproc 2>/dev/null || echo 1)
 echo ""
 echo "=============================================================="
@@ -1922,9 +1922,22 @@ if ! grep -q hashsize /etc/modprobe.d/ipes-conntrack.conf 2>/dev/null; then
 else
   echo "  [conntrack] hashsize already set"
 fi
+# ★20260915 断网事故修复★：CentOS 公共镜像 firewalld 默认 active，其回包放行依赖
+# conntrack 状态（ctstate ESTABLISHED,RELATED）。NOTRACK 一上，出站连接的回包全部
+# 无状态 → INPUT 丢弃 → 实例出站断（curl 卡死 / 阿里云 agent ClientNetworkBlocked）。
+# 因此 NOTRACK 前必须先关 firewalld；且加"探活回滚闸门"兜底任何未知环境。
+systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null
 iptables -t raw -C PREROUTING -j NOTRACK 2>/dev/null || iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null
 iptables -t raw -C OUTPUT     -j NOTRACK 2>/dev/null || iptables -t raw -A OUTPUT     -j NOTRACK 2>/dev/null
-echo "  [conntrack] NOTRACK rules: $(iptables -t raw -S 2>/dev/null | grep -c NOTRACK)"
+# 探活回滚闸门：NOTRACK 后 10 秒内出站必测，失败立即回滚（防任何环境踩坑断网）
+sleep 10
+if ! curl -fsSL -m 8 -o /dev/null https://admin.zhouyi.top 2>/dev/null \
+   && ! curl -fsSL -m 8 -o /dev/null https://www.aliyun.com 2>/dev/null; then
+  echo "  [conntrack][ROLLBACK] NOTRACK 后出站探活失败，已回滚 NOTRACK（保留 conntrack）"
+  iptables -t raw -F 2>/dev/null
+else
+  echo "  [conntrack] NOTRACK rules: $(iptables -t raw -S 2>/dev/null | grep -c NOTRACK) (egress check passed)"
+fi
 
 # -----------------------------------------------------------------------------
 # 7.5) 空间回收 —— ext4 接近满盘会明显劣化写入（黄金机实测根分区 93% 满）
@@ -2151,7 +2164,7 @@ TUNE_VER="v2026-09-14-r21"
 #   原因：ghproxy.net 对上游 raw 有 CDN 缓存，?t= 只能绕过【它自己】那层，
 #         部署脚本曾因此静默下发到旧版 tune（实测 28428B 旧版 vs 29404B 新版）。
 #   ⇒ 每次改动 tune 必须同步抬高这个值，并让 push 脚本回写 inline 的 TUNE_REV_EXPECT。
-TUNE_REV="20260915a"
+TUNE_REV="20260915b"
 NCPU=$(nproc 2>/dev/null || echo 1)
 echo ""
 echo "=============================================================="
@@ -2522,9 +2535,22 @@ if ! grep -q hashsize /etc/modprobe.d/ipes-conntrack.conf 2>/dev/null; then
 else
   echo "  [conntrack] hashsize already set"
 fi
+# ★20260915 断网事故修复★：CentOS 公共镜像 firewalld 默认 active，其回包放行依赖
+# conntrack 状态（ctstate ESTABLISHED,RELATED）。NOTRACK 一上，出站连接的回包全部
+# 无状态 → INPUT 丢弃 → 实例出站断（curl 卡死 / 阿里云 agent ClientNetworkBlocked）。
+# 因此 NOTRACK 前必须先关 firewalld；且加"探活回滚闸门"兜底任何未知环境。
+systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null
 iptables -t raw -C PREROUTING -j NOTRACK 2>/dev/null || iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null
 iptables -t raw -C OUTPUT     -j NOTRACK 2>/dev/null || iptables -t raw -A OUTPUT     -j NOTRACK 2>/dev/null
-echo "  [conntrack] NOTRACK rules: $(iptables -t raw -S 2>/dev/null | grep -c NOTRACK)"
+# 探活回滚闸门：NOTRACK 后 10 秒内出站必测，失败立即回滚（防任何环境踩坑断网）
+sleep 10
+if ! curl -fsSL -m 8 -o /dev/null https://admin.zhouyi.top 2>/dev/null \
+   && ! curl -fsSL -m 8 -o /dev/null https://www.aliyun.com 2>/dev/null; then
+  echo "  [conntrack][ROLLBACK] NOTRACK 后出站探活失败，已回滚 NOTRACK（保留 conntrack）"
+  iptables -t raw -F 2>/dev/null
+else
+  echo "  [conntrack] NOTRACK rules: $(iptables -t raw -S 2>/dev/null | grep -c NOTRACK) (egress check passed)"
+fi
 
 # -----------------------------------------------------------------------------
 # 7.5) 空间回收 —— ext4 接近满盘会明显劣化写入（黄金机实测根分区 93% 满）

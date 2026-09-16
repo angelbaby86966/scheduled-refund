@@ -1844,6 +1844,39 @@ PEAK_TXLOG_EOF
     }
     peak_uplink_tune
 
+    # [5.7] 日清与资源瘦身：匹配上机窗口 17:00 上机→23:30 下机（幂等；r20-live）
+    daily_clean_setup() {
+        log_message "执行 [5.7] 日清与资源瘦身（窗口外零占用）"
+        cat > /usr/local/bin/ipes_daily_clean.sh <<'CLEAN_EOF'
+#!/bin/bash
+# 每天 17:10 上机后执行：日志/垃圾/内存全瘦身，跑量前腾干净（不碰 /data 与容器）
+{
+echo "[$(date '+%F %T')] === daily clean ==="
+before=$(df -P / | tail -1 | awk '{print $3}')
+journalctl --vacuum-size=100M >/dev/null 2>&1
+find /var/lib/docker/containers -name '*-json.log' -size +20M -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
+docker image prune -f >/dev/null 2>&1
+yum clean all >/dev/null 2>&1
+rm -f /var/log/*.gz /var/log/*.1 /var/log/*.old /var/log/audit/audit.log.* /var/log/sa/sa[0-9][0-9] 2>/dev/null
+find /var/log -maxdepth 1 -name '*.log' -size +50M ! -name 'ipes_*' -exec truncate -s 10M {} \; 2>/dev/null
+rm -rf /var/tmp/* /tmp/yum* /tmp/tmp.* 2>/dev/null
+dmesg -c >/dev/null 2>&1
+sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+after=$(df -P / | tail -1 | awk '{print $3}')
+echo "disk freed KB: $((before - after)); free mem: $(free -m | awk 'NR==2{print $4"MB"}')"
+} >> /var/log/ipes_clean.log 2>&1
+find /var/log/ipes_clean.log -size +2M -exec truncate -s 100K {} \; 2>/dev/null
+exit 0
+CLEAN_EOF
+        chmod +x /usr/local/bin/ipes_daily_clean.sh
+        # cron 重排：txlog 只在跑量窗口(18:30-23:59)采样；日清 17:10；清掉全时段 txlog 旧条目
+        (crontab -l 2>/dev/null | grep -vE 'ipes_daily_clean|ipes_txlog'; \
+         echo '10 17 * * * /usr/local/bin/ipes_daily_clean.sh >/dev/null 2>&1'; \
+         echo '30-59 18-23 * * * /usr/local/bin/ipes_txlog.sh >/dev/null 2>&1') | crontab -
+        log_message "${GREEN}[成功]${NC} [5.7] 日清与资源瘦身完成"
+    }
+    daily_clean_setup
+
     # [6] IPES 初始部署
     local deploy_retry=0
     while [ $deploy_retry -lt 3 ]; do

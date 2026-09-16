@@ -98,8 +98,8 @@ if [ -n "$nic" ]; then ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 ))); fo
 iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null; iptables -t raw -A OUTPUT -j NOTRACK 2>/dev/null
 
 # ============ B) 完整部署（r20：用真实 nodeId 绑定，根治业务没落盘） ============
-SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-success-0914/ipes_deploy_full.sh?t=$(date +%s)"
-SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@a214464/ipes_deploy_full.sh"
+SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh?t=$(date +%s)"
+SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_deploy_full.sh"
 for u in "$SRC1" "$SRC2"; do
   curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break
 done

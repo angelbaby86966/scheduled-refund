@@ -9,7 +9,7 @@
   'use strict';
 
   // 🔥 启动标记：如果看不到这一行，说明 v2 文件没被加载
-  console.log('%c[aliyun-client-v2] v2.9 - 错误提示不再退化成无意义的 "HTTP 200"（暴露后端 hint/action 失配）', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+  console.log('%c[aliyun-client-v2] v2.7 - proxy 并发闸门6+40s超时+网络错误重试3次(修 AbortError 整批失败)', 'background:#ff5722;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
   console.log('[aliyun-client-v2] 加载时间:', new Date().toISOString());
 
   // ====== 强制拦截：所有打到 swas-open.aliyuncs.com 的请求改走 Edge Function 代理 ======
@@ -271,17 +271,8 @@
           var j = await resp.json();
           clearTimeout(timer);   // 等 JSON 解析完再清，body 卡住也能被超时打断
           if (!j.success) {
-            // 【2026-09-12 修复】原实现 `j.error || ('HTTP ' + resp.status)` 在「响应体没有 success 字段」
-            // 时会输出毫无意义的 "HTTP 200"，把真实原因完全掩盖。
-            // 典型场景：action 名大小写与后端 switch 不匹配 → 落 default 分支返回 {ok:true,hint:"aliyun-proxy alive"}，
-            // 于是 9 个地区全部报 "提交失败: HTTP 200"。现把响应体里的可读信息一并带出。
-            var _fallback = j.error || j.message || j.hint
-              || (j.received_action ? ('后端未注册该 action，收到: ' + j.received_action) : '')
-              || (j.ok === true ? '接口返回 ok 但没有 success 字段（疑似 action 名不匹配）' : '')
-              || ('HTTP ' + resp.status);
-            var be = new Error(_fallback);
+            var be = new Error(j.error || ('HTTP ' + resp.status));
             be.httpStatus = resp.status;
-            be.response = j;   // 【v2.8】兼容旧调用方（如 icIsAliveProbe 读 e.response.hint）
             if (__isRetryableNetErr(be, resp.status) && attempt < retries) {
               lastErr = be;
               await new Promise(function(r) { setTimeout(r, 1000 * attempt); });
@@ -994,15 +985,21 @@
      * 调用中心化交易类 API（CreateOrder 等）
      * —— CORS 黑洞，所有走代理
      */
-    async callCentralApi(action, params, opts) {
+    async callCentralApi(action, params) {
       var ak = getAccessKeyId(), sk = getAccessKeySecret();
       if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
-      // 【v2.8 提速】改走统一并发闸门（6 并发）+ 40s 超时 + 网络错误重试：
-      //   旧实现是裸 fetch，无闸门、无超时 —— 镜像轮询 + 跨地域 8 并发会一次性打满
-      //   Supabase Edge Function，导致其后每次 ListImages 卡到 ~30s（实测"轮询10→15轮"耗 151s），
-      //   页面表现为"明明在跑却像卡死"。走闸门后并发有上界、单次最长 40s，且抖动自动重试。
-      //   ⚠️ 下单类接口无 ClientToken（不可幂等），调用方须传 { retries: 1 } 关闭重试，避免丢包重试重复下单。
-      return await __proxyRequest({ action: action, ak_id: ak, ak_secret: sk, params: params }, opts || {});
+      var resp = await fetch(window.WB_SUPABASE_FUNCTIONS + '/aliyun-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action, ak_id: ak, ak_secret: sk, params: params })
+      });
+      var j = await resp.json();
+      if (!j.success) {
+        var e = new Error(j.error || (action + ' 失败'));
+        e.response = j;
+        throw e;
+      }
+      return j.data;
     },
 
     /** 创建订单（生成待支付订单） */
@@ -1025,7 +1022,7 @@
         RegionId: orderParams.RegionId,
         OrderType: 'Buy',
         Commodity: commodity,
-      }, { retries: 1 });   // ⚠️ 下单不可幂等（无 ClientToken）→ 禁重试
+      });
     },
 
     /**

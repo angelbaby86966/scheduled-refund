@@ -1773,6 +1773,77 @@ main() {
     # 都跑在 wbt=off / 脏页放大 / vfs 缓存保活 / 页缓存预读放大的环境里，给后台更干净的优质初评。
     pcdn_disk_tune
 
+    # [5.6] 峰值上行强化：晚高峰跑量特化（幂等；不碰 /data 与既有容器；r20-live 专属）
+    peak_uplink_tune() {
+        log_message "执行 [5.6] 峰值上行强化（dirty 20/10 + fd 1M + 保留块 2% + 日志封顶 + 峰前自检 + tx 采样）"
+        # ① sysctl 峰值键：写进权威 99-ipes.conf（打标幂等）。dirty 40/30→20/10：1G 内存下旧值回写洪峰可达 370M，会堵死上行读
+        local sctl=/etc/sysctl.d/99-ipes.conf
+        [ -f "$sctl" ] || touch "$sctl"
+        if ! grep -q "ipes-peak-tune" "$sctl"; then
+            sed -i 's/^vm\.dirty_ratio.*/vm.dirty_ratio = 20/; s/^vm\.dirty_background_ratio.*/vm.dirty_background_ratio = 10/' "$sctl"
+            cat >> "$sctl" <<PEAK_EOF
+# ipes-peak-tune (r20-live [5.6])
+net.ipv4.udp_mem = 65536 98304 131072
+net.ipv4.udp_rmem_min = 32768
+net.ipv4.udp_wmem_min = 32768
+net.ipv4.tcp_limit_output_bytes = 1048576
+net.ipv4.tcp_autocorking = 0
+net.core.netdev_budget = 3000
+PEAK_EOF
+        fi
+        sysctl -p "$sctl" >/dev/null 2>&1
+        # ② fd 上限 4096→1048576（容器继承必须写 dockerd；仅当 ipes 容器尚未创建时才重启 docker 使其生效）
+        local lim=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo 1048576)
+        case "$lim" in ''|*[!0-9]*) lim=1048576;; esac
+        [ "$lim" -gt 1048576 ] && lim=1048576
+        printf '* soft nofile %s\n* hard nofile %s\nroot soft nofile %s\nroot hard nofile %s\n' "$lim" "$lim" "$lim" "$lim" > /etc/security/limits.d/99-ipes.conf
+        mkdir -p /etc/systemd/system/docker.service.d
+        printf '[Service]\nLimitNOFILE=%s\nLimitNPROC=%s\n' "$lim" "$lim" > /etc/systemd/system/docker.service.d/limits.conf
+        systemctl daemon-reload 2>/dev/null
+        if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx ipes; then
+            systemctl restart docker 2>/dev/null
+        fi
+        # ③ 磁盘：root 保留块 5%→2%（30G 盘多出约 900M 缓存余量，缓解高位碎片与写入抖动）
+        local rootdev=$(findmnt -no SOURCE / 2>/dev/null)
+        [ -n "$rootdev" ] && tune2fs -m 2 "$rootdev" >/dev/null 2>&1
+        # ④ 日志封顶：journal 200M + docker 容器日志 >50M 截断 + 悬挂镜像清理（绝不 prune -a，会删 IPES 镜像）
+        mkdir -p /etc/systemd/journald.conf.d
+        printf '[Journal]\nSystemMaxUse=200M\n' > /etc/systemd/journald.conf.d/ipes.conf
+        systemctl restart systemd-journald 2>/dev/null
+        find /var/lib/docker/containers -name '*-json.log' -size +50M -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
+        docker image prune -f >/dev/null 2>&1
+        # ⑤ 峰前自检（每天 18:30 晚高峰开门前）：拉容器/清空间/记健康
+        cat > /usr/local/bin/ipes_peak_pcheck.sh <<'PEAK_PCHECK_EOF'
+#!/bin/bash
+L=/var/log/ipes_peak.log
+{
+echo "[$(date '+%F %T')] === peak pcheck ==="
+docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | grep -q '^ipes ' || { docker start ipes >/dev/null 2>&1; echo "ipes container started"; }
+U=$(df -P / | tail -1 | awk '{print int($5)}')
+if [ "$U" -ge 85 ]; then docker image prune -f >/dev/null 2>&1; journalctl --vacuum-size=200M >/dev/null 2>&1; fi
+echo "disk=${U}% bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) happ=$(pgrep -c -f 'happ:vod' 2>/dev/null) qdisc=$(tc qdisc show dev eth0 2>/dev/null | awk '{print $2}' | head -1)"
+} >> "$L" 2>&1
+find /var/log/ipes_peak.log -size +5M 2>/dev/null | xargs -r truncate -s 1M
+exit 0
+PEAK_PCHECK_EOF
+        chmod +x /usr/local/bin/ipes_peak_pcheck.sh
+        # ⑥ tx 跑量采样（每分钟一行，7 天后自动截断）
+        cat > /usr/local/bin/ipes_txlog.sh <<'PEAK_TXLOG_EOF'
+#!/bin/bash
+R=$(cat /sys/class/net/eth0/statistics/rx_bytes 2>/dev/null); T=$(cat /sys/class/net/eth0/statistics/tx_bytes 2>/dev/null)
+echo "$(date '+%F %T') rx=$R tx=$T" >> /var/log/ipes_tx.log
+[ "$(find /var/log/ipes_tx.log -mtime +7 2>/dev/null | wc -l)" -gt 0 ] && truncate -s 1M /var/log/ipes_tx.log
+exit 0
+PEAK_TXLOG_EOF
+        chmod +x /usr/local/bin/ipes_txlog.sh
+        # ⑦ cron 幂等追加（保留既有条目：bbr_boot / watchdog / health / olmt 限速窗口）
+        (crontab -l 2>/dev/null | grep -vE 'ipes_peak_pcheck|ipes_txlog'; \
+         echo '30 18 * * * /usr/local/bin/ipes_peak_pcheck.sh >/dev/null 2>&1'; \
+         echo '* * * * * /usr/local/bin/ipes_txlog.sh >/dev/null 2>&1') | crontab -
+        log_message "${GREEN}[成功]${NC} [5.6] 峰值上行强化完成"
+    }
+    peak_uplink_tune
+
     # [6] IPES 初始部署
     local deploy_retry=0
     while [ $deploy_retry -lt 3 ]; do

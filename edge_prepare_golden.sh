@@ -37,12 +37,7 @@ ok()   { log "✔ $*"; }
 # ===== 公开可配置项 =====
 DOCKER_INSTALL_URL="https://zyy-go.oss-cn-beijing.aliyuncs.com/script/install_docker/install_docker-ce.sh"
 IPES_INSTALL_URL="https://zyy-go.oss-cn-beijing.aliyuncs.com/script/Q2_test/ecache_auto_disk_install.sh"
-# ★2026-09-14 预热门户收敛★ 旧仓库 angelbaby86966/ipes-scripts 已删除；修复版收敛到 scheduled-refund。
-#   下载后强制校验共存修复指纹 'OWNER: ipes_tune'：不含则判定旧版、拒绝执行
-#   （宁可不跑预热，也不允许把 r21 的 99-ipes.conf 打回旧值）。
-PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
-PREHEAT_URL2="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/ipes_preheat_and_health.sh"
-PREHEAT_FP='OWNER: ipes_tune'
+PREHEAT_URL="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/ipes-scripts/main/ipes_preheat_and_health.sh"
 FIRSTBOOT_URL="https://angelbaby86966.github.io/scheduled-refund/edge_firstboot_register.sh"
 IPES_INSTALL_FLAG_I="${IPES_INSTALL_FLAG_I:-1}"
 IPES_INSTALL_FLAG_T="${IPES_INSTALL_FLAG_T:-2}"
@@ -124,22 +119,10 @@ ok "IPES 容器已就绪: $IPES_CID（镜像将包含业务本体）"
 
 # ============ 步骤 3：预热调优 + 健康检查 ============
 log "===== 步骤 3/7：预热调优 + 健康检查 ====="
-_ph_ok=0
-for _u in "$PREHEAT_URL" "$PREHEAT_URL2"; do
-  if curl -fsSL --connect-timeout 15 --max-time 90 "$_u" -o /tmp/ipes_preheat.sh 2>/dev/null \
-     && [ -s /tmp/ipes_preheat.sh ] && bash -n /tmp/ipes_preheat.sh 2>/dev/null; then
-    if grep -q "$PREHEAT_FP" /tmp/ipes_preheat.sh 2>/dev/null; then
-      _ph_ok=1; ok "预热脚本已就绪（共存修复指纹校验通过）: $_u"; break
-    fi
-    warn "下载到的预热脚本【缺少共存修复指纹】→ 判定为旧版，拒绝执行: $_u"
-  else
-    warn "预热脚本下载失败: $_u"
-  fi
-done
-if [ "$_ph_ok" = "1" ]; then
+if curl -fsSL "$PREHEAT_URL" -o /tmp/ipes_preheat.sh; then
   bash /tmp/ipes_preheat.sh || warn "调优脚本返回非0，可稍后手动执行预热"
 else
-  warn "跳过预热调优（未取得带指纹的修复版；r21 自身的 99-ipes.conf 依旧有效）"
+  warn "调优脚本下载失败，跳过"
 fi
 
 # ============ 步骤 4：IPES 容器开机自启 ============

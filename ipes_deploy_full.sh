@@ -1877,6 +1877,45 @@ CLEAN_EOF
     }
     daily_clean_setup
 
+    # [5.8] DDoS 主机层加固 + 网络小项：防中小型攻击，业务 UDP 零影响（幂等；r20-live）
+    ddos_guard_setup() {
+        log_message "执行 [5.8] DDoS 主机层加固（IPES_GUARD 链 + SYN/ICMP/SSH 限速 + backlog + 网卡小项）"
+        cat > /usr/local/bin/ipes_ddos_guard.sh <<'GUARD_EOF'
+#!/bin/bash
+# r20-live [5.8] DDoS 主机层加固 + 免费小项优化（幂等；绝不碰业务 UDP 流量）
+{
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535 net.core.somaxconn=65535 \
+  net.ipv4.icmp_echo_ignore_broadcasts=1 net.ipv4.icmp_ratelimit=1000 \
+  net.netfilter.nf_conntrack_udp_timeout=15 net.netfilter.nf_conntrack_udp_timeout_stream=60 >/dev/null 2>&1
+DEV=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}'); DEV=${DEV:-eth0}
+ip link set $DEV txqueuelen 10000 2>/dev/null
+ethtool -K $DEV gro on gso on tso on 2>/dev/null
+iptables -N IPES_GUARD 2>/dev/null
+iptables -F IPES_GUARD
+iptables -A IPES_GUARD -m state --state ESTABLISHED,RELATED -j RETURN
+iptables -A IPES_GUARD -m state --state INVALID -j DROP
+iptables -A IPES_GUARD -p icmp -m limit --limit 2/s --limit-burst 10 -j RETURN
+iptables -A IPES_GUARD -p icmp -j DROP
+iptables -A IPES_GUARD -p tcp --dport 22 -m state --state NEW -m limit --limit 6/min --limit-burst 10 -j RETURN
+iptables -A IPES_GUARD -p tcp --dport 22 -m state --state NEW -j DROP
+iptables -A IPES_GUARD -p tcp --syn -m limit --limit 200/s --limit-burst 400 -j RETURN
+iptables -A IPES_GUARD -p tcp --syn -j DROP
+iptables -A IPES_GUARD -j RETURN
+iptables -C INPUT -j IPES_GUARD 2>/dev/null || iptables -I INPUT 1 -j IPES_GUARD
+echo "[$(date '+%F %T')] guard applied on $DEV"
+} >> /var/log/ipes_guard.log 2>&1
+exit 0
+
+GUARD_EOF
+        chmod +x /usr/local/bin/ipes_ddos_guard.sh
+        /usr/local/bin/ipes_ddos_guard.sh
+        # 开机 90 秒后自动重打（iptables/网卡参数重启不持久，与 bbr_boot 同套路）
+        (crontab -l 2>/dev/null | grep -vE 'ipes_ddos_guard'; \
+         echo '@reboot sleep 90 && /usr/local/bin/ipes_ddos_guard.sh >/dev/null 2>&1') | crontab -
+        log_message "${GREEN}[成功]${NC} [5.8] DDoS 主机层加固完成"
+    }
+    ddos_guard_setup
+
     # [6] IPES 初始部署
     local deploy_retry=0
     while [ $deploy_retry -lt 3 ]; do

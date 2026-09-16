@@ -1374,8 +1374,17 @@ run_ipes_deploy() {
         if [ $health_exit_code -ne 0 ] || echo "$health_output" | grep -qi 'error'; then
             log_message "${YELLOW}[警告]${NC} ipes 健康检查异常，开始清理重建..."
             docker rm -f ipes
-            rm -rf /data
-            rm -rf /opt/ipes
+            # 【r20-fix4 克隆缓存保护】继承的热缓存是冷启动掉量的根因，误删会直接掉量。
+            # 仅当 /data 是独立挂载缓存盘时保留缓存；非挂载点（首装临时目录）才备份后清理。
+            if mountpoint -q /data 2>/dev/null; then
+                log_message "${CYAN}[信息]${NC} /data 为独立缓存盘，保留继承缓存，仅重建容器与程序"
+                rm -rf /opt/ipes
+            else
+                _bak="/data_bak_$(date +%s)"
+                log_message "${YELLOW}[警告]${NC} /data 非挂载点，备份后清理: mv /data -> ${_bak}"
+                mv -f /data "$_bak" 2>/dev/null || rm -rf /data
+                rm -rf /opt/ipes
+            fi
             log_message "${GREEN}[成功]${NC} ipes 清理完成"
         else
             log_message "${GREEN}[成功]${NC} ipes 健康检查正常，无需清理"

@@ -301,6 +301,23 @@ def is_golden(instance_id, public_ip=None):
     return (instance_id in GOLDEN_INSTANCE_IDS) or (public_ip and public_ip in GOLDEN_PUBLIC_IPS)
 
 
+# ===================== 退订豁免名单 =====================
+# 与上面的「黄金机」区别：黄金机是【镜像源机】，语义上克隆/部署/退订统统不得触碰；
+# 这里只免除【定时退订】——即需要长期在线的正式节点，不想被每日 23:35 的定时任务退掉。
+# 双保险：实例 ID + 公网 IP（IP 可能被重新绑定给别的实例；实例 ID 全局唯一永不复用）。
+# 维护：新增豁免时同步改 fc 侧代码（FC 定时退订是独立实现，不读本文件）。
+REFUND_EXEMPT_INSTANCE_IDS = {
+    "09ec95ba247642418bfc73da1b6ce8e4",   # 上海 · 张瑞瑶30 · 106.15.92.45（2026-09-17 用户要求保活不误退）
+}
+REFUND_EXEMPT_PUBLIC_IPS = {
+    "106.15.92.45",
+}
+
+
+def is_refund_exempt(instance_id, public_ip=None):
+    return (instance_id in REFUND_EXEMPT_INSTANCE_IDS) or (public_ip and public_ip in REFUND_EXEMPT_PUBLIC_IPS)
+
+
 def list_instances(ak, sk, region_id):
     """分页列出某地域全部实例，返回 [{regionId, instanceId}, ...]（已剔除黄金机）"""
     out = []
@@ -317,6 +334,9 @@ def list_instances(ak, sk, region_id):
                 continue
             if is_golden(iid, it.get("PublicIpAddress")):
                 log(f"\U0001f6d1 跳过黄金机 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
+                continue
+            if is_refund_exempt(iid, it.get("PublicIpAddress")):
+                log(f"\U0001f6e1 跳过退订豁免实例 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
                 continue
             out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0

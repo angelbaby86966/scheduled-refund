@@ -1421,7 +1421,17 @@ run_ecache_deploy() {
     #   bash 报 `line 582: syntax error` → 后续 ensure_docker_healthy 自愈时序错乱 → dockerd 起不来。
     #   入口侧另有 flock 单机互斥（第一道），此处为纵深防御（第二道）。函数返回时自动清理。
     local tmp_script="/tmp/.ecache_patched.$$.sh"
-    trap 'rm -f "$tmp_script"' RETURN
+    # 【r20-fix9｜致命 bug 修复】RETURN trap 必须①定义时展开路径 ②执行后自清除。
+    #   原因：bash 的 RETURN trap 是「全局注册、不随函数退出自动撤销」的 —— 它在 run_ecache_deploy
+    #   返回时触发一次（此时 local 还在），之后【调用链上每个函数返回都会再触发一次】，
+    #   而那时 tmp_script 早已随 local 作用域销毁；本脚本开头是 `set -uo pipefail`，
+    #   set -u 下引用已 unset 的变量会让【非交互 shell 直接退出】——不是子 shell，是整个部署进程。
+    #   2026-09-17 实证：上海新机 09ec95ba 报 `/root/ipes_full.sh: line 1408: tmp_script: unbound variable`
+    #   后静默退出（1408 正是 run_ipes_deploy 的 return 行 = trap 第二次触发点），
+    #   后续 [6.5]限速/[6.6]看门狗/[6.7]保活/[7]预热/[7.5][9.5]happ裁剪/[9]业务流转/[13]收尾 全部没跑，
+    #   节点停在「待配置」，靠早期 setsid 起的 ipes_repair_binding.py 兜底才勉强绑上。
+    #   已本地复现（set -u + local + RETURN trap + 上层函数返回 → exit 1）并验证本写法通过。
+    trap "rm -f '${tmp_script:-}'; trap - RETURN" RETURN
     local url
 
     # 【r16 裸机坑预防】CentOS7 docker 由 sysconfig flag 注入 --log-driver/--storage-driver，

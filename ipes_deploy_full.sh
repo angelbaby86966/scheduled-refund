@@ -145,6 +145,16 @@ BUSINESS_ID="41"
 TARGET_HAPP="9"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
+SKIP_REBOOT=0
+REBOOT_DELAY=60
+
+# 【r20-fix8】cron 作业的 PATH 补全。
+#   crond 给作业的环境 PATH 只有 /usr/bin:/bin（2026-09-17 实测），
+#   而 modprobe(/sbin)、sysctl/iptables/ip/tc/ethtool(/usr/sbin) 全不在其中，
+#   这些命令在 cron 里一律 command not found；脚本又多以 `2>/dev/null` 吞错，
+#   于是任务静默失效却"看起来成功"。实测受害：bbr_boot（BBR 从未启用）、
+#   ipes_ddos_guard（IPES_GUARD 链根本没建）、ipes_peak_pcheck（sysctl/tc 取不到值）。
+CRON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 province=""
 city=""
@@ -168,6 +178,7 @@ show_help() {
   --target-happ <N>       happy 进程数 (默认: 9)
   --skip-onekey           跳过 ipes_onekey 预热对齐
   --skip-olmt             跳过 olmt.sh 限速（希望节点跑满不封顶时加）
+  --no-reboot             不在收尾自动重启（默认：本次新装了内核才自动重启，让 BBR 生效）
   --node-token <token>    节点激活 token（待配置→服务中）
   --resource-type <1|2>   节点资源类型：1=汇聚 2=专线 (默认: 2 专线)
   --dial-type <type>      上网方式 (默认: staticNetSingle 固定公网单 IP)
@@ -228,6 +239,7 @@ parse_arguments() {
             --target-happ) TARGET_HAPP="$2"; shift 2 ;;
             --skip-onekey) SKIP_ONEKEY=1; shift ;;
             --skip-olmt)   SKIP_OLMT=1; shift ;;
+            --no-reboot)   SKIP_REBOOT=1; shift ;;
             --node-token)  NODE_ACTIVATE_TOKEN="$2"; shift 2 ;;
             --resource-type) NODE_RESOURCE_TYPE="$2"; shift 2 ;;
             --dial-type)   NODE_DIAL_TYPE="$2"; shift 2 ;;
@@ -1728,26 +1740,45 @@ enable_bbr_kernel() {
         log_message "${YELLOW}[BBR]${NC} 内核包下载失败，跳过 BBR（不影响本次部署）"
         return 0
     fi
+    # 【r20-fix8】记录"本次是否新装内核"：装之前 /boot 里没有它 → 说明这是台新机，
+    #   收尾时才可以安全地自动重启（已装过但没重启的存量机不自动重启，交人工判断）。
+    local fresh_install=0
+    [ -f /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 ] || fresh_install=1
     rpm -ivh /tmp/$F >/dev/null 2>&1
     rm -f /tmp/$F
     if [ -f /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 ]; then
+        [ "$fresh_install" -eq 1 ] && touch /var/run/ipes_kernel_installed_this_run
         grubby --set-default /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 2>/dev/null
         # 开机自动：加载 BBR + 确保 docker/ipes 容器起来（SWAS 的 /etc/sysctl.d、/etc/systemd/system 为只读，走 crontab @reboot）
         cat > /usr/local/bin/bbr_boot.sh <<'BBRBOOT'
 #!/bin/bash
 # BBR 开机自启 + docker/容器恢复（部署脚本固化）
+# 【r20-fix8】必须自带 PATH：cron 作业的 PATH 只有 /usr/bin:/bin，
+#   modprobe(/sbin)、sysctl(/usr/sbin) 均不在其中 → command not found 被静默吞掉。
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 (
-  sleep 30
-  modprobe tcp_bbr 2>/dev/null
-  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+  sleep 20
+  # ① 业务优先：先把 docker 与 ipes 容器拉起来
   for i in 1 2 3 4 5 6; do
     systemctl is-active docker >/dev/null 2>&1 && break
     systemctl start docker >/dev/null 2>&1; sleep 10
   done
   docker inspect ipes >/dev/null 2>&1 && docker start ipes >/dev/null 2>&1
-  logger -t bbr_boot "kernel=$(uname -r) cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-) >/dev/null 2>&1 &
+  echo "[$(date '+%F %T')] docker=$(systemctl is-active docker 2>/dev/null) container=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)"
+  # ② BBR：带重试。开机早期模块树/proc 未必就绪，单次尝试会失败（2026-09-17 实测踩过）
+  ok=0
+  for i in $(seq 1 18); do
+    if modprobe tcp_bbr 2>/dev/null \
+       && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 \
+       && sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 \
+       && [ "$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+      ok=1; break
+    fi
+    sleep 10
+  done
+  echo "[$(date '+%F %T')] kernel=$(uname -r) bbr_ok=$ok cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
+) >> /var/log/ipes_bbr_boot.log 2>&1 &
 BBRBOOT
         chmod +x /usr/local/bin/bbr_boot.sh
         ( crontab -l 2>/dev/null | grep -v bbr_boot; echo "@reboot /usr/local/bin/bbr_boot.sh" ) | crontab -
@@ -1764,6 +1795,142 @@ check_ipes_containers() {
     count=$(docker ps 2>/dev/null | grep -c ipes || true)
     [ "$count" -eq 1 ] && return 0
     return 1
+}
+
+# =============================================================================
+# 收尾一：[r20-fix8] 给 crontab 补 PATH 头
+# -----------------------------------------------------------------------------
+# crond 给作业的 PATH 只有 /usr/bin:/bin，导致 /sbin、/usr/sbin 下的
+# modprobe / sysctl / iptables / ip / tc / ethtool 全部 command not found。
+# 这里在 crontab 顶部写一行 PATH=，对**所有**现有与将来的 cron 条目一次性生效。
+# 幂等：已有 PATH 行就就地改值，不会重复插入。
+# =============================================================================
+ensure_cron_path() {
+    local cur
+    cur="$(crontab -l 2>/dev/null || true)"
+    if printf '%s\n' "$cur" | grep -qE '^[[:space:]]*PATH='; then
+        printf '%s\n' "$cur" | sed -E "s|^[[:space:]]*PATH=.*|PATH=$CRON_PATH|" | crontab -
+    else
+        { echo "PATH=$CRON_PATH"; printf '%s\n' "$cur"; } | grep -v '^[[:space:]]*$' | crontab -
+    fi
+    if crontab -l 2>/dev/null | grep -q "^PATH=$CRON_PATH"; then
+        log_message "${GREEN}[成功]${NC} crontab 已补 PATH 头（cron 作业可用 sbin 命令）"
+    else
+        log_message "${YELLOW}[警告]${NC} crontab PATH 头写入失败，cron 里 sbin 命令仍会找不到"
+    fi
+}
+
+# =============================================================================
+# 收尾二：[r20-fix8] 本次装了新内核则自动重启，让 BBR 当场生效
+# -----------------------------------------------------------------------------
+# 背景：enable_bbr_kernel 装好 kernel-lt 且用 grubby 把默认启动项写盘，但脚本不重启
+#       → 节点继续跑 3.10 + cubic，"重启才生效"全靠人记得，容易无限期漏掉。
+#       新机刚部署完：缓存冷、流量未起，此时重启代价≈0；重启后 @reboot 链
+#       （bbr_boot + ipes_ddos_guard）会自动拉起 docker/ipes 并启用 BBR。
+#
+# 只对「本次新装内核」的机器生效（/var/run/ipes_kernel_installed_this_run 由
+# enable_bbr_kernel 在确认是新机后才写）；存量机重跑部署不会被动重启。
+#
+# 重启前三项安全门（任一不过 → 放弃自动重启 + 告警，交人工）：
+#   ① 默认内核文件与模块目录都在
+#   ② /etc/fstab 不含 data=writeback（ext4 禁止 remount 改 data mode → 根 fs 会卡只读）
+#   ③ daemon.json 与 sysconfig 未同时声明 storage-driver/log-driver（docker 会拒启）
+# 可用 --no-reboot 关闭本步骤；延时可用 REBOOT_DELAY 环境变量调整（默认 60 秒）。
+# =============================================================================
+schedule_reboot_if_kernel_changed() {
+    if [ "${SKIP_REBOOT:-0}" -eq 1 ]; then
+        print_step "[收尾] 重启收尾已按 --no-reboot 跳过"
+        return 0
+    fi
+    print_step "[收尾] 重启收尾检查（新内核需重启才生效）"
+
+    # 等后台内核安装落定（最多 180 秒），否则无法判断本次是否真装了新内核
+    if [ -n "${BBR_PID:-}" ] && kill -0 "$BBR_PID" 2>/dev/null; then
+        log_message "[收尾] 等待后台内核安装完成（最多 180 秒）..."
+        local waited=0
+        while kill -0 "$BBR_PID" 2>/dev/null && [ "$waited" -lt 180 ]; do
+            sleep 5; waited=$((waited + 5))
+        done
+    fi
+
+    if [ ! -f /var/run/ipes_kernel_installed_this_run ]; then
+        log_message "[收尾] 本次未新装内核 → 不做自动重启"
+        if [ "$(basename "$(grubby --default-kernel 2>/dev/null || echo none)")" != "vmlinuz-$(uname -r)" ]; then
+            log_message "${YELLOW}[收尾]${NC} 注意：默认内核 $(basename "$(grubby --default-kernel 2>/dev/null)") ≠ 当前 $(uname -r)，建议人工择机重启"
+        fi
+        return 0
+    fi
+
+    local cur_kernel def_path def_ver blocker=""
+    cur_kernel="$(uname -r)"
+    def_path="$(grubby --default-kernel 2>/dev/null)"
+    def_ver="$(basename "${def_path:-none}" | sed 's/^vmlinuz-//')"
+
+    if [ -z "$def_path" ] || [ ! -f "$def_path" ]; then
+        log_message "${YELLOW}[收尾]${NC} grub 默认内核不可读，跳过自动重启（请人工确认）"
+        return 0
+    fi
+    if [ "$def_ver" = "$cur_kernel" ]; then
+        log_message "${GREEN}[收尾]${NC} 已在默认内核 $cur_kernel，无需重启"
+        return 0
+    fi
+
+    # 安全门 ①
+    [ -d "/lib/modules/$def_ver" ] || blocker="新内核模块目录 /lib/modules/$def_ver 缺失"
+    # 安全门 ②
+    if [ -z "$blocker" ] && grep -q 'data=writeback' /etc/fstab 2>/dev/null; then
+        blocker="fstab 仍含 data=writeback（重启后根 fs 有卡只读风险）"
+    fi
+    # 安全门 ③
+    if [ -z "$blocker" ] && [ -f /etc/docker/daemon.json ] \
+       && grep -qE '"log-driver"|"storage-driver"' /etc/docker/daemon.json 2>/dev/null \
+       && grep -qE -e '--(log|storage)-driver' /etc/sysconfig/docker /etc/sysconfig/docker-storage 2>/dev/null; then
+        blocker="docker 配置冲突（sysconfig flag 与 daemon.json 同时声明 storage/log-driver）"
+    fi
+    if [ -n "$blocker" ]; then
+        log_message "${RED}[收尾]${NC} 预检未通过，已放弃自动重启：$blocker"
+        log_message "${YELLOW}[收尾]${NC} 排查后手动重启：setsid bash -c 'sleep 5; reboot' &"
+        return 0
+    fi
+
+    # 重启后自检脚本（开机 25 秒跑一次，结果写 /var/log/ipes_post_reboot.log）
+    cat > /usr/local/bin/ipes_post_reboot_check.sh <<'POSTBOOT'
+#!/bin/bash
+# 【r20-fix8】重启后自检：确认内核切换、BBR、docker/容器、happ、绑定身份
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+{
+  echo "[$(date '+%F %T')] === 重启后自检 ==="
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    systemctl is-active docker >/dev/null 2>&1 && break
+    systemctl start docker >/dev/null 2>&1; sleep 5
+  done
+  docker inspect ipes >/dev/null 2>&1 && docker start ipes >/dev/null 2>&1
+  sleep 10
+  CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
+  echo "kernel=$(uname -r) cc=$CC qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
+  echo "docker=$(systemctl is-active docker 2>/dev/null) container=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)"
+  echo "happ=$(pgrep -c -f 'happ:vod' 2>/dev/null) node_id=$(cat /usr/local/edge_zycloud/device_code 2>/dev/null)"
+  echo "guard_chain=$(iptables -nL IPES_GUARD >/dev/null 2>&1 && echo ok || echo missing)"
+  if [ "$CC" = "bbr" ]; then
+    echo "RESULT=OK 内核与 BBR 均已生效"
+  else
+    echo "RESULT=WARN 内核已切换但 BBR 未启用，检查 /var/log/ipes_bbr_boot.log"
+  fi
+} >> /var/log/ipes_post_reboot.log 2>&1
+find /var/log/ipes_post_reboot.log -size +1M -exec truncate -s 100K {} \; 2>/dev/null
+exit 0
+POSTBOOT
+    chmod +x /usr/local/bin/ipes_post_reboot_check.sh
+    ( crontab -l 2>/dev/null | grep -v ipes_post_reboot_check; \
+      echo '@reboot sleep 25 && /usr/local/bin/ipes_post_reboot_check.sh' ) | crontab -
+    ensure_cron_path
+
+    log_message "${GREEN}[收尾]${NC} 三项预检通过，${REBOOT_DELAY} 秒后自动重启（$cur_kernel → $def_ver）"
+    log_message "[收尾] 重启后 25 秒自动自检，结果见 /var/log/ipes_post_reboot.log"
+    log_message "${YELLOW}[收尾]${NC} 部署会话即将断开，属正常现象"
+    setsid bash -c "sleep ${REBOOT_DELAY}; sync; /sbin/reboot" >/dev/null 2>&1 </dev/null &
+    log_message "[收尾] 已排程 reboot（PID=$!），本次部署到此结束"
 }
 
 # =============================================================================
@@ -1888,6 +2055,9 @@ PEAK_EOF
         # ⑤ 峰前自检（每天 18:30 晚高峰开门前）：拉容器/清空间/记健康
         cat > /usr/local/bin/ipes_peak_pcheck.sh <<'PEAK_PCHECK_EOF'
 #!/bin/bash
+# 【r20-fix8】自带 PATH：cron 环境只有 /usr/bin:/bin，sysctl/tc 在 /usr/sbin 里取不到
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 L=/var/log/ipes_peak.log
 {
 echo "[$(date '+%F %T')] === peak pcheck ==="
@@ -1956,6 +2126,12 @@ CLEAN_EOF
         cat > /usr/local/bin/ipes_ddos_guard.sh <<'GUARD_EOF'
 #!/bin/bash
 # r20-live [5.8] DDoS 主机层加固 + 免费小项优化（幂等；绝不碰业务 UDP 流量）
+# 【r20-fix8】【重要】必须自带 PATH：cron 作业 PATH 只有 /usr/bin:/bin，
+#   iptables/ip/tc/ethtool/sysctl 全在 /usr/sbin 或 /sbin → 全部 command not found，
+#   而本脚本的错误被 `>> log 2>&1` 吞掉、末尾 echo 照常输出 → 曾长期"假装成功"。
+#   2026-09-17 实测：重启后 IPES_GUARD 链根本不存在。
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 {
 sysctl -w net.ipv4.tcp_max_syn_backlog=65535 net.core.somaxconn=65535 \
   net.ipv4.icmp_echo_ignore_broadcasts=1 net.ipv4.icmp_ratelimit=1000 \
@@ -1975,7 +2151,12 @@ iptables -A IPES_GUARD -p tcp --syn -m limit --limit 200/s --limit-burst 400 -j 
 iptables -A IPES_GUARD -p tcp --syn -j DROP
 iptables -A IPES_GUARD -j RETURN
 iptables -C INPUT -j IPES_GUARD 2>/dev/null || iptables -I INPUT 1 -j IPES_GUARD
-echo "[$(date '+%F %T')] guard applied on $DEV"
+# 【r20-fix8】自校验，避免再次"静默失败却打印成功"
+if iptables -nL IPES_GUARD >/dev/null 2>&1; then
+  echo "[$(date '+%F %T')] guard applied on $DEV"
+else
+  echo "[$(date '+%F %T')] GUARD-FAILED: iptables 不可用或链未建立（检查 PATH / 内核模块）"
+fi
 } >> /var/log/ipes_guard.log 2>&1
 exit 0
 
@@ -2111,6 +2292,11 @@ GUARD_EOF
     log_message "目标 happy 进程数: $TARGET_HAPP/$TARGET_HAPP"
     log_message "日志文件: $LOG_FILE"
     log_message "若后台未显示「服务中」，请检查 admin.zhouyi.top token/接口路径是否正确"
+
+    # [13][r20-fix8] 收尾一：给 crontab 补 PATH 头（否则 cron 里 sbin 命令全部找不到）
+    ensure_cron_path
+    # [13][r20-fix8] 收尾二：本次新装内核 → 自动重启，让 5.4 + BBR 当场生效
+    schedule_reboot_if_kernel_changed
 }
 
 main "$@"

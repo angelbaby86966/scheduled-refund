@@ -1,16 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# IPES 业务 41（q2）整体部署脚本 —— 绑定 + 部署 + happy 9/9 + 状态流转
+# IPES 业务 41（q2）整体部署脚本 —— 绑定 + 部署 + happy 12/12 + 状态流转
 # =============================================================================
 # 融合来源：
 #   1) zyy_init_max.sh       —— 官方 zycloud agent 安装、SSH/用户安全配置、设备注册
-#   2) ipes_onekey.sh        —— IPES 预热/对齐/拉满（happy 9/9）
+#   2) ipes_onekey.sh        —— IPES 预热/对齐/拉满（happy 12/12）
 #   3) ecache 部署脚本       —— Docker + IPES 容器初始化
 #
 # 用途：
 #   在云主机上一站式完成：
 #     系统初始化 → zycloud agent → SSH/用户安全 → 设备注册
-#     → Docker 安装 → IPES 部署 → 预热对齐拉满 happy 9/9
+#     → Docker 安装 → IPES 部署 → 预热对齐拉满 happy 12/12
 #     → 提交业务 41 → admin token 注入 → 从「待配置」流转到「服务中」。
 #
 # 用法：
@@ -26,7 +26,7 @@
 # 可选参数：
 #   --remark <备注>         设备注册备注，默认 "<isp>-<设备SN前8位>"
 #   --business <业务ID>     提交给平台的业务编号，默认 41（q2）
-#   --target-happ <N>       happy 进程数，默认 9
+#   --target-happ <N>       happy 进程数，默认 12
 #   --skip-onekey           跳过 ipes_onekey 预热对齐
 #   --skip-olmt             跳过 olmt.sh 限速（节点跑满不封顶时加）
 #   --help                  显示帮助
@@ -142,7 +142,7 @@ ISP=""
 NUM_DIRS=""
 REMARK=""
 BUSINESS_ID="41"
-TARGET_HAPP="9"
+TARGET_HAPP="12"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
 SKIP_REBOOT=0
@@ -180,7 +180,7 @@ show_help() {
   --num-dirs <数量>       云环境固定目录数量 (必需，如: 12)
   --remark <备注>         设备注册备注 (可选)
   --business <业务ID>     提交的业务编号 (默认: 41)
-  --target-happ <N>       happy 进程数 (默认: 9)
+  --target-happ <N>       happy 进程数 (默认: 12)
   --skip-onekey           跳过 ipes_onekey 预热对齐
   --skip-olmt             跳过 olmt.sh 限速（希望节点跑满不封顶时加）
   --no-reboot             不在收尾自动重启（默认：本次新装了内核才自动重启，让 BBR 生效）
@@ -1682,7 +1682,7 @@ fi
 # 2) happ 路数防回弹（后台重推 12 路 / 配置被改回时自动裁回 TARGET_HAPP）
 #    直接改【宿主文件】（custom.yml 是单文件 bind-mount 的源，docker cp 写不回），再重启容器。
 #    带 10 分钟冷却：防止「裁剪重启->再被改回->再重启」形成重启风暴
-WANT="${TARGET_HAPP:-9}"
+WANT="${TARGET_HAPP:-12}"
 CFG="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
 [ -f "$CFG" ] || exit 0
 CUR=$(grep -oE 'happ[.][0-9]+' "$CFG" 2>/dev/null | sort -u | wc -l | tr -d ' ')
@@ -1781,15 +1781,15 @@ run_ipes_onekey() {
     return $?
 }
 
-# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（默认 9）
+# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（默认 12；2026-09-17 由 9 升 12，与后台模板一致）
 # 背景：后台默认下发的 custom.yml 多为 12 路（通用大内存模板），
 #       在 1GB 小内存机上 12 路 happ:vod 空载就吃 ~240MB，跑量后易 OOM 杀进程失联。
-#       这里在部署完成后把配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 9」。
+#       这里在部署完成后把配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 TARGET_HAPP」。
 # r20-fix3【关键修复】custom.yml 是【宿主单文件 bind-mount】的源（/opt/ipes/... 挂到容器 /app/ipes/...）。
 #       对 bind-mount 的单文件用 docker cp 写回【不会落盘】（只在容器 overlay 生效，重启即失效）→ 裁剪空转。
 #       正确做法：直接原地改宿主文件（保 inode），再 docker restart ipes。老镜像无宿主文件时回退 docker cp。
 align_happ_count() {
-    local want="${TARGET_HAPP:-9}"
+    local want="${TARGET_HAPP:-12}"
     if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
         return 0
@@ -2526,7 +2526,7 @@ GUARD_EOF
         log_message "${YELLOW}[信息]${NC} 跳过 ipes_onekey（--skip-onekey）"
     fi
 
-    # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 9）
+    # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 12）
     # 后台默认下发 12 路时，这里裁到 9 并重启容器，确保「刷出来就是 9」，小内存机不再 OOM。
     align_happ_count
 

@@ -240,6 +240,7 @@ parse_arguments() {
             --skip-onekey) SKIP_ONEKEY=1; shift ;;
             --skip-olmt)   SKIP_OLMT=1; shift ;;
             --no-reboot)   SKIP_REBOOT=1; shift ;;
+            --finish-only) FINISH_ONLY=1; shift ;;
             --node-token)  NODE_ACTIVATE_TOKEN="$2"; shift 2 ;;
             --resource-type) NODE_RESOURCE_TYPE="$2"; shift 2 ;;
             --dial-type)   NODE_DIAL_TYPE="$2"; shift 2 ;;
@@ -262,7 +263,12 @@ parse_arguments() {
         echo -e "${RED}[错误]${NC} 缺少参数: --isp"; missing=1
     fi
     if [ -z "$NUM_DIRS" ]; then
-        echo -e "${RED}[错误]${NC} 缺少参数: --num-dirs"; missing=1
+        # 【r20-finish】补齐模式不部署容器，缓存目录数无意义，缺失时给默认值即可
+        if [ "$FINISH_ONLY" -eq 1 ]; then
+            NUM_DIRS=12
+        else
+            echo -e "${RED}[错误]${NC} 缺少参数: --num-dirs"; missing=1
+        fi
     fi
     if ! [[ "$NUM_DIRS" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}[错误]${NC} --num-dirs 必须是数字"; missing=1
@@ -1959,7 +1965,35 @@ main() {
         fi
     fi
 
-    log_message "${GREEN}开始业务 ${BUSINESS_ID}（q2）全拉满部署...${NC}"
+    if [ "$FINISH_ONLY" -eq 1 ]; then
+        log_message "${GREEN}开始业务 ${BUSINESS_ID}（q2）收尾补齐（--finish-only）...${NC}"
+    else
+        log_message "${GREEN}开始业务 ${BUSINESS_ID}（q2）全拉满部署...${NC}"
+    fi
+
+    # =========================================================================
+    # 【r20-finish】模式分流
+    #   --finish-only=0 → 原有完整链路 [0.9]~[6]，行为完全不变。
+    #   --finish-only=1 → 只补 [5.6]~[13]：不装 agent、不动 SSH/用户、不注册设备、
+    #                     不装 docker、**绝不重建 IPES 容器**（重建 = 换 SN = 身份变更 = 掉量）。
+    #                     身份变量（业务SN / nodeID / 省市）只读获取，幂等可反复跑。
+    # =========================================================================
+    if [ "$FINISH_ONLY" -eq 1 ]; then
+        print_step "[r20-finish] 收尾补齐模式：跳过 [0.9]~[6]（安装 / 注册 / 容器重建）"
+        display_device_id          # 只读 /etc/.mac；hostname 本就是该值 → 幂等
+        resolve_admin_node_id      # [9] 业务流转必需的 32hex nodeID
+        get_location_info          # 省市：[9] submit_business 要写 nodeInfo 全字段
+        log_message "[r20-finish] 身份：业务SN=${DEVICE_ID:-未知} / nodeID=${ADMIN_NODE_ID:-未知} / ${province:-未知}${city:-未知} / $ISP"
+        if ! check_docker_running; then
+            log_message "${RED}[错误]${NC} docker 未运行。补齐模式不安装 docker，请先跑一次完整部署"; exit 1
+        fi
+        if check_ipes_containers; then
+            log_message "${GREEN}[成功]${NC} ipes 容器在运行 → 全程不重建，SN 与身份保持不变"
+        else
+            log_message "${YELLOW}[警告]${NC} ipes 容器未在运行：补齐模式不重建容器（重建会换 SN 掉量）。"
+            log_message "${YELLOW}[警告]${NC} 如需重建请去掉 --finish-only 跑完整部署；本次后续步骤仍会尽力执行。"
+        fi
+    else
 
     # [0.9] BBR 内核保障（r20-fix5：改为后台安装，不阻塞部署 —— 内核包走海外源最慢 7 分钟，
     #       同步等待会让「重置→注册→绑定」整体拖到 10 分钟。后台装完自动设默认启动项，下次重启生效。）
@@ -2022,6 +2056,8 @@ main() {
     # 关键顺序：让 ipes 容器在「已调优的内核」上启动，使首启预热、任何初始探测、业务提交
     # 都跑在 wbt=off / 脏页放大 / vfs 缓存保活 / 页缓存预读放大的环境里，给后台更干净的优质初评。
     pcdn_disk_tune
+
+    fi   # 【r20-finish】完整链路分支结束。以下 [5.6]~[13] 在两种模式下都会执行（补齐模式的全部内容）
 
     # [5.6] 峰值上行强化：晚高峰跑量特化（幂等；不碰 /data 与既有容器；r20-live 专属）
     peak_uplink_tune() {
@@ -2180,20 +2216,24 @@ GUARD_EOF
     }
     ddos_guard_setup
 
-    # [6] IPES 初始部署
-    local deploy_retry=0
-    while [ $deploy_retry -lt 3 ]; do
-        run_ipes_deploy
-        if check_ipes_containers; then
-            log_message "${GREEN}[成功]${NC} ipes 容器已启动"
-            break
+    # [6] IPES 初始部署（【r20-finish】--finish-only 时整段跳过：本步会重建容器并换 SN → 身份变更掉量）
+    if [ "$FINISH_ONLY" -eq 0 ]; then
+        local deploy_retry=0
+        while [ $deploy_retry -lt 3 ]; do
+            run_ipes_deploy
+            if check_ipes_containers; then
+                log_message "${GREEN}[成功]${NC} ipes 容器已启动"
+                break
+            fi
+            deploy_retry=$((deploy_retry+1))
+            log_message "${YELLOW}[警告]${NC} ipes 容器检查失败，重试 ${deploy_retry}/3"
+            [ $deploy_retry -lt 3 ] && sleep 2
+        done
+        if [ $deploy_retry -ge 3 ] && ! check_ipes_containers; then
+            log_message "${RED}[错误]${NC} ipes 部署失败"; exit 1
         fi
-        deploy_retry=$((deploy_retry+1))
-        log_message "${YELLOW}[警告]${NC} ipes 容器检查失败，重试 ${deploy_retry}/3"
-        [ $deploy_retry -lt 3 ] && sleep 2
-    done
-    if [ $deploy_retry -ge 3 ] && ! check_ipes_containers; then
-        log_message "${RED}[错误]${NC} ipes 部署失败"; exit 1
+    else
+        log_message "${YELLOW}[信息]${NC} [r20-finish] 跳过 [6] IPES 容器部署（不重建 → SN 不变）"
     fi
 
     # [6.6] 安装看门狗：master 掉线自动拉起（否则节点会静默不跑量）

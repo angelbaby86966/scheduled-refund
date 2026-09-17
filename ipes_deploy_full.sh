@@ -1304,12 +1304,42 @@ get_valid_sn() {
 install_docker_step() {
     print_step "安装 docker"
     if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
-        log_message "${GREEN}[成功]${NC} docker 已安装并运行"
+        local _dv
+        _dv=$(docker version --format '{{.Server.Version}}' 2>/dev/null)
+        log_message "${GREEN}[成功]${NC} docker 已安装并运行（版本 ${_dv:-未知}）"
         return 0
     fi
 
-    if ! yum install -y docker; then
-        log_message "${YELLOW}[警告]${NC} docker 安装失败"; return 1
+    # ---------------------------------------------------------------------
+    # 【r20-fix12】优先装 docker-ce（对齐渠道标准，版本必须 ≥23）。
+    #   根因（2026-09-17 09ec95ba 实测事故）：
+    #     渠道平台会经 zycloud agent 下发 install_docker-ce_v2.sh；该脚本判定
+    #     「Docker < 23.0.0 就重装」，而重装第一步是 Docker 官方套路：
+    #         yum remove -y docker* containerd.io docker-compose*
+    #     我们原先装的是 CentOS 自带 docker 1.13（远低于 23）→ 渠道**每次推送都先删 docker**，
+    #     与正在跑的部署并发互踩：docker 被删 → 容器全停 → 取不到业务 SN
+    #     → 后台业务ID 被写成 "ZHOUYI_XIAODU占位符"（表现为"脚本跑完但没绑定"）。
+    #   对齐到 docker-ce 后渠道判定版本达标，不再重复卸载重装，从根上止住这个循环。
+    #   失败自动回退 CentOS 自带 docker 1.13，不阻塞部署。
+    # ---------------------------------------------------------------------
+    if ! command -v docker >/dev/null 2>&1; then
+        if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
+            curl -fsSL --connect-timeout 8 --max-time 30 \
+                 -o /etc/yum.repos.d/docker-ce.repo \
+                 "https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo" 2>/dev/null || true
+        fi
+        if [ -f /etc/yum.repos.d/docker-ce.repo ]; then
+            log_message "安装 docker-ce（对齐渠道标准；避免渠道因版本<23 反复卸载重装）"
+            yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1 \
+              || yum install -y docker-ce docker-ce-cli containerd.io >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        log_message "${YELLOW}[提醒]${NC} docker-ce 未装成，回退 CentOS 自带 docker 1.13"
+        if ! yum install -y docker; then
+            log_message "${YELLOW}[警告]${NC} docker 安装失败"; return 1
+        fi
     fi
 
     # 【r16】清掉 sysconfig flag 里的 --log-driver/--storage-driver，避免与 daemon.json 冲突
@@ -1333,6 +1363,55 @@ EOF
     fi
     log_message "${YELLOW}[警告]${NC} docker 未正常启动"
     return 1
+}
+
+# -----------------------------------------------------------------------------
+# 【r20-fix11】保证每个 happ.N 的 xycould_base_info 是【文件】而不是【目录】。
+#   根因（2026-09-17 09ec95ba 实测）：ecache 安装脚本只为前若干个 happ 目录写
+#   base_info 文件（实测 happ.0~8 是 43 字节文件，happ.9~11 是空目录，而 NUM_DIRS=12），
+#   容器启动时 docker 把缺失的挂载源自动补成【目录】；docker-ce 对挂载类型校验严格，
+#   直接 OCI runtime create failed：not a directory → 容器 Exited(127) 起不来
+#   → 取不到 76hex 业务 SN → 后台业务ID 变占位符。docker 1.13 对此更宽容，故老机未暴露。
+#   内容就是每个 worker 的资源配额（disk_limit/mem_limit/cpu_core），各 happ 完全一致，
+#   因此直接以 happ.0 的同名文件为模板补齐即可（幂等、不动缓存）。
+# -----------------------------------------------------------------------------
+ensure_happ_base_info_files() {
+    local ref="/data/happ/happ.0/xycould_base_info"
+    [ -s "$ref" ] || return 0
+    local n p fixed=0
+    for n in $(seq 0 $(( ${NUM_DIRS:-12} - 1 ))); do
+        p="/data/happ/happ.$n/xycould_base_info"
+        if [ -d "$p" ]; then
+            rmdir "$p" 2>/dev/null && cp "$ref" "$p" 2>/dev/null && fixed=$((fixed+1))
+        elif [ ! -e "$p" ] && [ -d "/data/happ/happ.$n" ]; then
+            cp "$ref" "$p" 2>/dev/null && fixed=$((fixed+1))
+        fi
+    done
+    [ "$fixed" -gt 0 ] && log_message "${GREEN}[happ]${NC} 已把 $fixed 个 xycould_base_info 由目录/缺失修正为文件（docker-ce 对挂载类型严格，目录会让容器 Exited 127）"
+    return 0
+}
+
+# 【r20-fix11】修好 happ 挂载类型后，把因类型错误而退出的 ipes 容器拉起来。
+ensure_ipes_running() {
+    command -v docker >/dev/null 2>&1 || return 0
+    docker inspect ipes >/dev/null 2>&1 || return 0
+    ensure_happ_base_info_files
+    local st
+    st=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)
+    if [ "$st" != "true" ]; then
+        local ec
+        ec=$(docker inspect -f '{{.State.ExitCode}}' ipes 2>/dev/null)
+        log_message "${YELLOW}[happ]${NC} ipes 容器未运行（ExitCode=${ec:-?}），尝试拉起"
+        docker start ipes >/dev/null 2>&1 || true
+        sleep 6
+        st=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)
+        if [ "$st" = "true" ]; then
+            log_message "${GREEN}[happ]${NC} ipes 容器已拉回运行"
+        else
+            log_message "${RED}[happ]${NC} ipes 仍未能启动，容器错误：$(docker inspect -f '{{.State.Error}}' ipes 2>/dev/null | head -c 200)"
+        fi
+    fi
+    return 0
 }
 
 _run_remote_script_single() {
@@ -2285,6 +2364,11 @@ GUARD_EOF
         log_message "${YELLOW}[信息]${NC} [r20-finish] 跳过 [6] IPES 容器部署（不重建 → SN 不变）"
     fi
 
+    # [6.1][r20-fix11] happ 挂载类型校正 + 容器兜底拉起
+    #   （必须在 [7.5] 之前先修一次：happ.9~11 若是目录，容器会以 127 退出，
+    #    后面 [9] 取业务 SN 就会失败 → 后台业务ID 变占位符）
+    ensure_ipes_running
+
     # [6.6] 安装看门狗：master 掉线自动拉起（否则节点会静默不跑量）
     install_ipes_watchdog
 
@@ -2315,6 +2399,10 @@ GUARD_EOF
     # [7.5] 对齐 happ worker 数到 TARGET_HAPP（默认 9）
     # 后台默认下发 12 路时，这里裁到 9 并重启容器，确保「刷出来就是 9」，小内存机不再 OOM。
     align_happ_count
+
+    # [7.6][r20-fix11] 对齐脚本会 mkdir 补齐 happ 路径（可能又把 xycould_base_info 建成目录），
+    #   这里再校正一次类型并兜底拉起容器 —— 保证 [9] 能取到 76hex 业务 SN。
+    ensure_ipes_running
 
     # [8] 安装 nload（可选观测工具，r15 起改为**后台并行安装**，不再阻塞主流程）
     print_step "安装 nload（后台并行，不阻塞）"

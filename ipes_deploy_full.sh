@@ -1404,7 +1404,12 @@ run_ipes_deploy() {
 run_ecache_deploy() {
     local origin_url="http://oemtest.hejinyun.cn/shell/ecache_docker_install_ali_ten.sh"
     local cdn_url="${origin_url//$ORIGIN_DOMAIN/$CDN_DOMAIN}"
-    local tmp_script="/tmp/.ecache_patched.sh"
+    # 【r20-fix7】临时文件路径带 PID：并发部署时各用各的文件，杜绝「同写一个 /tmp 文件被写坏」。
+    #   2026-09-17 事故：两份部署共用 /tmp/.ecache_patched.sh → 补丁写到一半被另一份覆盖 →
+    #   bash 报 `line 582: syntax error` → 后续 ensure_docker_healthy 自愈时序错乱 → dockerd 起不来。
+    #   入口侧另有 flock 单机互斥（第一道），此处为纵深防御（第二道）。函数返回时自动清理。
+    local tmp_script="/tmp/.ecache_patched.$$.sh"
+    trap 'rm -f "$tmp_script"' RETURN
     local url
 
     # 【r16 裸机坑预防】CentOS7 docker 由 sysconfig flag 注入 --log-driver/--storage-driver，

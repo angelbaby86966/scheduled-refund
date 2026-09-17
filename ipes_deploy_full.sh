@@ -2011,7 +2011,16 @@ export PATH
   echo "kernel=$(uname -r) cc=$CC qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
   echo "docker=$(systemctl is-active docker 2>/dev/null) container=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)"
   echo "happ=$(pgrep -c -f 'happ:vod' 2>/dev/null) node_id=$(cat /usr/local/edge_zycloud/device_code 2>/dev/null)"
-  echo "guard_chain=$(iptables -nL IPES_GUARD >/dev/null 2>&1 && echo ok || echo missing)"
+  # 【r20-fix13】guard 链由 `@reboot sleep 90 && ipes_ddos_guard.sh` 恢复，
+  #   而本自检是 `@reboot sleep 25` 触发 —— 检查时机**必然早于**加固恢复，
+  #   直接判定会恒定误报 missing（2026-09-17 f05cf248 实测：自检说 missing，
+  #   等到 uptime 161s 时链已有 11 条规则）。改为等待式判定，最多等 140 秒。
+  GC=missing
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+    iptables -nL IPES_GUARD >/dev/null 2>&1 && { GC=ok; break; }
+    sleep 10
+  done
+  echo "guard_chain=$GC$([ "$GC" = missing ] && echo '（超 140 秒未恢复，检查 ipes_ddos_guard.sh / crond）' || echo '')"
   if [ "$CC" = "bbr" ]; then
     echo "RESULT=OK 内核与 BBR 均已生效"
   else

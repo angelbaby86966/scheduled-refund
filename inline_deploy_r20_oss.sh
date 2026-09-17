@@ -106,9 +106,25 @@ for u in "$SRC1" "$SRC2"; do
 done
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
 export NODE_ACTIVATE_TOKEN="$JWT"
-nohup setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null &
+
+# ============ B2) 单机互斥锁（r20-fix7） ============
+# 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑（一份来自控制台、一份来自本次派发），
+#   两者共用 /tmp/.ecache_patched.sh，补丁写到一半被另一份覆盖 → `line 582: syntax error`
+#   → 后续 docker 自愈步骤错过窗口 → dockerd 因 sysconfig flag 与 daemon.json 冲突起不来 → 容器全停。
+# 做法：flock 单机互斥。锁由后台部署进程持有，直到 full 脚本整体跑完才释放；
+#   重复调用（含控制台/他人误触）会直接退出，绝不产生第二份部署。
+LOCK_FILE="/var/run/ipes_deploy.lock"
+if ! flock -n "$LOCK_FILE" true 2>/dev/null; then
+  echo "[ERROR] 本机已有部署在运行（$LOCK_FILE 被占用），本次退出以避免两份互踩"
+  echo "        确认前一份确已结束/卡死时可清理： rm -f $LOCK_FILE"
+  exit 1
+fi
+( flock -n 9 || { echo "[ERROR] 抢锁失败：已有部署在运行，本次退出"; exit 1; }
+  echo "已获取部署锁 $LOCK_FILE"
+  exec setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null
+) 9>"$LOCK_FILE" &
 DEPLOY_PID=$!
-echo "已后台启动部署 PID=$DEPLOY_PID"
+echo "已后台启动部署 PID=$DEPLOY_PID（已持锁 $LOCK_FILE，互斥生效）"
 
 # ============ C) 业务绑定自修复（r20-fix4 根治版） ============
 # 三大修复：

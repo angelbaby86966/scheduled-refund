@@ -1481,6 +1481,74 @@ WATCHDOG
     log_message "${GREEN}[成功]${NC} 看门狗已安装（cron 每分钟检查：master 拉起 + happ 防回弹，冷却10分钟）"
 }
 
+# IPES 应用层保活（每分钟）：容器级 docker start 兜底 + ./bin/ipes health 探测，
+# 真正异常时才 docker restart 恢复；非交互，并对「探测命令不可用」跳过以避免每分钟重启抖动。
+# 融合来源：渠道 install_ipes_health_check.sh（https://zyy-go.oss-cn-beijing.aliyuncs.com/script/Q2_test/）。
+# 与 install_ipes_watchdog 的分工：
+#   watchdog → 进程层（master 掉线拉起 + happ 路数防回弹）
+#   本模块   → 容器/服务层（容器未运行兜底启动 + health 探测失败恢复）
+# ⚠️ 未照抄渠道原脚本的三处（原样落地会伤机器）：
+#   1) 原脚本用 `crontab -l | grep -v "ipes"` 重建 crontab（且漏了 echo，把变量当命令执行），
+#      会连带删掉本机所有含 "ipes" 的 cron —— watchdog / txlog / 日清 / ddos_guard 全没。
+#      此处改为精准匹配 ipes_health_check，只动自己那一行。
+#   2) 原脚本 check_container 带 `read -p` 交互提问，云助手非交互环境会直接退出，已去除。
+#   3) 原脚本写 `@reboot sleep 300 && docker exec ipes ./bin/ipes stop` —— 重启后主动停业务，
+#      与「保活」目标相悖且会与本机 @reboot 自愈链打架；此处不写入，并顺手清理历史残留。
+install_ipes_health() {
+    print_step "安装 IPES 保活（每分钟 health 探测 + 容器级兜底重启）"
+    cat > /usr/local/bin/ipes_health_check.sh <<'HEALTH'
+#!/usr/bin/env bash
+# IPES 健康检查（融合版）：容器级 docker start 兜底 + 应用层 ./bin/ipes health 探测，
+# 真正异常时才 docker restart 恢复；非交互、并对「探测命令不存在」做了跳过处理避免每分钟重启抖动。
+LOG=/var/log/ipes_health.log
+C=ipes
+ts(){ date '+%Y-%m-%d %H:%M:%S'; }
+# 日志瘦身：超过 2MB 只留尾部 500 行（每分钟一条，约 60KB/天）
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
+  tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+fi
+echo "[$(ts)] 检查开始" >> "$LOG"
+if ! docker ps --format '{{.Names}}' | grep -qx "$C"; then
+  echo "[$(ts)] 容器未运行，尝试 docker start（SN 不变）" >> "$LOG"
+  docker start "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已启动" >> "$LOG" || echo "[$(ts)] 启动失败，请检查" >> "$LOG"
+  exit 0
+fi
+# 容器在跑，做应用层健康探测（./bin/ipes health 为 IPES 内部命令）
+OUT=$(docker exec "$C" ./bin/ipes health 2>&1); RC=$?
+# 探测命令本身不可用（容器内缺该命令 / exec 失败）-> 不重启，避免每分钟抖动
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -qiE 'OCI runtime|exec: "|No such file|command not found'; then
+  echo "[$(ts)] 健康探测命令不可用，跳过重启($OUT)" >> "$LOG"
+  exit 0
+fi
+# 真正的服务异常 -> 重启容器恢复（同时恢复进程与容器内服务）
+# 注意：正则只用【明确的失败特征】，绝不用裸 'error'（健康 JSON 常含 "errors":[] 会被误判，导致每分钟重启风暴）
+if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services failed|unhealthy|not healthy|panic|refused to connect'; then
+  # 重启冷却：10 分钟内只重启一次，避免健康探测偶发抖动引发每分钟重启、打断缓存写入
+  LR=/var/lib/ipes-preheat/.last_health_restart
+  now_ts=$(date +%s)
+  last_ts=$(cat "$LR" 2>/dev/null || echo 0)
+  if [ $((now_ts - last_ts)) -lt 600 ]; then
+    echo "[$(ts)] 检测到异常但处于重启冷却期(10分钟)，本次跳过 ($OUT)" >> "$LOG"
+    exit 0
+  fi
+  mkdir -p /var/lib/ipes-preheat 2>/dev/null
+  echo "$now_ts" > "$LR" 2>/dev/null || true
+  echo "[$(ts)] 检测到服务异常，准备 docker restart ($OUT)" >> "$LOG"
+  docker restart "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已重启恢复" >> "$LOG" || echo "[$(ts)] 重启失败，请检查" >> "$LOG"
+  exit 0
+fi
+echo "[$(ts)] 服务正常" >> "$LOG"
+HEALTH
+    chmod +x /usr/local/bin/ipes_health_check.sh
+    touch /var/log/ipes_health.log 2>/dev/null
+    # 精准重建 cron：只替换自己那一行；同时清掉渠道脚本历史写入的 @reboot `bin/ipes stop`（重启后停业务）
+    ( crontab -l 2>/dev/null | grep -vE 'ipes_health_check|bin/ipes[[:space:]]+stop' ; \
+      echo "* * * * * /usr/local/bin/ipes_health_check.sh >/dev/null 2>&1" ) | crontab -
+    systemctl enable crond >/dev/null 2>&1 || true
+    systemctl start crond >/dev/null 2>&1 || true
+    log_message "${GREEN}[成功]${NC} 保活已安装（cron 每分钟：容器兜底启动 + health 探测，异常重启冷却10分钟）"
+}
+
 run_ipes_onekey() {
     print_step "执行 ipes_onekey（预热 + 对齐拉满 / happy ${TARGET_HAPP}/${TARGET_HAPP}）"
     export TARGET_HAPP="$TARGET_HAPP"
@@ -1934,6 +2002,9 @@ GUARD_EOF
 
     # [6.6] 安装看门狗：master 掉线自动拉起（否则节点会静默不跑量）
     install_ipes_watchdog
+
+    # [6.7] 安装应用层保活（融合渠道 install_ipes_health_check.sh：health 探测 + 容器兜底启动 + 异常重启）
+    install_ipes_health
 
     # [6.5] 限速脚本（来自 test.sh，olmt.sh）
     # 注意：该脚本会下发带宽整形规则。若希望节点跑满不封顶，加 --skip-olmt 跳过。

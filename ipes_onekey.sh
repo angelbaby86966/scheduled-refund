@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# IPES 一键融合脚本：预热调优+健康检查  +  对齐拉满（全锥NAT / happ拉满6 / 镜像对齐 / 重建保活）
+# IPES 一键融合脚本：预热调优+健康检查  +  对齐拉满（全锥NAT / happ拉满12 / 镜像对齐 / 重建保活）
 # -----------------------------------------------------------------------------
 # 【融合来源】
 #   1) ipes_preheat_and_health.sh  —— OS/IO/网络 激进调优 + 健康检查安装（不动版本/不重建）
@@ -13,7 +13,7 @@
 #   curl ... | bash -s -- --check
 #
 # 【可选环境变量（透传给对齐脚本）】
-#   TARGET_HAPP=6  TARGET_TAG=1.3.0  ALIGN_HAPP=1  FORCE_CLEAR_TC=0  SKIP_IPES=0  SKIP_PREHEAT=1
+#   TARGET_HAPP=12 TARGET_TAG=1.3.0  ALIGN_HAPP=1  FORCE_CLEAR_TC=0  SKIP_IPES=0  SKIP_PREHEAT=1
 #   （SKIP_PREHEAT 本脚本会自动决策：预热成功→1 跳过重复；失败→0 兜底；显式设置则尊重设置）
 #
 # 说明：先单独跑一次 preheat 是为了让「健康检查安装 / OS 调优」在第一步就落地，

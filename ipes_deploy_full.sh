@@ -147,6 +147,11 @@ SKIP_ONEKEY=0
 SKIP_OLMT=0
 SKIP_REBOOT=0
 REBOOT_DELAY=60
+# 【r20-fix10】--finish-only 收尾补齐开关。必须在全局默认区初始化！
+#   教训：此前只在参数解析分支里赋值，不带该参数时变量未定义，脚本跑在 `set -uo pipefail` 下，
+#   一旦执行到 `[ "$FINISH_ONLY" -eq 1 ]` 就 `FINISH_ONLY: unbound variable` 直接退出
+#   → 完整部署（不带 --finish-only）**必死**，机器上什么都没装，表现为"跑完没绑定"。
+FINISH_ONLY=0
 
 # 【r20-fix8】cron 作业的 PATH 补全。
 #   crond 给作业的环境 PATH 只有 /usr/bin:/bin（2026-09-17 实测），
@@ -1980,12 +1985,56 @@ main() {
     # =========================================================================
     if [ "$FINISH_ONLY" -eq 1 ]; then
         print_step "[r20-finish] 收尾补齐模式：跳过 [0.9]~[6]（安装 / 注册 / 容器重建）"
+
+        # ---------------------------------------------------------------------
+        # 【r20-fix10】空机/重置机快速熔断。
+        #   教训（2026-09-17）：09ec95ba 被系统重置（清盘）后，用 --finish-only 去跑，
+        #   而该模式**不装 docker、不建容器**，等于全程空转 → 后台永远「待配置」。
+        #   旧代码只丢一行 [错误] 就 exit 1，用户根本没注意到，误以为"脚本走完了"。
+        #   现在：判定「有没有 docker / 有没有在跑的容器」，命中就大字报 + 给出该跑的命令 + exit 2。
+        #   应急绕过：IPES_SKIP_PREFLIGHT=1（仅在你确知自己在做什么时用）
+        # ---------------------------------------------------------------------
+        if [ "${IPES_SKIP_PREFLIGHT:-0}" != "1" ]; then
+            local _fuse=0 _why=""
+            if ! command -v docker >/dev/null 2>&1; then
+                _fuse=1; _why="本机没有 docker（重置机会清掉 docker）"
+            elif ! check_ipes_containers; then
+                _fuse=1; _why="IPES 容器不在运行（重置会清盘 → 容器连同业务SN一起没了）"
+            fi
+            if [ "$_fuse" -eq 1 ]; then
+                echo
+                log_message "${RED}================================================================${NC}"
+                log_message "${RED}  [熔断] --finish-only 在本机无法起作用：${NC}"
+                log_message "${RED}         $_why${NC}"
+                log_message "${RED}================================================================${NC}"
+                log_message "  docker   : $(command -v docker >/dev/null 2>&1 && echo 已安装 || echo 未安装)"
+                log_message "  agent目录: $([ -d /usr/local/edge_zycloud ] && echo 存在 || echo 不存在)"
+                log_message "  /etc/.mac: $([ -f /etc/.mac ] && echo 存在 || echo 不存在)"
+                log_message "  容器 ipes: $(docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ipes && echo 运行中 || echo 未运行)"
+                echo
+                log_message "${YELLOW}  --finish-only 只补【收尾】，不做任何【安装】：不装 docker、不建容器、不注册设备。${NC}"
+                log_message "${YELLOW}  重置会清盘 → 容器没了 → 跑这个模式等于空转，后台一定停在「待配置」。${NC}"
+                echo
+                log_message "${GREEN}  正确做法：去掉 --finish-only，跑一次【完整部署】：${NC}"
+                log_message "${GREEN}    curl -fsSL \"https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/inline_deploy_r20_oss.sh\" \\\\${NC}"
+                log_message "${GREEN}      | bash -s -- --ak <渠道AK> --sk <渠道SK> --jwt <JWT> --isp 电信${NC}"
+                echo
+                exit 2
+            fi
+        else
+            log_message "${YELLOW}[提醒] IPES_SKIP_PREFLIGHT=1：已跳过空机熔断检查${NC}"
+        fi
+
         display_device_id          # 只读 /etc/.mac；hostname 本就是该值 → 幂等
         resolve_admin_node_id      # [9] 业务流转必需的 32hex nodeID
         get_location_info          # 省市：[9] submit_business 要写 nodeInfo 全字段
         log_message "[r20-finish] 身份：业务SN=${DEVICE_ID:-未知} / nodeID=${ADMIN_NODE_ID:-未知} / ${province:-未知}${city:-未知} / $ISP"
         if ! check_docker_running; then
-            log_message "${RED}[错误]${NC} docker 未运行。补齐模式不安装 docker，请先跑一次完整部署"; exit 1
+            log_message "${RED}================================================================${NC}"
+            log_message "${RED}  [熔断] docker 未运行，且 --finish-only 不安装 docker → 无法继续${NC}"
+            log_message "${RED}================================================================${NC}"
+            log_message "${GREEN}  请去掉 --finish-only 跑一次完整部署。${NC}"
+            exit 2
         fi
         if check_ipes_containers; then
             log_message "${GREEN}[成功]${NC} ipes 容器在运行 → 全程不重建，SN 与身份保持不变"

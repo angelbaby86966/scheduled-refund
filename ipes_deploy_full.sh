@@ -1579,12 +1579,12 @@ for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
 done
 # --- 2. 文件系统挂载（ext4 减日志开销；xfs 提速日志） ---
 FSTYPE=$(findmnt -no FSTYPE / 2>/dev/null); CUR=$(findmnt -no OPTIONS / 2>/dev/null)
-if [ "$FSTYPE" = "ext4" ]; then ADD="noatime,nodiratime,commit=60,barrier=0,data=writeback"
+if [ "$FSTYPE" = "ext4" ]; then ADD="noatime,nodiratime,commit=60,barrier=0"
 elif [ "$FSTYPE" = "xfs" ]; then ADD="logbsize=256k"
 else ADD=""; fi
 if [ -n "$ADD" ]; then
-  case "$CUR" in *data=writeback*) echo "  [fstab] already active";; *)
-    [ -f /etc/fstab ] && ! grep -q "data=writeback" /etc/fstab 2>/dev/null && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4")$4="defaults,noatime,nodiratime,commit=60,barrier=0,data=writeback"; if($2=="/"&&$3=="xfs")$4="defaults,logbsize=256k"; print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
+  case "$CUR" in *barrier=0*) echo "  [fstab] already active";; *)
+    [ -f /etc/fstab ] && ! grep -q "barrier=0" /etc/fstab 2>/dev/null && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4")$4="defaults,noatime,nodiratime,commit=60,barrier=0"; if($2=="/"&&$3=="xfs")$4="defaults,logbsize=256k"; print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
     mount -o "remount,$ADD" / 2>/dev/null && echo "  [remount] OK" || echo "  [remount] 下次重启由 fstab 生效"
   esac
 fi

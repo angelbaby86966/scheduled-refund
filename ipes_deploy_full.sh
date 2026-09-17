@@ -1094,6 +1094,101 @@ transition_to_serving() {
 }
 
 # =============================================================================
+# 【r20-fix14】绑定成功后立即流转「服务中」：早于部署、只占状态、业务ID 后置
+# -----------------------------------------------------------------------------
+# 背景（用户原话）："绑定后，先从待配置，转到服务中，之后再慢慢走流程，部署，填业务id"
+# 动机：注册完成后还要等拉镜像 / 磁盘调优 / 预热好几轮，期间后台一直停在「待配置」，
+#       运维会误以为绑定失败。这里在 [4] 注册成功后**立刻**把状态顶到「服务中」，
+#       让后台马上脱离「待配置」。
+# 业务ID 处理（有意为之）：此刻容器尚未启动，取不到真业务ID → 先不带 hostname，
+#       平台会写占位符 "ZHOUYI_XIAODU占位符"；真 SN 由后面**保留不动**的
+#       [9]/[11.5] 自动回填（[9] 才是携带真业务ID 回填的关键步骤）。
+# 幂等安全：若本机已有容器（重跑 / 存量机场景），单次快探能取到合法 SN 就带上，
+#       避免把后台已写入的真业务ID覆盖成占位符。
+# 与 transition_to_serving 的区别：本函数**只单次探测、绝不等待、绝不 exit**，
+#       失败仅告警后返回 1，交给后续 [9] 兜底；transition_to_serving 则带 120s 重试。
+# =============================================================================
+early_transition_to_serving() {
+    print_step "[4.5] 绑定成功 → 立即流转「服务中」（业务ID 先占位，稍后自动回填）"
+
+    # 取 node id（32hex）：[3.5] 通常已解析好；若为空则现场再解析一次
+    local node="${ADMIN_NODE_ID:-}"
+    if [ -z "$node" ]; then
+        resolve_admin_node_id >/dev/null 2>&1 || true
+        node="${ADMIN_NODE_ID:-}"
+    fi
+    if [ -z "$node" ]; then
+        log_message "${YELLOW}[警告]${NC} 未解析到 nodeId，跳过「服务中」流转（不影响后续 [9] 业务绑定）"
+        return 1
+    fi
+
+    # stateflow 需要 X-Token(JWT)；没有就跳过，交给 [9] 用签名方式兜底
+    if [ -z "${NODE_ACTIVATE_TOKEN:-}" ]; then
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN，跳过「服务中」流转（不影响后续 [9] 业务绑定）"
+        return 1
+    fi
+
+    # 单次快探真业务ID（不等待）：命中就带上，避免覆盖存量机的真 SN；
+    # 取不到就留空 → 走"不带 hostname"路径（平台写占位符，后续 [9]/[11.5] 回填）。
+    # ⚠️ 此刻 docker 可能还没装，`docker exec` 会报错 —— 必须 2>/dev/null 静默；
+    #    用 $(...) 赋值本身不会因命令非 0 退出码中断（本脚本未开 set -e）。
+    local biz_sn="${NODE_HOSTNAME:-}"
+    if ! echo "$biz_sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+        biz_sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
+    fi
+    if ! echo "$biz_sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+        biz_sn=""
+    fi
+
+    # 组 body：平台不带 hostname 时会写占位符业务ID
+    local request_body
+    if [ -n "$biz_sn" ]; then
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"inService\",\"hostname\":\"$biz_sn\"}"
+        log_message "快探到本机已有业务ID: $biz_sn（携带流转，保护存量真业务ID）"
+    else
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"inService\"}"
+        log_message "容器尚未就绪，暂无法取到业务ID → 先占位流转（稍后由 [9]/[11.5] 自动回填真 SN）"
+    fi
+
+    local response http_code body
+    response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    http_code=$(echo "$response" | tail -n1)
+    body=$(echo "$response" | sed '$d')
+    log_message "立即流转「服务中」响应 [HTTP $http_code]: $(echo "$body" | tail -n1)"
+
+    if [ "$http_code" = "200" ] && echo "$body" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 后台现在应显示「服务中」；业务ID 暂为占位符 ZHOUYI_XIAODU，容器起来后由 [9]/[11.5] 自动回填真 SN"
+        return 0
+    fi
+
+    # 兜底一次：刚注册的节点可能还不处于 configured（例如 bound 状态），
+    #   平台只允许 configured <-> inService 互转，故先降到 configured 再升回来。
+    log_message "${YELLOW}[警告]${NC} 首次流转未成功，尝试兜底：先降「待配置」再升「服务中」"
+    local down_body
+    if [ -n "$biz_sn" ]; then
+        down_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\",\"hostname\":\"$biz_sn\"}"
+    else
+        down_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\"}"
+    fi
+    local resp1 resp2
+    resp1=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$down_body")
+    log_message "兜底-降级(->待配置) 响应 [HTTP $(echo "$resp1" | tail -n1)]: $(echo "$resp1" | sed '$d')"
+    sleep 3
+    resp2=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    http_code=$(echo "$resp2" | tail -n1)
+    body=$(echo "$resp2" | sed '$d')
+    log_message "兜底-升回(->服务中) 响应 [HTTP $http_code]: $(echo "$body" | tail -n1)"
+
+    if [ "$http_code" = "200" ] && echo "$body" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 兜底流转成功：后台现在应显示「服务中」（业务ID 稍后由 [9]/[11.5] 回填）"
+        return 0
+    fi
+
+    log_message "${YELLOW}[警告]${NC} 「服务中」流转仍未成功（不影响后续 [9] 的业务绑定，[9] 会再次尝试携带真业务ID流转）"
+    return 1
+}
+
+# =============================================================================
 # 节点属性写入：业务线运营商 / 资源类型 / 上网方式
 # -----------------------------------------------------------------------------
 # 后台节点列表那两列的真实数据来源（前端 bundle 还原 + 实测）：
@@ -2165,11 +2260,25 @@ main() {
     resolve_admin_node_id
 
     # [4] 注册设备
+    # 【r20-fix14】接住注册返回值：只有注册成功才在 [4.5] 立即流转「服务中」，
+    #   注册失败就跳过，避免把未绑定成功的节点误顶状态。
+    local reg_ok=1
     if [ -n "$DEVICE_ID" ]; then
         get_location_info
-        register_device "$DEVICE_ID" "$province" "$city" "$ISP" "$REMARK"
+        if register_device "$DEVICE_ID" "$province" "$city" "$ISP" "$REMARK"; then
+            reg_ok=0
+        fi
     else
         log_message "${YELLOW}[警告]${NC} 无法获取设备SN，跳过注册"
+    fi
+
+    # [4.5] 【r20-fix14】绑定成功后立即流转「服务中」：
+    #   用户要求"绑定后，先从待配置转到服务中，之后再慢慢走流程、部署、填业务id"。
+    #   此刻容器未起、拿不到真业务ID → 先占位（平台写 ZHOUYI_XIAODU占位符），
+    #   真 SN 由后面保留不动的 [9]/[11.5] 自动回填。
+    #   放在 FINISH_ONLY==0 分支内 → 补齐模式不执行，避免覆盖存量机的真业务ID。
+    if [ $reg_ok -eq 0 ]; then
+        early_transition_to_serving
     fi
 
     # [5] Docker

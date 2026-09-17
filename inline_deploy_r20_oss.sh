@@ -12,6 +12,9 @@ set +e
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
 ADMIN_API_HOST="https://admin.zhouyi.top"; BUSINESS_ID=41
+# 【r20-finish】--finish-only：存量机「原地补齐」模式（透传给 full 脚本）
+#   跳过安装/注册/容器重建，只补 [5.6]~[13]；容器不重建 → SN/身份不变 → 不掉量。
+FINISH_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --bw-num) BW_NUM="$2"; shift 2 ;;
     --business-id) BUSINESS_ID="$2"; shift 2 ;;
     --admin-host) ADMIN_API_HOST="$2"; shift 2 ;;
+    --finish-only) FINISH_ONLY=1; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done

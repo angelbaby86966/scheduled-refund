@@ -109,6 +109,21 @@ $mirror_json
   "live-restore": true
 }
 EOF
+  # 【2026-09-17 根治】写 daemon.json 之前，先清掉 sysconfig 里的同名 flag。
+  #   根因：CentOS7 的 /etc/sysconfig/docker(-storage) 默认注入 --log-driver / --storage-driver，
+  #         docker 1.13 遇到「flag 与 daemon.json 同时指定」会直接拒绝启动：
+  #           directives specified both as a flag and in the configuration file: storage-driver
+  #         → dockerd 起不来 → 容器全停、节点 offline（2026-09-17 新机实测事故主因）。
+  #   做法与 r20 部署脚本 r16/r18 ensure_docker_healthy 完全一致：先清 flag，让 daemon.json
+  #   成为唯一配置来源。清理对运行中的 docker 无副作用、幂等；只在确实存在冲突 flag 时才动，且留备份。
+  for f in /etc/sysconfig/docker /etc/sysconfig/docker-storage; do
+    [ -f "$f" ] || continue
+    if grep -qE -e '--(log|storage)-driver' "$f" 2>/dev/null; then
+      [ -f "${f}.pcdn.bak" ] || cp -a "$f" "${f}.pcdn.bak" 2>/dev/null
+      sed -i 's/--log-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g; s/--storage-driver[= ]\{1,\}[a-zA-Z0-9_.-]\{1,\}//g' "$f"
+      log "$(basename "$f"): 已清除冲突的 --log-driver/--storage-driver（备份 ${f}.pcdn.bak）"
+    fi
+  done
   if ! cmp -s /tmp/preheat_daemon.json /etc/docker/daemon.json 2>/dev/null; then
     cp /tmp/preheat_daemon.json /etc/docker/daemon.json; need_restart=1
   fi

@@ -359,15 +359,31 @@ ALIGN_URL_2="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/m
 run_align(){
   log_info "========== 对齐阶段：预热调优 + 全锥/NAT/tc/cache/happ对齐 =========="
   local pf=/tmp/ipes_onekey_$$.sh ok=0
-  for u in "$ALIGN_URL_1" "$ALIGN_URL_2"; do
-    if curl -fsSL --connect-timeout 15 --max-time 120 "$u" -o "$pf" 2>/dev/null && [ -s "$pf" ] && head -1 "$pf" | grep -q '^#!/bin/bash' && bash -n "$pf" 2>/dev/null; then
-      log_info "已取得对齐脚本: $u"
-      export TARGET_HAPP="$NUM_DIRS"; export TARGET_TAG="1.3.0"
-      if bash "$pf"; then ok=1; log_info "对齐阶段执行完成"; break
-      else log_warn "对齐脚本返回非0（个别内核键不支持可忽略），继续"; ok=1; break; fi
-    else log_warn "拉取失败，换源: $u"; fi
+  local t1=/tmp/ipes_ok1_$$.sh t2=/tmp/ipes_ok2_$$.sh
+  # 【r20-fix16】双源并发竞速：谁先下载并通过校验就用谁，
+  # 避免串行各等 120s（最坏 240s≈4 分钟）的长停顿。
+  ( curl -fsSL --connect-timeout 10 --max-time 60 "${ALIGN_URL_1}" -o "$t1" >/dev/null 2>&1 ) &
+  local p1=$!
+  ( curl -fsSL --connect-timeout 10 --max-time 60 "${ALIGN_URL_2}" -o "$t2" >/dev/null 2>&1 ) &
+  local p2=$!
+  local winner="" probe
+  for probe in $(seq 1 30); do   # 最多 60s（30×2s）
+    if [ -z "$winner" ] && [ -s "$t1" ] && head -1 "$t1" | grep -q '^#!/bin/bash' && bash -n "$t1" 2>/dev/null; then winner="$t1"; fi
+    if [ -z "$winner" ] && [ -s "$t2" ] && head -1 "$t2" | grep -q '^#!/bin/bash' && bash -n "$t2" 2>/dev/null; then winner="$t2"; fi
+    [ -n "$winner" ] && break
+    sleep 2
   done
-  [ "$ok" -eq 1 ] || log_error "对齐阶段未能执行（节点可能无外网）；基础部署已就绪，可稍后手动跑 ipes_onekey.sh"
+  kill $p1 $p2 2>/dev/null; wait 2>/dev/null
+  if [ -n "$winner" ]; then
+    cp "$winner" "$pf"
+    log_info "已取得对齐脚本（竞速命中: $([ "$winner" = "$t1" ] && echo ghproxy || echo raw)）"
+    export TARGET_HAPP="$NUM_DIRS"; export TARGET_TAG="1.3.0"
+    if bash "$pf"; then ok=1; log_info "对齐阶段执行完成"
+    else log_warn "对齐脚本返回非0（个别内核键不支持可忽略），继续"; ok=1; fi
+  else
+    log_error "对齐阶段两源均未能拉取（节点可能无外网）；基础部署已就绪，可稍后手动跑 ipes_onekey.sh"
+  fi
+  rm -f "$t1" "$t2"
 }
 
 # ============================ D) 写 device_code 供精确匹配 ============================
@@ -523,8 +539,8 @@ def main():
             if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
         ni = pick_node(pubip, local_nid)
         if ni and sn: break
-        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(10)
-    if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
+        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(5)
+    if not ni: log("[ERROR] 4 分钟未找到节点，放弃"); sys.exit(1)
     info = ni.get('nodeInfo') or {}
     log(f"节点: {ni.get('nodeID')} stage={ni.get('stage')} status={ni.get('status')} nodeInfo.vendor={info.get('vendorSuggestCustomers')} usbw={info.get('usbw')}")
     if is_bound(ni) and (not sn or tag_ok(ni, sn)):

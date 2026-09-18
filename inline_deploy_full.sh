@@ -180,8 +180,9 @@ enabled=1
 gpgcheck=1
 gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
 EOF
-  yum install -y yum-utils device-mapper-persistent-data lvm2
-  yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  # 一次性缓存元数据，后续安装走缓存；去掉冲突-prone 的 yum-utils/dm/lvm2（docker-ce-stable 自带依赖）
+  yum makecache fast >/dev/null 2>&1 || true
+  yum install -y -q --setopt=timeout=30 --setopt=retries=2 docker-ce docker-ce-cli containerd.io
 }
 install_docker_debian(){
   local dv=$1

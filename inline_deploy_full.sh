@@ -15,7 +15,13 @@
 #   --num-dirs/-n  happ 路数（默认 12，拉满）
 #   --no-align      跳过末尾对齐阶段（预热调优/全锥NAT/tc/cache 对齐）
 #   --bind-only     只跑「绑定+流转服务中」（部署已就绪、仅补绑定时用）
+#   --bind-first    先绑定(注册+提交41+流转服务中)，再慢慢部署业务【默认开启】
+#   --no-bind-first 关闭先绑定，退回"先部署后绑定"旧顺序
 #   镜像锁定 :1.3.0
+#
+# 【r20-fix17 默认流程】容器拉起→节点自注册→立即绑定(提交41+服务中,SN未就绪则空hostname)
+#   → 对齐/预热等慢步骤 → 末尾用真实 76hex SN 覆盖 business_tags.hostName。
+#   目的：让节点尽早被平台接纳(避免慢部署阶段节点"丢失")，与"完整模式"设计一致。
 # =============================================================================
 trap '' HUP   # 终端断开(SIGHUP)不杀进程；Ctrl-C(INT)仍可中断
 
@@ -23,7 +29,7 @@ trap '' HUP   # 终端断开(SIGHUP)不杀进程；Ctrl-C(INT)仍可中断
 AK=""; SK=""; JWT=""; ISP=""; PROVINCE=""; CITY=""
 NUM_DIRS=12; USBW=200; BW_NUM=1; IMG_CHOICE=2
 BUSINESS_ID=41; ADMIN_API_HOST="https://admin.zhouyi.top"
-NO_ALIGN=0; BIND_ONLY=0
+NO_ALIGN=0; BIND_ONLY=0; BIND_FIRST=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +49,8 @@ while [[ $# -gt 0 ]]; do
     --admin-host) ADMIN_API_HOST="$2"; shift 2;;
     --no-align) NO_ALIGN=1; shift;;
     --bind-only) BIND_ONLY=1; shift;;
+    --bind-first) BIND_FIRST=1; shift;;
+    --no-bind-first) BIND_FIRST=0; shift;;
     *) echo "[WARN] 未知参数: $1"; shift;;
   esac
 done
@@ -523,13 +531,21 @@ def do_bind(node_id, sn):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
-    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
+    # 【r20-fix17】仅当拿到真实 76hex SN 才带 hostname；容器未起/未就绪时省略 hostname，
+    # 让平台按"容器未起不带 hostname"的设计接纳节点（稍后由后置绑定用真 SN 覆盖 business_tags.hostName）。
+    sf_body = {"nodes": [node_id], "stage": "inService"}
+    if sn:
+        sf_body["hostname"] = sn
+    code, txt = admin_call("/api/edgeNode/stateflow", sf_body, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
+    # 【r20-fix17】BIND_REQUIRE_SN=0 时（先绑定模式）：节点自注册即绑定，SN 未就绪也继续（空 hostname 流转），
+    # 由末尾后置绑定用真实 SN 覆盖；默认=1（仅绑定/后置绑定）要求 SN 就绪。
+    REQUIRE_SN = os.environ.get('BIND_REQUIRE_SN', '1') != '0'
     pubip = get_public_ip()
     if not pubip: log("[ERROR] 无法获取公网 IP"); sys.exit(1)
-    log(f"本机公网 IP: {pubip}")
+    log(f"本机公网 IP: {pubip}  | 绑定模式: {'要求SN就绪' if REQUIRE_SN else '节点注册即绑(可空SN)'}")
     local_nid = get_local_node_id()
     log(f"本机 device_code(nodeID): {local_nid or '未读到，走IP兜底'}")
     sn = None; ni = None
@@ -538,7 +554,7 @@ def main():
             sn = get_real_sn()
             if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
         ni = pick_node(pubip, local_nid)
-        if ni and sn: break
+        if ni and (sn or not REQUIRE_SN): break
         log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(5)
     if not ni: log("[ERROR] 4 分钟未找到节点，放弃"); sys.exit(1)
     info = ni.get('nodeInfo') or {}
@@ -567,37 +583,56 @@ SN_WAIT=90
 log_info "========== 0/5 系统调优 =========="
 sys_tune
 
-if [ "$BIND_ONLY" -ne 1 ]; then
-  log_info "========== 1/5 确保 Docker =========="
-  ensure_docker
-  log_info "========== 2/5 清理旧节点 =========="
-  cleanup_old
-  log_info "========== 3/5 建目录 + custom.yml（${NUM_DIRS}路） =========="
-  create_dirs
-  log_info "========== 4/5 拉起容器（镜像 $DOCKER_IMAGE, reg_isp=$REG_ISP） =========="
-  DOCKER_CMD=$(gen_docker_cmd)
-  log_info "执行: $DOCKER_CMD"
-  eval "$DOCKER_CMD" || { log_error "容器启动失败"; exit 1; }
-  echo "$DOCKER_CMD" > /opt/ipes/docker_run; chmod +x /opt/ipes/docker_run
-  log_info "docker_run 已保存: /opt/ipes/docker_run"
-  insert_base_info
-  log_info "========== 5/5 安装保活(健康检查) =========="
-  install_health
-  if [ "$NO_ALIGN" -eq 0 ]; then run_align; else log_info "跳过对齐阶段（--no-align）"; fi
-  log_info "等待容器注册生成 SN（${SN_WAIT}s）..."
-  sleep "$SN_WAIT"
-  if docker ps | grep -q ipes; then
-    SN=$(docker exec ipes cat bin/ipes_sn 2>/dev/null)
-    [ -n "$SN" ] && { log_info "设备SN: $SN"; echo "IQIYI_ECACHE_DEVICE_ID:$SN"; } || log_warn "未读取到 SN，稍后: docker exec ipes cat bin/ipes_sn"
-    CID=$(cat /data*/happ/happ.*/hdata/config/infos.json 2>/dev/null | grep client_id | awk -F'"' '{print $4}' | sort -u | head -1)
-    [ -n "$CID" ] && { log_info "clientid: $CID"; echo "IQIYI_ECACHE_CLIENT_ID:$CID"; }
-  else
-    log_error "ipes 容器未运行，请排查"
-  fi
-  write_device_code
+# 【r20-fix17】--bind-only：跳过全部部署，仅做绑定+流转服务中（要求 SN 就绪）
+if [ "$BIND_ONLY" -eq 1 ]; then
+  log_info ">>> [仅绑定] 跳过部署，直接绑定+流转服务中"
+  run_binding
+  log_info "========== 全部完成（仅绑定）=========="
+  log_info "查看绑定日志: tail -f /var/log/ipes_repair.log"
+  exit 0
 fi
 
-run_binding
+log_info "========== 1/5 确保 Docker =========="
+ensure_docker
+log_info "========== 2/5 清理旧节点 =========="
+cleanup_old
+log_info "========== 3/5 建目录 + custom.yml（${NUM_DIRS}路） =========="
+create_dirs
+log_info "========== 4/5 拉起容器（镜像 $DOCKER_IMAGE, reg_isp=$REG_ISP） =========="
+DOCKER_CMD=$(gen_docker_cmd)
+log_info "执行: $DOCKER_CMD"
+eval "$DOCKER_CMD" || { log_error "容器启动失败"; exit 1; }
+echo "$DOCKER_CMD" > /opt/ipes/docker_run; chmod +x /opt/ipes/docker_run
+log_info "docker_run 已保存: /opt/ipes/docker_run"
+insert_base_info
+log_info "========== 5/5 安装保活(健康检查) =========="
+install_health
+
+# 【r20-fix17】先绑定：节点自注册后立即提交业务41+流转服务中（SN 未就绪则空 hostname），
+# 让平台尽早接纳节点；慢速的对齐/预热在之后跑，最后用真 SN 覆盖。
+if [ "$BIND_FIRST" -eq 1 ]; then
+  log_info ">>> [先绑定] 节点自注册后立即绑定（SN 未就绪可空 hostname 流转服务中）"
+  BIND_REQUIRE_SN=0 run_binding
+fi
+
+if [ "$NO_ALIGN" -eq 0 ]; then run_align; else log_info "跳过对齐阶段（--no-align）"; fi
+log_info "等待容器注册生成 SN（${SN_WAIT}s）..."
+sleep "$SN_WAIT"
+if docker ps | grep -q ipes; then
+  SN=$(docker exec ipes cat bin/ipes_sn 2>/dev/null)
+  [ -n "$SN" ] && { log_info "设备SN: $SN"; echo "IQIYI_ECACHE_DEVICE_ID:$SN"; } || log_warn "未读取到 SN，稍后: docker exec ipes cat bin/ipes_sn"
+  CID=$(cat /data*/happ/happ.*/hdata/config/infos.json 2>/dev/null | grep client_id | awk -F'"' '{print $4}' | sort -u | head -1)
+  [ -n "$CID" ] && { log_info "clientid: $CID"; echo "IQIYI_ECACHE_CLIENT_ID:$CID"; }
+else
+  log_error "ipes 容器未运行，请排查"
+fi
+write_device_code
+
+# 【r20-fix17】后置绑定：用真实 76hex SN 覆盖 business_tags.hostName（先绑定时若 SN 未就绪，此处补齐）
+if [ "$BIND_FIRST" -eq 1 ]; then
+  log_info ">>> [绑定后置] 用真实 76hex SN 覆盖业务标签(hostName)"
+  BIND_REQUIRE_SN=1 run_binding
+fi
 
 log_info "========== 全部完成 =========="
 log_info "镜像: $DOCKER_IMAGE | reg_isp=$REG_ISP | happ路数=$NUM_DIRS | 业务=$BUSINESS_ID | 绑定+服务中已执行"

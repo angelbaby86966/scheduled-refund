@@ -165,6 +165,10 @@ net.core.netdev_budget_usecs = 4000
 net.core.rps_sock_flow_entries = 32768
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_window_scaling = 1
+net.core.optmem_max = 16777216
+net.ipv4.tcp_orphan_retries = 1
+net.ipv4.tcp_retries2 = 8
+kernel.pid_max = 4194304
 EOF
 modprobe nf_conntrack tcp_bbr 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf
@@ -179,6 +183,31 @@ if [ -n "$nic" ]; then
   tc qdisc replace dev "$nic" root fq 2>/dev/null
   ethtool -G "$nic" rx 4096 tx 4096 2>/dev/null
   ip link set "$nic" txqueuelen 10000 2>/dev/null
+fi
+# CPU 调度器锁定 performance：SWAS 单核机默认常驻 powersave/ondemand，
+# 频率升降引入抖动、压不稳 200M 上行持续吞吐；锁定后去抖、稳定跑量（重启即失，靠开机重放）。
+for _g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+  echo performance > "$_g" 2>/dev/null
+done
+# 透明大页关闭：减少内存分配延迟抖动（PCDN 海量小缓存/小包场景）
+for _t in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag; do
+  echo never > "$_t" 2>/dev/null
+done
+# 开机重放（/sys 重启即失）：沿用脚本内 pcdn-disk-tune.service 同款做法
+if command -v systemctl >/dev/null 2>&1; then
+  cat > /etc/systemd/system/ipes-gov-tuned.service <<'GOV_EOF'
+[Unit]
+Description=IPES CPU governor(performance) + THP(never) replay on boot
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $g 2>/dev/null; done; for t in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag; do echo never > $t 2>/dev/null; done'
+[Install]
+WantedBy=multi-user.target
+GOV_EOF
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable ipes-gov-tuned.service >/dev/null 2>&1
 fi
 tune_fd_limits
 tune_disk

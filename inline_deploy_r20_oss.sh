@@ -211,6 +211,16 @@ GOV_EOF
 fi
 tune_fd_limits
 tune_disk
+# ============ A2) 上行优先脏页方案（方案 A：覆盖 99-pcdn-disk.conf 的 30/50） ============
+# ipes_deploy_full.sh 会生成 99-pcdn-disk.conf(dirty=30/vfs=50)，按字母序晚于 99-ipes.conf 会覆盖上行方案。
+# 这里用排序最后的 conf(99z > 99p)复述 20/10，保证「上行稳定优先」在运行期与开机后都生效（幂等，重跑安全）。
+cat > /etc/sysctl.d/99z-ipes-uplink.conf <<'EOF'
+vm.dirty_background_ratio = 10
+vm.dirty_ratio = 20
+vm.vfs_cache_pressure = 10
+EOF
+sysctl -e -p /etc/sysctl.d/99z-ipes-uplink.conf >/dev/null 2>&1
+echo "[INFO] 上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf 的 30/50"
 # 【r20-fix6】移除 NOTRACK：iptables raw NOTRACK 会让回包脱离 conntrack，与 firewalld(nftables/iptables) 共存时
 # 导致已建立连接回包被 INPUT 丢弃 → 云助手/SSH 断连（即此前"一跑脚本就断网"根因）。全脚本统一不再使用 NOTRACK。
 

@@ -1923,9 +1923,13 @@ if [ "$FSTYPE" = "ext4" ]; then ADD="noatime,nodiratime,commit=60,barrier=0"
 elif [ "$FSTYPE" = "xfs" ]; then ADD="logbsize=256k"
 else ADD=""; fi
 if [ -n "$ADD" ]; then
-  case "$CUR" in *barrier=0*) echo "  [fstab] already active";; *)
-    [ -f /etc/fstab ] && ! grep -q "barrier=0" /etc/fstab 2>/dev/null && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4")$4="defaults,noatime,nodiratime,commit=60,barrier=0"; if($2=="/"&&$3=="xfs")$4="defaults,logbsize=256k"; print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
-    mount -o "remount,$ADD" / 2>/dev/null && echo "  [remount] OK" || echo "  [remount] 下次重启由 fstab 生效"
+  # 仅以 fstab 根行第4列(挂载选项)判定是否已配置；避免 barrier=0 被错写到第6列时误判"已配置"而跳过修复
+  ROOT_OPTS=$(awk '$2=="/"&&($3=="ext4"||$3=="xfs"){print $4}' /etc/fstab 2>/dev/null)
+  case "$ROOT_OPTS" in
+    *commit=60*|*logbsize=256k*) echo "  [fstab] already active";;
+    *)
+      [ -f /etc/fstab ] && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4"){$4="defaults,noatime,nodiratime,commit=60,barrier=0";$5="1";$6="1"} if($2=="/"&&$3=="xfs"){$4="defaults,logbsize=256k";$5="1";$6="1"} print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
+      mount -o "remount,$ADD" / 2>/dev/null && echo "  [remount] OK" || echo "  [remount] 下次重启由 fstab 生效";;
   esac
 fi
 # --- 3. 内核 VM：脏页放大 + vfs 缓存保活 + 页缓存预读（纯 PCDN 写缓存关键） ---

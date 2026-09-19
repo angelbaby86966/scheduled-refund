@@ -218,7 +218,7 @@
             <div class="card" data-page-node-id="gGgdFDDPqLgLT2k5RBs34X">
               <div class="card-header" data-page-node-id="3P8BHSGmA7hdCQ3deV7rPw">
                 <h3 data-page-node-id="o5k8gtKytSjorBkersIyOG">🛡️ 批量应用防火墙模板</h3>
-                <p class="card-desc" data-page-node-id="CQWK0JYqpF9k62AN6owXPR">直接读取阿里云中已有的防火墙模板，9个地域各自选择模板后一键应用到该地域所有云主机。</p>
+                <p class="card-desc" data-page-node-id="CQWK0JYqpF9k62AN6owXPR">直接读取阿里云中已有的防火墙模板，<span class="region-count-slot">9</span>个地域各自选择模板后一键应用到该地域所有云主机。</p>
               </div>
               <div class="card-body" data-page-node-id="sPwkj52gEYU3OZa3NaTR3X">
                 <div class="action-bar" style="padding:8px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center;" data-page-node-id="AIFctDRWoHwQrh3qCGaGNZ">
@@ -235,11 +235,11 @@
                 </div>
                 <div class="action-bar" style="justify-content:center; padding:16px 0;" data-page-node-id="RvfmRk943fGcAG6OFN80Dt">
                   <button class="btn btn-primary" id="fwApplyBtn" style="font-size:16px; padding:12px 32px;" onclick="batchApplyAllTemplates()" data-page-node-id="6oA096Ry6hJVsRY277APNE">
-                    🚀 应用到所有云主机
+                    🚀 应用到所有云主机（缺模板自动创建）
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;" data-page-node-id="xA6dCAcLQj795t46uPGpJ5">
-                  自动加载9个地域的全部实例 → 按各地域所选模板分别执行；多凭证时逐账号执行
+                  自动加载<span class="region-count-slot">9</span>个地域的全部实例 → 按各地域所选模板分别执行；多凭证逐账号执行，<strong>目标账号缺同名模板时按锁定规则自动创建</strong>，不再跳过
                 </p>
               </div>
             </div>
@@ -251,7 +251,7 @@
               <div class="card-header" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;" data-page-node-id="leOs03rRRcPEpqAidmxGyz">
                 <div data-page-node-id="P3CcUXzt14dE2C3IPtu9GV">
                   <h3 data-page-node-id="L6V3cOQYVDNnuxRyPzYdFn">💻 批量执行命令</h3>
-                  <p class="card-desc" data-page-node-id="Hd9QtrJoDdpfR8CGUlVtDX">直接读取阿里云中已有的命令，9个地域各自选择命令后一键执行到该地域所有云主机。</p>
+                  <p class="card-desc" data-page-node-id="Hd9QtrJoDdpfR8CGUlVtDX">直接读取阿里云中已有的命令，<span class="region-count-slot">9</span>个地域各自选择命令后一键执行到该地域所有云主机。</p>
                 </div>
                 <button class="btn btn-warning" style="font-size:14px; padding:8px 16px;" onclick="openCustomCommandModal()" title="输入一段自定义命令，立即对所有地域的全部云主机执行（不保存命令，每次都是新命令）" data-page-node-id="DHjQZ669aqIYfFa8Wjq4GO">
                   ✏️ 自定义命令
@@ -270,7 +270,7 @@
                   <select id="cmdBatchTemplateSelect" class="select" style="min-width:200px; flex:1; max-width:360px;" disabled onchange="applyBatchCommandTemplate()" data-page-node-id="iWg5J7AdpNd1XxLYQtsZQl">
                     <option value="" data-page-node-id="uoHQ3WAize1pgCGcSWarG8">请先同步阿里云命令</option>
                   </select>
-                  <span id="cmdBatchTemplateHint" style="font-size:12px; color:#888;" data-page-node-id="TC9AnX2kUvsbD07vNCEBOE">一键应用到9个地域（已有选择的地域会被覆盖）</span>
+                  <span id="cmdBatchTemplateHint" style="font-size:12px; color:#888;" data-page-node-id="TC9AnX2kUvsbD07vNCEBOE">一键应用到<span class="region-count-slot">9</span>个地域（已有选择的地域会被覆盖）</span>
                   <button class="btn btn-danger" style="font-size:13px; padding:8px 14px; background:#c0392b;" onclick="deleteAllCommands()" title="一键删除所有地域的全部命令模板（危险操作，不可恢复）" data-page-node-id="JduXW6Io6G67I5fKq15umW">⚠️ 一键删除所有命令</button>
                 </div>
 
@@ -283,7 +283,7 @@
                   </button>
                 </div>
                 <p style="text-align:center; color:#888; font-size:12px; margin:0;" data-page-node-id="KZZK5JOnhFdohZXwH0PVNi">
-                  自动加载9个地域的全部实例（无数量限制）→ 按各地域所选命令分别执行，阿里云 InvokeCommand 上限 100 台/次，超出自动分批（如 500 台会跑 5 次），每批间隔 400ms
+                  自动加载<span class="region-count-slot">9</span>个地域的全部实例（无数量限制）→ 按各地域所选命令分别执行，阿里云 InvokeCommand 上限 100 台/次，超出自动分批（如 500 台会跑 5 次），每批间隔 400ms
                 </p>
               </div>
             </div>
@@ -434,18 +434,20 @@
             <div class="card" data-page-node-id="ms5UhKCn0TDknvq4cJVycF">
               <div class="card-header" data-page-node-id="8CyueqWYz0NGAYPaY0tvrq">
                 <h3 data-page-node-id="BBg5wyXqnepOBh4Ld0rjnN">📈 批量提升实例数量配额</h3>
-                <p class="card-desc" data-page-node-id="3MaUNdBUsUYn9WLJtVqbMG">将 9 个地区的轻量应用服务器「实例数量上限」配额（<code data-page-node-id="UNKM3h5AvnZXf078CpSajF">q_z3sbl5</code>）批量提升到 500。</p>
+                <p class="card-desc" data-page-node-id="3MaUNdBUsUYn9WLJtVqbMG">将 <span class="region-count-slot">9</span> 个地区的轻量应用服务器「实例数量上限」配额（<code data-page-node-id="UNKM3h5AvnZXf078CpSajF">q_z3sbl5</code>）批量提升。可申请范围 <b>501 ~ 1000 台</b>，且必须高于当前值（多数地区当前已是 500）。</p>
               </div>
               <div class="card-body" data-page-node-id="4JJRON6oeGD6ynwjQzYx4E">
                 <div class="quota-region-list" id="quotaRegionList" style="margin-bottom:16px;" data-page-node-id="70Svr8WKXs77nHDWljMmD4">
-                  <div class="empty-state" data-page-node-id="bFAy6o5ZGGq6iBGvIKAyIp">点击按钮后，会依次为 9 个地区提交配额提升申请。</div>
+                  <div class="empty-state" data-page-node-id="bFAy6o5ZGGq6iBGvIKAyIp">点击按钮后，会依次为 <span class="region-count-slot">9</span> 个地区提交配额提升申请。</div>
                 </div>
-                <div class="action-bar" style="justify-content:center; padding:10px 0;" data-page-node-id="rPUyP2SbCUmLscU2MX72Ud">
-                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchApplyQuota(500)" data-page-node-id="rJdtjAGGz2e572qlnLicuM">
-                    🚀 批量提额到 500
+                <div class="action-bar" style="justify-content:center; align-items:center; gap:10px; padding:10px 0;" data-page-node-id="rPUyP2SbCUmLscU2MX72Ud">
+                  <label for="quotaDesireValue" style="font-weight:600;">目标上限</label>
+                  <input id="quotaDesireValue" class="input" type="number" min="501" max="1000" step="1" value="1000" style="width:110px; text-align:center;" data-page-node-id="qDesireValInput">
+                  <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchApplyQuotaFromInput()" data-page-node-id="rJdtjAGGz2e572qlnLicuM">
+                    🚀 批量提额
                   </button>
                 </div>
-                <small style="color:#888; display:block; text-align:center; margin-top:8px;" data-page-node-id="g3PtZHoqN4hs7a2OX9uHcO">配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
+                <small style="color:#888; display:block; text-align:center; margin-top:8px;" data-page-node-id="g3PtZHoqN4hs7a2OX9uHcO">可填 501 ~ 1000 台，且必须高于当前值（填 500 会被阿里云拒：The applied quota value is invalid.）。配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
               </div>
             </div>
           </div>
@@ -818,12 +820,12 @@
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
   </script>
-  <script src="aliyun-client-v2.js?v=15"></script>
+  <script src="aliyun-client-v2.js?v=18"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=108"></script>
+  <script src="app.js?v=110"></script>
   <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
-  <script src="image-clone.js?v=20&r=33"></script>
+  <script src="image-clone.js?v=19&r=33"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」与「镜像克隆」
     (function() {
@@ -932,7 +934,7 @@
         </div>
 
         <div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 12px; border-radius:4px; margin-top:14px; font-size:13px; color:#664d03;" data-page-node-id="VJaDTCvky1EXb03JShD7EZ">
-          ⚠️ 点击「执行」后，会对所选<b>全部凭证</b>（逐账号）的 <b data-page-node-id="BfrgVbZy2KHW8DFvRAT4WI">全部 9 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b data-page-node-id="ionqdWtLumpF4TiQmBPChM">全自动分批执行</b>。命令<b data-page-node-id="b3NHjB9W9yLAYq7wX4UZHa">不会保存</b>，下次输入就是新命令。
+          ⚠️ 点击「执行」后，会对所选<b>全部凭证</b>（逐账号）的 <b data-page-node-id="BfrgVbZy2KHW8DFvRAT4WI">全部 <span class="region-count-slot">9</span> 个地域的所有云主机执行这条命令（无数量限制）</b>。每批最多 100 台、单次请求批量下发，从根上规避 QPS 限流，<b data-page-node-id="ionqdWtLumpF4TiQmBPChM">全自动分批执行</b>。命令<b data-page-node-id="b3NHjB9W9yLAYq7wX4UZHa">不会保存</b>，下次输入就是新命令。
         </div>
       </div>
       <div class="modal-footer" style="text-align:right; padding:12px 16px; border-top:1px solid #eee;" data-page-node-id="jUCRWVgCekNhI233fM3qsA">

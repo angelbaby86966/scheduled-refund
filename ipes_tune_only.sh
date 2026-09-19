@@ -33,7 +33,7 @@
 set +e
 TUNE_ONLY_VERSION="2.1"
 # ★版本指纹★：自安装时回读远端文件必须含这一行，否则判定拿到旧版（CDN 缓存）并放弃安装。
-TUNE_ONLY_REV="20260919-tuneonly-v21"
+TUNE_ONLY_REV="20260919-tuneonly-v21b"
 SELF_URLS="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh
 https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_tune_only.sh
 https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh"
@@ -300,7 +300,11 @@ gov_tune(){
   for t in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag; do
     [ -e "$t" ] && echo never >"$t" 2>/dev/null
   done
-  info "governor=performance（$n 个核，热写 /sys，不重启进程）；THP=never"
+  if [ "$n" -gt 0 ]; then
+    info "governor=performance（$n 个核，热写 /sys，不重启进程）；THP=never"
+  else
+    info "本机无 cpufreq（虚拟化机型常见），governor 无从设置，跳过；THP=never"
+  fi
   if [ "$NO_SERVICE" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
     cat >/etc/systemd/system/ipes-gov-tuned.service <<'GOV'
 [Unit]
@@ -528,7 +532,9 @@ report(){
   echo "================= 验收（$(hostname 2>/dev/null) $(date '+%F %T')） ================="
   printf "%-44s %-14s %-14s %s\n" "项目" "实际" "期望" "结果"
   printf "%-44s %-14s %-14s %s\n" "--------------------------------------------" "--------------" "--------------" "----"
-  local kv k want got mark sch ra gov govmark thp cur mnt en cstat hh inc
+  local kv k want got mark sch ra gov govmark thp cur mnt en cstat hh inc LIM nr_open
+  nr_open=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo 1048576)
+  LIM=$(( nr_open < 1048576 ? nr_open : 1048576 ))
   for kv in "${KV[@]}"; do
     k=${kv%%=*}; want=${kv#*=}; got=$(sysctl -n "$k" 2>/dev/null)
     mark="OK"; [ "$got" = "$want" ] || mark="FAIL"

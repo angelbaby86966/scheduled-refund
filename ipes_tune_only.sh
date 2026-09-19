@@ -1,8 +1,17 @@
 #!/bin/bash
 # =============================================================================
-#  ipes_tune_only.sh   v2.0   (2026-09-19)
+#  ipes_tune_only.sh   v2.1   (2026-09-19)
 #  存量机「纯优化」热补丁 —— 不重装 / 不重建容器 / 不动身份绑定 / 不重启机器
 # -----------------------------------------------------------------------------
+#  v2.1 变更（SWAS CentOS7 + 上海节点真机验证后修正）：
+#   · 修 dockerd nofile 取值：CentOS7 的 systemd 219 不支持 `systemctl show --value`（返回空），
+#     旧写法让"生效值≠配置值"永远成立 ⇒ 每次部署都白重启一遍 docker 打断容器。
+#     现改为 `systemctl show -p LimitNOFILE | sed` + 回读 /proc/<dockerd>/limits 双保险。
+#   · 验收表修正：scheduler 取 `[]` 内当前值（不再因 "none mq-deadline kyber" 误报 FAIL）；
+#     无 cpufreq 的虚拟化机型 governor 记 n/a 而非 FAIL；dockerd 期望值改用实际 LIM。
+#   · 无 cpufreq 时明确提示"跳过 governor"，不再打印"0 个核"。
+#   · guard 断言不符时先重跑 sysctl 让位再重放（防 /etc/sysctl.conf 又被写回）。
+#
 #  做什么（全部幂等，可反复执行）：
 #   [0] fstab 自检：修复旧版把 commit=60/barrier=0 写错列的问题；根分区只读则 remount rw
 #   [1] 内核 sysctl 全量调优（单权威文件 /etc/sysctl.d/99-ipes.conf，带归属标记 + 按内存缩放）
@@ -33,7 +42,7 @@
 set +e
 TUNE_ONLY_VERSION="2.1"
 # ★版本指纹★：自安装时回读远端文件必须含这一行，否则判定拿到旧版（CDN 缓存）并放弃安装。
-TUNE_ONLY_REV="20260919-tuneonly-v21b"
+TUNE_ONLY_REV="20260919-tuneonly-v21c"
 SELF_URLS="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh
 https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_tune_only.sh
 https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh"

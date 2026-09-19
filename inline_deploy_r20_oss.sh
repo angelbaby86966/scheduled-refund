@@ -108,7 +108,8 @@ tune_disk(){
     mount -o remount,commit=60,barrier=0 / 2>/dev/null
     if [ -f /etc/fstab ]; then
       cp -a /etc/fstab "/etc/fstab.ipes-bak.$(date +%s)" 2>/dev/null
-      grep -q '# ipes-tuned' /etc/fstab || sed -i -E 's|(.*ext4.*defaults.*)|\1,commit=60,barrier=0 # ipes-tuned|' /etc/fstab 2>/dev/null
+      # 修正：把 commit=60,barrier=0 写进第4列(挂载选项)，并复位第5/6列，避免污染 pass 字段导致重启后根分区只读
+      grep -q '# ipes-tuned' /etc/fstab || awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4"){$4="defaults,noatime,nodiratime,commit=60,barrier=0";$5="1";$6="1"} print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab 2>/dev/null
     fi
   elif echo "$fstype" | grep -q xfs; then
     mount -o remount,logbsize=256k / 2>/dev/null

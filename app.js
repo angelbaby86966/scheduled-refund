@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v106 已加载 - 全功能统一9地域+批量凭证多选下拉 + 修复多账号并发导致密钥错配（InstanceId does not exist）→ 改为逐账号串行，账号内保持地域并行+50台/批 + 修复批量重启弹窗只显示单凭证实例数误导用户 → 弹窗前对每个凭证轻探 totalCount 汇总真实总台数', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v112 已加载 - 下单链路抗中断：Edge Function 预热 + 地域错峰200ms发起 + AbortError 快速重试(0.3s起) + 尝试耗时诊断（保留：全功能9地域 + 批量凭证多选下拉 + 多账号串行 + 批量重启真实总台数）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -2873,9 +2873,12 @@ async function batchCreateInstances() {
       var clientToken = 'wb-' + order.regionId + '-' + order.count + '-' + Date.now();
 
       // 🔄 重试：网络抖动 / Edge Function 偶发超时 / signal aborted 时自动重试
-      var maxAttempts = 3;
+      // 🔧 v112：中断类错误立即重试（AbortError 多为瞬时中断，干等 2s 无收益）
+      //          每次尝试记录耗时，一眼区分「服务端超时」与「网络瞬时中断」
+      var maxAttempts = 4;
       var lastError = null;
       for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        var attemptStart = Date.now();
         try {
           if (attempt > 1) {
             log('⏳ ' + order.regionName + ' 第 ' + attempt + ' 次尝试...', 'warn');
@@ -2916,12 +2919,23 @@ async function batchCreateInstances() {
           }
         } catch (attemptErr) {
           lastError = attemptErr;
-          var retryable = /aborted|timeout|failed to fetch|network|超时|fetch|signal/i.test(attemptErr.message || '');
+          var rawMsg = attemptErr.message || '';
+          var costMs = Date.now() - attemptStart;
+          var costStr = (costMs / 1000).toFixed(1) + 's';
+          // AbortError 原文（signal is aborted without reason）对用户零信息量 → 区分「真超时」与「瞬时中断」
+          var isAbort = /aborted|signal/i.test(rawMsg);
+          var friendly = isAbort
+            ? '请求被中断（耗时 ' + costStr + (costMs >= 115000 ? '，Edge Function 超时' : '，网络/代理瞬时中断') + '）'
+            : rawMsg + '（耗时 ' + costStr + '）';
+          var retryable = /aborted|timeout|failed to fetch|network|超时|fetch|signal/i.test(rawMsg);
           if (!retryable || attempt === maxAttempts) {
-            throw attemptErr; // 不可重试或已用尽次数，抛给外层
+            throw new Error(friendly); // 不可重试或已用尽次数，抛给外层
           }
-          log('⚠️ ' + order.regionName + ' 第 ' + attempt + ' 次失败：' + attemptErr.message + '，2秒后重试...', 'warn');
-          await new Promise(function(r){ setTimeout(r, 2000); });
+          // 中断类：首次仅等 300ms（瞬时故障，越早重试越容易命中已建好的连接）
+          // 其余（限流/服务端错误）：1.5s / 3s 退避
+          var waitMs = isAbort ? (attempt === 1 ? 300 : 1200) : Math.min(attempt * 1500, 3000);
+          log('⚠️ ' + order.regionName + ' 第 ' + attempt + ' 次失败：' + friendly + '，' + (waitMs / 1000).toFixed(1) + 's 后重试...', 'warn');
+          await new Promise(function(r){ setTimeout(r, waitMs); });
         }
       }
     } catch (err) {
@@ -2936,10 +2950,32 @@ async function batchCreateInstances() {
     }
   }
 
-  // ⚡ 各地区一起并行下单（用户要求提速）
-  // 保留 fetchWithTimeout(60s) + 3 次重试 + ClientToken 幂等，作为超时/抖动兜底
+  // ⚡ 各地区并行下单（保持提速），但「先预热连接 + 错峰发起」
+  // 🔧 v112：实测 9 地域若在同一毫秒并发，首个请求易撞上 Edge Function 冷启动/代理抖动而被中断
   log('🚀 ' + regionOrders.length + ' 个地区并行下单：' + regionOrders.map(function(o){ return o.regionName + '×' + o.count; }).join('、'), 'info');
-  await Promise.all(regionOrders.map(function(order, idx){ return processOrder(order, idx); }));
+
+  // 🔥 预热：轻量探针唤醒 Edge Function + 建好 TLS 连接（实测 0.7~1.1s）；失败不阻塞下单
+  var ORDER_PROXY_URL = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/aliyun-proxy';
+  try {
+    var warmT0 = Date.now();
+    await fetchWithTimeout(ORDER_PROXY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: '__warmup__' })
+    }, 15000);
+    log('🔥 Edge Function 连接预热完成（' + ((Date.now() - warmT0) / 1000).toFixed(1) + 's）', 'info');
+  } catch (warmErr) {
+    console.warn('[app.js] 预热失败（不阻塞下单）', warmErr && warmErr.message);
+  }
+
+  // 错峰发起：第 n 个地域延后 n×200ms（9 地域总错峰 1.6s），避开瞬时并发冲击
+  var STAGGER_MS = 200;
+  await Promise.all(regionOrders.map(function(order, idx){
+    return (async function(){
+      if (idx > 0) await new Promise(function(r){ setTimeout(r, idx * STAGGER_MS); });
+      return processOrder(order, idx);
+    })();
+  }));
 
   // 渲染订单结果
   renderOrderResults();

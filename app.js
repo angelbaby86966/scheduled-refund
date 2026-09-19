@@ -303,9 +303,9 @@ var REGION_COLORS = {
 };
 
 // ====== 地区启用 / 禁用开关（2026-09-19 新增）======
-// 需求：先把「河源 / 武汉 / 乌兰察布」三个地区从页面与所有功能里摘掉，
-// 但**代码一律保留**（名字、配色都在下面的 REGION_INFO / REGION_COLORS 注册表里），
-// 过几天需要时只要在页面「⚙️ 地区管理」里勾一下就能加回来。
+// 需求：把「河源 / 武汉 / 乌兰察布」三个地区从页面与所有功能里暂时摘掉，
+// 但**代码一律保留**（名字、配色都在上面的 REGION_INFO / REGION_COLORS 注册表里），
+// 需要时只要在页面「⚙️ 地区管理」里勾一下就能加回来，不用改代码。
 // 实现：全量注册表不动，只维护一个「禁用名单」；所有需要遍历地区的代码统一走
 //       activeRegionIds()，被禁用的地区就不会参与任何展示、请求与批量操作。
 var REGION_DISABLED_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu']; // 默认禁用的三个地区
@@ -345,6 +345,7 @@ function saveDisabledRegions(arr) {
   if (typeof state !== 'undefined' && state && state.selectedRegions) {
     clean.forEach(function (r) { state.selectedRegions.delete(r); });
   }
+  refreshRegionCountTexts();
   return clean;
 }
 
@@ -353,7 +354,22 @@ function resetDisabledRegions() {
   if (typeof state !== 'undefined' && state && state.selectedRegions) {
     REGION_DISABLED_DEFAULT.forEach(function (r) { state.selectedRegions.delete(r); });
   }
+  refreshRegionCountTexts();
   return REGION_DISABLED_DEFAULT.slice();
+}
+
+// 页面上所有「N 个地区 / N 个地域」的文案统一刷新成当前启用数量
+// （index.html 里这些位置写成 <span class="region-count-slot">9</span> 占位）
+function refreshRegionCountTexts() {
+  var n = activeRegionIds().length;
+  var els = document.querySelectorAll('.region-count-slot');
+  for (var i = 0; i < els.length; i++) els[i].textContent = n;
+  return n;
+}
+
+// 默认名单的中文串（提示语里复用，避免写死）
+function disabledRegionNames() {
+  return REGION_DISABLED_DEFAULT.map(function (r) { return REGION_INFO[r]; }).join(' / ');
 }
 
 // ====== 「⚙️ 地区管理」弹窗：勾选启用/禁用，随时加减地区 ======
@@ -368,6 +384,7 @@ function openRegionManageModal() {
       '</label>';
   }).join('');
 
+  var defKeep = Object.keys(REGION_INFO).length - REGION_DISABLED_DEFAULT.length;
   var html =
     '<div class="modal-mask" id="regionManageMask" onclick="if(event.target===this)closeRegionManageModal()">' +
       '<div class="modal-dialog" style="max-width:520px;">' +
@@ -382,7 +399,7 @@ function openRegionManageModal() {
           '<div style="margin-top:14px;font-size:12px;color:#6b7280;" id="regionManageHint"></div>' +
         '</div>' +
         '<div class="modal-footer">' +
-          '<button class="btn btn-sm" onclick="resetRegionManageModal()">恢复默认（只留 6 个地区）</button>' +
+          '<button class="btn btn-sm" onclick="resetRegionManageModal()">恢复默认（只留 ' + defKeep + ' 个地区）</button>' +
           '<button class="btn btn-sm btn-primary" id="regionManageSaveBtn" onclick="confirmRegionManage()">保存</button>' +
         '</div>' +
       '</div>' +
@@ -402,7 +419,7 @@ function resetRegionManageModal() {
     cbs[i].checked = disabled.indexOf(cbs[i].value) === -1;
   }
   var hint = document.getElementById('regionManageHint');
-  if (hint) hint.textContent = '已重置为默认（河源 / 武汉 / 乌兰察布 禁用），点「保存」生效。';
+  if (hint) hint.textContent = '已重置为默认（' + disabledRegionNames() + ' 禁用），点「保存」生效。';
 }
 
 function confirmRegionManage() {
@@ -418,12 +435,14 @@ function confirmRegionManage() {
   log('⚙️ 地区设置已更新：启用 ' + enabled.length + ' 个（' +
       enabled.map(function (r) { return REGION_INFO[r]; }).join('、') + '）' +
       (disabled.length ? '；已禁用 ' + disabled.map(function (r) { return REGION_INFO[r]; }).join('、') : ''), 'info');
-  // 立刻按新名单重绘页面（已禁用的地区不再出现在卡片/实例列表/退订计数里）
+  // 立刻按新名单重绘：地域卡片、实例列表、已选清单、全选按钮、下单网格
   if (typeof renderRegionCards === 'function') renderRegionCards();
   if (typeof updateSelectAllBtn === 'function') updateSelectAllBtn();
   if (typeof renderInstances === 'function') renderInstances();
   if (typeof updateSelectedList === 'function') updateSelectedList();
   if (typeof updateBatchUnsubBtn === 'function') updateBatchUnsubBtn();
+  if (typeof initOrderGrid === 'function') initOrderGrid();
+  refreshRegionCountTexts();
 }
 
 // 超时设置的 fetch 封装（用于直接调用阿里云 API 的防超时）
@@ -1067,8 +1086,10 @@ async function loadAllRegionTemplatesSilent() {
     results.forEach(function(r) {
       if (!r.success) return;
       r.templates.forEach(function(t) {
-        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {} };
+        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {}, rulesByRegion: {} };
         nameMap[t.Name].regionTemplates[r.regionId] = t.FirewallTemplateId;
+        // 顺手记下规则：其它账号缺同名模板时用这份规则自动创建（DescribeFirewallTemplates 会带回 FirewallTemplateRules）
+        nameMap[t.Name].rulesByRegion[r.regionId] = t.FirewallTemplateRules || [];
       });
     });
     state.allTemplates = Object.values(nameMap);
@@ -1265,8 +1286,10 @@ async function loadAllRegionTemplates() {
     results.forEach(function(r) {
       if (!r.success) return;
       r.templates.forEach(function(t) {
-        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {} };
+        if (!nameMap[t.Name]) nameMap[t.Name] = { name: t.Name, description: t.Description, regionTemplates: {}, rulesByRegion: {} };
         nameMap[t.Name].regionTemplates[r.regionId] = t.FirewallTemplateId;
+        // 顺手记下规则：其它账号缺同名模板时用这份规则自动创建（DescribeFirewallTemplates 会带回 FirewallTemplateRules）
+        nameMap[t.Name].rulesByRegion[r.regionId] = t.FirewallTemplateRules || [];
       });
     });
     state.allTemplates = Object.values(nameMap);
@@ -1334,7 +1357,7 @@ function onFwRegionTemplateChange(regionId) {
 
 async function batchApplyAllTemplates() {
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-  log('🛡️ 开始批量执行防火墙模板...', 'info');
+  log('🛡️ 开始批量执行防火墙模板（目标账号缺模板 → 按锁定规则自动创建，不跳过）...', 'info');
 
   try {
     if (!state.allTemplates || state.allTemplates.length === 0) {
@@ -1368,21 +1391,36 @@ async function batchApplyAllTemplates() {
     log('📋 已选择模板的地域：' + Object.keys(regionSelections).map(function(r) { return REGION_INFO[r]; }).join('、'), 'info');
     log('👥 凭证（' + credList.length + ' 个，逐账号串行执行）：' + credList.join('、'), 'info');
 
+    // 🔒 锁定所选模板的「名称+描述+规则」：切换凭证后某账号没有同名模板时，用这份规则自动创建，不再跳过
+    //    规则来源：点击「同步阿里云模板」时缓存的 FirewallTemplateRules（DescribeFirewallTemplates 自带）
+    var lockedSpecs = captureLockedFwSpecs(regionSelections);
+    var lockedNames = Object.keys(lockedSpecs);
+    if (lockedNames.length === 0) {
+      log('⚠️ 没能读到所选模板的规则 —— 若目标账号缺模板将无法自动创建。请先用「有该模板的账号」点一次「🔄 同步阿里云模板」再执行', 'warn');
+    } else {
+      lockedNames.forEach(function(nm) {
+        log('🔒 已锁定模板「' + nm + '」的规则（' + lockedSpecs[nm].rules.length + ' 条）：' +
+          lockedSpecs[nm].rules.map(function(r) { return (r.RuleProtocol || '?') + ' ' + (r.Port || '?'); }).join('、'), 'info');
+      });
+      log('✅ 目标账号缺模板时，将按上述规则自动创建后再应用（不会再跳过）', 'success');
+    }
+
     var btn = document.getElementById('fwApplyBtn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 应用中...'; }
 
     // 多账号串行执行（单例客户端签名实时读 active 凭证，并行会密钥错配）
     var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
-    var grand = { ok: 0, fail: 0 };
+    var grand = { ok: 0, fail: 0, tplCreated: 0 };
     for (var ci = 0; ci < credList.length; ci++) {
       var pname = credList[ci];
       log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-      log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始应用防火墙模板…', 'warn');
+      log('▶ [凭证 ' + (ci + 1) + '/' + credList.length + ' ' + pname + '] 开始应用防火墙模板（缺模板自动创建）…', 'warn');
       try {
         AliyunClient.useProfile(pname);
-        var st = await runFwApplyForProfile(pname, regionSelections, regionIds);
+        var st = await runFwApplyForProfile(pname, regionSelections, regionIds, lockedSpecs);
         grand.ok += st.ok;
         grand.fail += st.fail;
+        grand.tplCreated += (st.tplCreated || 0);
       } catch (e) {
         log('❌ [凭证 ' + pname + '] 执行异常: ' + (e && e.message || e), 'error');
       }
@@ -1393,39 +1431,81 @@ async function batchApplyAllTemplates() {
     renderCredMultiFor(fwApplyCredMulti);
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    log('🏆 防火墙模板批量执行全部完成（' + credList.length + ' 个凭证）: 成功 ' + grand.ok + ' 批, 失败 ' + grand.fail + ' 批', grand.fail === 0 ? 'success' : 'warn');
-    if (btn) { btn.disabled = false; btn.textContent = '🚀 应用到所有云主机'; }
+    log('🏆 防火墙模板批量执行全部完成（' + credList.length + ' 个凭证）: 自动创建模板 ' + grand.tplCreated + ' 个, 成功 ' + grand.ok + ' 批, 失败 ' + grand.fail + ' 批', grand.fail === 0 ? 'success' : 'warn');
+    if (btn) { btn.disabled = false; btn.textContent = '🚀 应用到所有云主机（缺模板自动创建）'; }
   } catch (err) {
     log('❌ 严重错误: ' + err.message, 'error');
     console.error(err);
   }
 }
 
-// 单凭证：加载全部实例 → 3 遍应用各地域所选模板（10台/批）
-async function runFwApplyForProfile(pname, regionSelections, regionIds) {
+// 单凭证：模板「有则复用、缺则按锁定规则自动创建」→ 加载全部实例 → 3 遍应用（10台/批）
+async function runFwApplyForProfile(pname, regionSelections, regionIds, lockedSpecs) {
   var selectedRegionIds = regionIds.filter(function(r) { return regionSelections[r]; });
+  lockedSpecs = lockedSpecs || {};
 
   // 🔄 模板ID是账号级的：切换凭证后必须用当前账号重新同步模板，否则拿别的账号的
   //    TemplateId 去应用会报 "The specified parameter FirewallTemplateId value is not valid"
-  var tplMap = {};   // regionId -> { 模板名: 模板ID }（当前凭证的）
+  //    tplMap[regionId][模板名] = { id, description, rules }
+  var tplMap = {};
   await Promise.all(selectedRegionIds.map(async function(rid) {
     try {
       var lst = await AliyunClient.listFirewallTemplates(rid);
       var m = {};
-      ((lst && lst.FirewallTemplates) || []).forEach(function(t) { m[t.Name] = t.FirewallTemplateId; });
+      ((lst && lst.FirewallTemplates) || []).forEach(function(t) {
+        m[t.Name] = { id: t.FirewallTemplateId, description: t.Description || '', rules: (t.FirewallTemplateRules || []).map(fwRuleLite) };
+      });
       tplMap[rid] = m;
     } catch (e) {
       tplMap[rid] = {};
       log('⚠️ [' + REGION_INFO[rid] + '] 同步模板失败: ' + (e.message || e), 'warn');
     }
   }));
-  // 缺失检查：当前账号没有所选模板的地域跳过（可用「创建防火墙」弹窗一键补建+应用）
-  selectedRegionIds.forEach(function(rid) {
-    var want = regionSelections[rid];
-    if (want && !(tplMap[rid] && tplMap[rid][want])) {
-      log('⚠️ [凭证 ' + pname + '] [' + REGION_INFO[rid] + '] 该账号下没有模板「' + want + '」，跳过该地域（可用「创建防火墙」弹窗批量执行自动补建）', 'warn');
+
+  // ✅ 缺模板 → 自动创建（不再跳过）。规则优先用「锁定规则」，其次用本账号/其它账号已采到的规则。
+  var tplCreated = 0;
+  for (var ei = 0; ei < selectedRegionIds.length; ei++) {
+    var erid = selectedRegionIds[ei];
+    var want = regionSelections[erid];
+    if (!want) continue;
+    if (!tplMap[erid]) tplMap[erid] = {};
+    var mine = tplMap[erid][want];
+
+    // 1) 本账号已有 → 直接复用，并把它的规则采集进 lockedSpecs，供后续缺模板的账号复制
+    if (mine && mine.id) {
+      var needSpec = !lockedSpecs[want] || !lockedSpecs[want].rules || lockedSpecs[want].rules.length === 0;
+      if (needSpec) {
+        var gotRules = (mine.rules && mine.rules.length) ? mine.rules : fwRulesAcrossRegions(tplMap, want);
+        if (gotRules && gotRules.length) {
+          lockedSpecs[want] = { description: mine.description || '', rules: gotRules };
+          log('  📌 [凭证 ' + pname + '] 采集到模板「' + want + '」规则 ' + gotRules.length + ' 条，供缺模板的账号复用', 'info');
+        }
+      }
+      continue;
     }
-  });
+
+    // 2) 缺模板 → 自动创建（这一步就是原来「跳过该地域」的位置）
+    var spec = lockedSpecs[want];
+    if (!spec || !spec.rules || spec.rules.length === 0) {
+      log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 无模板「' + want + '」且没有可复制的规则 → 无法自动创建。请先用「有该模板的账号」点一次「🔄 同步阿里云模板」后重试', 'error');
+      continue;
+    }
+    try {
+      var cr = await AliyunClient.createFirewallTemplate(erid, want, spec.description || '', spec.rules);
+      var nid = cr && cr.FirewallTemplateId;
+      if (nid) {
+        tplMap[erid][want] = { id: nid, description: spec.description || '', rules: spec.rules };
+        tplCreated++;
+        log('  🆕 [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 该账号无模板「' + want + '」→ 已按锁定规则自动创建（' +
+          spec.rules.length + ' 条）：' + spec.rules.map(function(r) { return (r.RuleProtocol || '?') + ' ' + (r.Port || '?'); }).join('、') + ' → ' + nid, 'success');
+      } else {
+        log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 创建模板「' + want + '」未返回模板ID', 'error');
+      }
+    } catch (ce) {
+      log('❌ [凭证 ' + pname + '] [' + REGION_INFO[erid] + '] 自动创建模板「' + want + '」失败: ' + (ce && ce.message || ce), 'error');
+    }
+    await new Promise(function(r) { setTimeout(r, 200); });
+  }
 
   // 加载所有地域的全部实例（带翻页，不限 100 台上限）
   log('🔄 [凭证 ' + pname + '] 加载全部实例...', 'info');
@@ -1465,9 +1545,10 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
       var templateName = regionSelections[rid3];
       if (!templateName) return;
 
-      // 用当前凭证的模板映射按名取ID（跨账号旧ID无效，必须用刚同步的 tplMap）
-      var templateId = tplMap[rid3] ? tplMap[rid3][templateName] : null;
-      if (!templateId) { log('⚠️ [' + REGION_INFO[rid3] + '] 无模板「' + templateName + '」，跳过', 'warn'); return; }
+      // 用当前凭证的模板映射按名取ID（跨账号旧ID无效，必须用刚同步/刚自动创建的 tplMap）
+      var td = tplMap[rid3] ? tplMap[rid3][templateName] : null;
+      var templateId = td && td.id;
+      if (!templateId) { log('⚠️ [' + REGION_INFO[rid3] + '] 无模板「' + templateName + '」（自动创建也失败），跳过', 'warn'); return; }
 
       var rd = state.regionData[rid3];
       var instanceIds = (rd && rd.instances || []).map(function(inst) { return inst.InstanceId; });
@@ -1504,8 +1585,58 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
     }
   }
 
-  log('🏁 [凭证 ' + pname + '] 完成: 成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
-  return { ok: totalSuccess, fail: totalFail };
+  log('🏁 [凭证 ' + pname + '] 完成: 自动创建模板 ' + tplCreated + ' 个, 应用成功 ' + totalSuccess + ' 批, 失败 ' + totalFail + ' 批', totalFail === 0 ? 'success' : 'warn');
+  return { ok: totalSuccess, fail: totalFail, tplCreated: tplCreated };
+}
+
+// 规则精简：只保留创建模板需要的字段（DescribeFirewallTemplates 与创建接口的字段名一致）
+function fwRuleLite(r) {
+  return {
+    RuleProtocol: r.RuleProtocol || '',
+    Port: r.Port || '',
+    SourceCidrIp: r.SourceCidrIp || '0.0.0.0/0',
+    Remark: r.Remark || ''
+  };
+}
+
+// 从「已同步的模板列表」里取出所选模板的规则，作为跨账号自动创建的依据。
+// 返回 { 模板名: { description, rules: [...] } }
+// 规则查找优先用「同地域」那份；同地域没有就回退用同名模板在其它地域的规则
+// （同名模板的定义本来就一致，只是每个地域各存一份，跨地域回退能显著提高锁定成功率）
+function captureLockedFwSpecs(regionSelections) {
+  var specs = {};
+  var tpls = state.allTemplates || [];
+  Object.keys(regionSelections).forEach(function(rid) {
+    var want = regionSelections[rid];
+    if (!want || specs[want]) return;   // 同名模板规则一致，取一次即可
+    for (var i = 0; i < tpls.length; i++) {
+      var t = tpls[i];
+      if (t.name !== want) continue;
+      var rb = t.rulesByRegion || {};
+      var rules = (rb[rid] && rb[rid].length ? rb[rid] : fwFirstNonEmptyRules(rb)).map(fwRuleLite);
+      if (rules.length > 0) { specs[want] = { description: t.description || '', rules: rules }; break; }
+    }
+  });
+  return specs;
+}
+
+// 从 { regionId: rules[] } 里取第一份非空规则
+function fwFirstNonEmptyRules(rb) {
+  var keys = Object.keys(rb || {});
+  for (var i = 0; i < keys.length; i++) {
+    if (rb[keys[i]] && rb[keys[i]].length) return rb[keys[i]];
+  }
+  return [];
+}
+
+// 从当前凭证的 tplMap({regionId:{name:{id,rules}}}) 里，跨地域找同名模板的规则
+function fwRulesAcrossRegions(tplMap, name) {
+  var rids = Object.keys(tplMap || {});
+  for (var i = 0; i < rids.length; i++) {
+    var m = tplMap[rids[i]] || {};
+    if (m[name] && m[name].rules && m[name].rules.length) return m[name].rules;
+  }
+  return null;
 }
 
 // ====== 命令助手 ======
@@ -2905,6 +3036,26 @@ async function batchApplyQuota(desireValue) {
   }
 }
 
+// 【2026-09-12 新增】从输入框读目标上限再提交。
+//   背景：配额 q_z3sbl5「实例数量上限」的 ApplicableRange 是 [501, 1000]，
+//   且申请值必须【高于当前值】。原按钮写死 batchApplyQuota(500)，
+//   但这 9 个地区在 09-06 已全部批准到 500 → 再申请 500 会被阿里云拒绝：
+//   "The applied quota value is invalid."。
+//   故改为可输入目标值，默认 1000，并在前端先做范围校验。
+function batchApplyQuotaFromInput() {
+  var el = document.getElementById('quotaDesireValue');
+  var v = el ? parseInt(el.value, 10) : NaN;
+  if (!v || isNaN(v)) {
+    log('❌ 请先填写目标上限（数字）', 'error');
+    return;
+  }
+  if (v < 501 || v > 1000) {
+    log('❌ 目标上限需在 501 ~ 1000 之间（该配额当前已是 500，必须高于当前值才能申请）', 'error');
+    return;
+  }
+  return batchApplyQuota(v);
+}
+
 function escHtml(s) {
   return String(s).replace(/[<>&"]/g, function(c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; });
 }
@@ -2987,6 +3138,9 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// 地区数量文案跟随「⚙️ 地区管理」的启用/禁用设置
+document.addEventListener('DOMContentLoaded', function () { refreshRegionCountTexts(); });
 
 // 监听定时退订输入
 document.addEventListener('DOMContentLoaded', function() {

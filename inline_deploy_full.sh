@@ -15,13 +15,7 @@
 #   --num-dirs/-n  happ 路数（默认 12，拉满）
 #   --no-align      跳过末尾对齐阶段（预热调优/全锥NAT/tc/cache 对齐）
 #   --bind-only     只跑「绑定+流转服务中」（部署已就绪、仅补绑定时用）
-#   --bind-first    先绑定(注册+提交41+流转服务中)，再慢慢部署业务【默认开启】
-#   --no-bind-first 关闭先绑定，退回"先部署后绑定"旧顺序
 #   镜像锁定 :1.3.0
-#
-# 【r20-fix17 默认流程】容器拉起→节点自注册→立即绑定(提交41+服务中,SN未就绪则空hostname)
-#   → 对齐/预热等慢步骤 → 末尾用真实 76hex SN 覆盖 business_tags.hostName。
-#   目的：让节点尽早被平台接纳(避免慢部署阶段节点"丢失")，与"完整模式"设计一致。
 # =============================================================================
 trap '' HUP   # 终端断开(SIGHUP)不杀进程；Ctrl-C(INT)仍可中断
 
@@ -29,7 +23,7 @@ trap '' HUP   # 终端断开(SIGHUP)不杀进程；Ctrl-C(INT)仍可中断
 AK=""; SK=""; JWT=""; ISP=""; PROVINCE=""; CITY=""
 NUM_DIRS=12; USBW=200; BW_NUM=1; IMG_CHOICE=2
 BUSINESS_ID=41; ADMIN_API_HOST="https://admin.zhouyi.top"
-NO_ALIGN=0; BIND_ONLY=0; BIND_FIRST=1
+NO_ALIGN=0; BIND_ONLY=0
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
 
 while [[ $# -gt 0 ]]; do
@@ -49,8 +43,6 @@ while [[ $# -gt 0 ]]; do
     --admin-host) ADMIN_API_HOST="$2"; shift 2;;
     --no-align) NO_ALIGN=1; shift;;
     --bind-only) BIND_ONLY=1; shift;;
-    --bind-first) BIND_FIRST=1; shift;;
-    --no-bind-first) BIND_FIRST=0; shift;;
     *) echo "[WARN] 未知参数: $1"; shift;;
   esac
 done
@@ -95,7 +87,11 @@ log_error(){ echo -e "${RED}[ERROR]${NC} $1"; }
 # ============================ A) 系统调优（本地，无 AK） ============================
 sys_tune(){
   log_info "=== 系统调优：conntrack / bbr / 端口 / RPS ==="
-  cat > /etc/sysctl.d/99-ipes.conf <<'EOF'
+  # 按内存动态计算 tcp/udp 内存上限：小内存机不被压住，大内存机按规格放宽
+  local _mb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
+  local _pg=$(( _mb * 256 ))   # 每 MB = 256 个 4KB 页
+  local _t1=$(( _pg*15/100 )) _t2=$(( _pg*30/100 )) _t3=$(( _pg*60/100 ))
+  cat > /etc/sysctl.d/99-ipes.conf <<EOF
 net.netfilter.nf_conntrack_max = 1048576
 net.netfilter.nf_conntrack_tcp_timeout_established = 600
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
@@ -106,16 +102,26 @@ net.core.rmem_default = 16777216
 net.core.wmem_default = 16777216
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_mem = ${_t1} ${_t2} ${_t3}
+net.ipv4.udp_mem = ${_t1} ${_t2} ${_t3}
+net.ipv4.udp_rmem_min = 32768
+net.ipv4.udp_wmem_min = 32768
+net.ipv4.tcp_limit_output_bytes = 1048576
+net.ipv4.tcp_autocorking = 0
+net.core.default_qdisc = fq
 net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 65535
+net.core.netdev_max_backlog = 100000
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_ecn = 0
-fs.file-max = 2097152
+fs.file-max = 4000000
+fs.aio-max-nr = 1048576
 fs.inotify.max_user_watches = 524288
 vm.swappiness = 0
-vm.dirty_ratio = 15
-vm.dirty_background_ratio = 5
+vm.dirty_ratio = 20
+vm.dirty_background_ratio = 10
+vm.vfs_cache_pressure = 10
+vm.min_free_kbytes = 65536
 vm.overcommit_memory = 1
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_available_congestion_control = bbr cubic reno
@@ -123,7 +129,7 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_fin_timeout = 15
-net.core.netdev_budget = 600
+net.core.netdev_budget = 3000
 net.core.netdev_budget_usecs = 4000
 net.core.rps_sock_flow_entries = 32768
 net.ipv4.tcp_mtu_probing = 1
@@ -139,10 +145,67 @@ EOF
       echo "$mask" > "$q/rps_cpus" 2>/dev/null
       echo 4096 > "$q/rps_flow_cnt" 2>/dev/null
     done
+    tc qdisc replace dev "$nic" root fq 2>/dev/null
+    ethtool -G "$nic" rx 4096 tx 4096 2>/dev/null
+    ip link set "$nic" txqueuelen 10000 2>/dev/null
   fi
+  tune_fd_limits
+  tune_disk
   # 【r20-fix6】不再使用 iptables raw NOTRACK：会让回包脱离 conntrack，与 firewalld 共存时
   # 导致已建立连接回包被 INPUT 丢弃 → SSH/云助手断连（即此前“一跑脚本就断网”根因）。
   log_info "系统调优完成"
+}
+
+tune_fd_limits(){
+  # 文件句柄上限（PCDN 高并发连接，最易被忽略；默认 ulimit 仅 4096）。容器需 dockerd 继承。
+  local nr_open=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo 1048576)
+  local LIM=$(( nr_open < 1048576 ? nr_open : 1048576 ))
+  cat > /etc/security/limits.d/99-ipes.conf <<EOF
+* soft nofile $LIM
+* hard nofile $LIM
+root soft nofile $LIM
+root hard nofile $LIM
+EOF
+  mkdir -p /etc/systemd/system/docker.service.d
+  cat > /etc/systemd/system/docker.service.d/limits.conf <<EOF
+[Service]
+LimitNOFILE=$LIM
+LimitNPROC=$LIM
+EOF
+  systemctl daemon-reload >/dev/null 2>&1
+  # 仅当 dockerd 当前 LimitNOFILE 与配置不一致才重启（避免跑量时误重启，重启会短暂掉上行）
+  local cur=$(systemctl show docker -p LimitNOFILE --value 2>/dev/null)
+  if [ "$cur" != "$LIM" ] && systemctl is-active docker >/dev/null 2>&1; then
+    log_info "dockerd LimitNOFILE=$cur≠$LIM，重载 docker 使容器继承新句柄上限（约数秒掉上行）"
+    systemctl restart docker >/dev/null 2>&1
+  fi
+}
+
+tune_disk(){
+  # 磁盘队列 + 文件系统（快速缓存下行：大块并发写盘）。仅动 root 盘，幂等。
+  [ -f /var/lib/.ipes_disk_tuned ] && { log_info "磁盘调优已做过，跳过"; return 0; }
+  local disk=$(lsblk -ndo NAME,MOUNTPOINT 2>/dev/null | awk '$2=="/"{print $1}' | head -1)
+  [ -z "$disk" ] && disk=vda
+  if [ -b "/sys/block/$disk" ]; then
+    echo none > /sys/block/$disk/queue/scheduler 2>/dev/null
+    echo 0    > /sys/block/$disk/queue/rotational 2>/dev/null
+    echo 0    > /sys/block/$disk/queue/add_random 2>/dev/null
+    echo 0    > /sys/block/$disk/queue/nomerges 2>/dev/null
+    echo 2    > /sys/block/$disk/queue/rq_affinity 2>/dev/null
+    # read_ahead_kb 保持 256：实测并发读随预读增大单调下降（4M 时 -30%）
+  fi
+  local fstype=$(findmnt -no FSTYPE / 2>/dev/null)
+  if echo "$fstype" | grep -q ext4; then
+    mount -o remount,commit=60,barrier=0 / 2>/dev/null
+    if [ -f /etc/fstab ]; then
+      cp -a /etc/fstab "/etc/fstab.ipes-bak.$(date +%s)" 2>/dev/null
+      grep -q '# ipes-tuned' /etc/fstab || sed -i -E 's|(.*ext4.*defaults.*)|\1,commit=60,barrier=0 # ipes-tuned|' /etc/fstab 2>/dev/null
+    fi
+  elif echo "$fstype" | grep -q xfs; then
+    mount -o remount,logbsize=256k / 2>/dev/null
+  fi
+  log_info "磁盘调优完成"
+  touch /var/lib/.ipes_disk_tuned
 }
 
 # ============================ B) 自包含部署（复用 ecache_onekey_deploy 逻辑） ============================
@@ -188,9 +251,8 @@ enabled=1
 gpgcheck=1
 gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
 EOF
-  # 一次性缓存元数据，后续安装走缓存；去掉冲突-prone 的 yum-utils/dm/lvm2（docker-ce-stable 自带依赖）
-  yum makecache fast >/dev/null 2>&1 || true
-  yum install -y -q --setopt=timeout=30 --setopt=retries=2 docker-ce docker-ce-cli containerd.io
+  yum install -y yum-utils device-mapper-persistent-data lvm2
+  yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 }
 install_docker_debian(){
   local dv=$1
@@ -307,77 +369,23 @@ install_health(){
   local SP=/usr/local/bin/ipes_health_check.sh; local LF=/var/log/ipes_health.log
   cat > "$SP" <<'HEALTH_EOF'
 #!/usr/bin/env bash
-# IPES 健康检查（融合版 + r20-fix11 硬自愈）：容器级 docker start 兜底 + 应用层 ./bin/ipes health 探测，
-# 真正异常时才 docker restart 恢复；非交互、并对「探测命令不存在」做了跳过处理避免每分钟重启抖动。
-# 容器 docker start 失败时，先执行 fix11_heal（xycould_base_info 目录/缺失 → 43B 文件）再重试启动。
+# IPES 健康检查（融合版）：容器停则 docker start 拉起；在跑则 ./bin/ipes health 探测，
+# 真正异常时才 docker restart 恢复；带 10 分钟重启冷却，避免探测抖动引发重启风暴。
 LOG=/var/log/ipes_health.log
 C=ipes
 ts(){ date '+%Y-%m-%d %H:%M:%S'; }
-# 日志瘦身：超过 2MB 只留尾部 500 行（每分钟一条，约 60KB/天）
-if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
-  tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
-fi
 echo "[$(ts)] 检查开始" >> "$LOG"
-
-# ---------------------------------------------------------------------------
-# 【r20-fix11 硬自愈】保证每个 /data/happ/happ.N/xycould_base_info 是 43B 文件而非目录。
-#   根因：ecache/docker 会把缺失的挂载源自动补成【空目录】；docker-ce 对挂载类型校验严格，
-#         目录会让容器 OCI create failed: not a directory → Exited(127)，此后 docker start
-#         永远失败 → 节点"缓存还在但完全没有上下行"（2026-09-18 66d9ff7c 实测即此）。
-#   修复：以 happ.0 的同名 43B 文件为模板，去掉坏目录后 cp 回来（幂等、不动缓存、不动 SN）。
-#   内容只是每个 worker 的资源配额（disk_limit/mem_limit/cpu_core），各 happ 完全一致。
-# ---------------------------------------------------------------------------
-fix11_heal(){
-  local ref=/data/happ/happ.0/xycould_base_info d p fixed=0
-  [ -s "$ref" ] || return 1
-  for d in /data/happ/happ.*; do
-    [ -d "$d" ] || continue
-    p="$d/xycould_base_info"
-    if [ -d "$p" ]; then
-      # 坏目录：为空则 rmdir；非空兜底 rm -rf（该路径是挂载源，正常必为 43B 文件，绝不会是数据目录）
-      rmdir "$p" 2>/dev/null || rm -rf "$p" 2>/dev/null
-    fi
-    if [ ! -e "$p" ]; then
-      # 缺失 / 刚删掉 → 用 happ.0 模板补回 43B 文件
-      cp -f "$ref" "$p" 2>/dev/null && fixed=$((fixed+1))
-    fi
-  done
-  if [ "$fixed" -gt 0 ]; then
-    echo "[$(ts)] [fix11] 已修复 $fixed 个 xycould_base_info（目录/缺失 → 文件），准备重试启动" >> "$LOG"
-    return 0
-  fi
-  return 1
-}
-
 if ! docker ps --format '{{.Names}}' | grep -qx "$C"; then
   echo "[$(ts)] 容器未运行，尝试 docker start（SN 不变）" >> "$LOG"
-  if docker start "$C" >> "$LOG" 2>&1; then
-    echo "[$(ts)] 已启动" >> "$LOG"
-  else
-    # docker start 失败 → 先查 fix11 挂载类型异常；修好再重试一次
-    if fix11_heal; then
-      if docker start "$C" >> "$LOG" 2>&1; then
-        echo "[$(ts)] [fix11] 修复挂载后已启动" >> "$LOG"
-      else
-        echo "[$(ts)] [fix11] 修复后仍启动失败：$(docker inspect -f '{{.State.Error}}' "$C" 2>/dev/null | head -c 200)" >> "$LOG"
-      fi
-    else
-      echo "[$(ts)] 启动失败且未发现 fix11 挂载异常，请检查" >> "$LOG"
-    fi
-  fi
+  docker start "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已启动" >> "$LOG" || echo "[$(ts)] 启动失败，请检查" >> "$LOG"
   exit 0
 fi
-# 容器在跑，做应用层健康探测（./bin/ipes health 为 IPES 内部命令）
 OUT=$(docker exec "$C" ./bin/ipes health 2>&1); RC=$?
-# 探测命令本身不可用（容器内缺该命令 / exec 失败）-> 不重启，避免每分钟抖动
 if [ "$RC" -ne 0 ] && echo "$OUT" | grep -qiE 'OCI runtime|exec: "|No such file|command not found'; then
   echo "[$(ts)] 健康探测命令不可用，跳过重启($OUT)" >> "$LOG"
   exit 0
 fi
-# 真正的服务异常 -> 重启容器恢复（同时恢复进程与容器内服务）
-# 注意：正则只用【明确的失败特征】，绝不用裸 'error'（健康 JSON 常含 "errors":[] 会被误判，导致每分钟重启风暴）
 if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services failed|unhealthy|not healthy|panic|refused to connect'; then
-  # 重启冷却：10 分钟内只重启一次，避免健康探测偶发抖动引发每分钟重启、打断缓存写入
   LR=/var/lib/ipes-preheat/.last_health_restart
   now_ts=$(date +%s)
   last_ts=$(cat "$LR" 2>/dev/null || echo 0)
@@ -385,7 +393,6 @@ if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services f
     echo "[$(ts)] 检测到异常但处于重启冷却期(10分钟)，本次跳过 ($OUT)" >> "$LOG"
     exit 0
   fi
-  mkdir -p /var/lib/ipes-preheat 2>/dev/null
   echo "$now_ts" > "$LR" 2>/dev/null || true
   echo "[$(ts)] 检测到服务异常，准备 docker restart ($OUT)" >> "$LOG"
   docker restart "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已重启恢复" >> "$LOG" || echo "[$(ts)] 重启失败，请检查" >> "$LOG"
@@ -422,31 +429,15 @@ ALIGN_URL_2="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/m
 run_align(){
   log_info "========== 对齐阶段：预热调优 + 全锥/NAT/tc/cache/happ对齐 =========="
   local pf=/tmp/ipes_onekey_$$.sh ok=0
-  local t1=/tmp/ipes_ok1_$$.sh t2=/tmp/ipes_ok2_$$.sh
-  # 【r20-fix16】双源并发竞速：谁先下载并通过校验就用谁，
-  # 避免串行各等 120s（最坏 240s≈4 分钟）的长停顿。
-  ( curl -fsSL --connect-timeout 10 --max-time 60 "${ALIGN_URL_1}" -o "$t1" >/dev/null 2>&1 ) &
-  local p1=$!
-  ( curl -fsSL --connect-timeout 10 --max-time 60 "${ALIGN_URL_2}" -o "$t2" >/dev/null 2>&1 ) &
-  local p2=$!
-  local winner="" probe
-  for probe in $(seq 1 30); do   # 最多 60s（30×2s）
-    if [ -z "$winner" ] && [ -s "$t1" ] && head -1 "$t1" | grep -q '^#!/bin/bash' && bash -n "$t1" 2>/dev/null; then winner="$t1"; fi
-    if [ -z "$winner" ] && [ -s "$t2" ] && head -1 "$t2" | grep -q '^#!/bin/bash' && bash -n "$t2" 2>/dev/null; then winner="$t2"; fi
-    [ -n "$winner" ] && break
-    sleep 2
+  for u in "$ALIGN_URL_1" "$ALIGN_URL_2"; do
+    if curl -fsSL --connect-timeout 15 --max-time 120 "$u" -o "$pf" 2>/dev/null && [ -s "$pf" ] && head -1 "$pf" | grep -q '^#!/bin/bash' && bash -n "$pf" 2>/dev/null; then
+      log_info "已取得对齐脚本: $u"
+      export TARGET_HAPP="$NUM_DIRS"; export TARGET_TAG="1.3.0"
+      if bash "$pf"; then ok=1; log_info "对齐阶段执行完成"; break
+      else log_warn "对齐脚本返回非0（个别内核键不支持可忽略），继续"; ok=1; break; fi
+    else log_warn "拉取失败，换源: $u"; fi
   done
-  kill $p1 $p2 2>/dev/null; wait 2>/dev/null
-  if [ -n "$winner" ]; then
-    cp "$winner" "$pf"
-    log_info "已取得对齐脚本（竞速命中: $([ "$winner" = "$t1" ] && echo ghproxy || echo raw)）"
-    export TARGET_HAPP="$NUM_DIRS"; export TARGET_TAG="1.3.0"
-    if bash "$pf"; then ok=1; log_info "对齐阶段执行完成"
-    else log_warn "对齐脚本返回非0（个别内核键不支持可忽略），继续"; ok=1; fi
-  else
-    log_error "对齐阶段两源均未能拉取（节点可能无外网）；基础部署已就绪，可稍后手动跑 ipes_onekey.sh"
-  fi
-  rm -f "$t1" "$t2"
+  [ "$ok" -eq 1 ] || log_error "对齐阶段未能执行（节点可能无外网）；基础部署已就绪，可稍后手动跑 ipes_onekey.sh"
 }
 
 # ============================ D) 写 device_code 供精确匹配 ============================
@@ -586,21 +577,13 @@ def do_bind(node_id, sn):
     code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
     log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
     time.sleep(1)
-    # 【r20-fix17】仅当拿到真实 76hex SN 才带 hostname；容器未起/未就绪时省略 hostname，
-    # 让平台按"容器未起不带 hostname"的设计接纳节点（稍后由后置绑定用真 SN 覆盖 business_tags.hostName）。
-    sf_body = {"nodes": [node_id], "stage": "inService"}
-    if sn:
-        sf_body["hostname"] = sn
-    code, txt = admin_call("/api/edgeNode/stateflow", sf_body, "POST")
+    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
     log(f"  -> inService: HTTP {code} {txt[:120]}")
 
 def main():
-    # 【r20-fix17】BIND_REQUIRE_SN=0 时（先绑定模式）：节点自注册即绑定，SN 未就绪也继续（空 hostname 流转），
-    # 由末尾后置绑定用真实 SN 覆盖；默认=1（仅绑定/后置绑定）要求 SN 就绪。
-    REQUIRE_SN = os.environ.get('BIND_REQUIRE_SN', '1') != '0'
     pubip = get_public_ip()
     if not pubip: log("[ERROR] 无法获取公网 IP"); sys.exit(1)
-    log(f"本机公网 IP: {pubip}  | 绑定模式: {'要求SN就绪' if REQUIRE_SN else '节点注册即绑(可空SN)'}")
+    log(f"本机公网 IP: {pubip}")
     local_nid = get_local_node_id()
     log(f"本机 device_code(nodeID): {local_nid or '未读到，走IP兜底'}")
     sn = None; ni = None
@@ -609,9 +592,9 @@ def main():
             sn = get_real_sn()
             if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
         ni = pick_node(pubip, local_nid)
-        if ni and (sn or not REQUIRE_SN): break
-        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(5)
-    if not ni: log("[ERROR] 4 分钟未找到节点，放弃"); sys.exit(1)
+        if ni and sn: break
+        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(10)
+    if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
     info = ni.get('nodeInfo') or {}
     log(f"节点: {ni.get('nodeID')} stage={ni.get('stage')} status={ni.get('status')} nodeInfo.vendor={info.get('vendorSuggestCustomers')} usbw={info.get('usbw')}")
     if is_bound(ni) and (not sn or tag_ok(ni, sn)):
@@ -638,56 +621,37 @@ SN_WAIT=90
 log_info "========== 0/5 系统调优 =========="
 sys_tune
 
-# 【r20-fix17】--bind-only：跳过全部部署，仅做绑定+流转服务中（要求 SN 就绪）
-if [ "$BIND_ONLY" -eq 1 ]; then
-  log_info ">>> [仅绑定] 跳过部署，直接绑定+流转服务中"
-  run_binding
-  log_info "========== 全部完成（仅绑定）=========="
-  log_info "查看绑定日志: tail -f /var/log/ipes_repair.log"
-  exit 0
+if [ "$BIND_ONLY" -ne 1 ]; then
+  log_info "========== 1/5 确保 Docker =========="
+  ensure_docker
+  log_info "========== 2/5 清理旧节点 =========="
+  cleanup_old
+  log_info "========== 3/5 建目录 + custom.yml（${NUM_DIRS}路） =========="
+  create_dirs
+  log_info "========== 4/5 拉起容器（镜像 $DOCKER_IMAGE, reg_isp=$REG_ISP） =========="
+  DOCKER_CMD=$(gen_docker_cmd)
+  log_info "执行: $DOCKER_CMD"
+  eval "$DOCKER_CMD" || { log_error "容器启动失败"; exit 1; }
+  echo "$DOCKER_CMD" > /opt/ipes/docker_run; chmod +x /opt/ipes/docker_run
+  log_info "docker_run 已保存: /opt/ipes/docker_run"
+  insert_base_info
+  log_info "========== 5/5 安装保活(健康检查) =========="
+  install_health
+  if [ "$NO_ALIGN" -eq 0 ]; then run_align; else log_info "跳过对齐阶段（--no-align）"; fi
+  log_info "等待容器注册生成 SN（${SN_WAIT}s）..."
+  sleep "$SN_WAIT"
+  if docker ps | grep -q ipes; then
+    SN=$(docker exec ipes cat bin/ipes_sn 2>/dev/null)
+    [ -n "$SN" ] && { log_info "设备SN: $SN"; echo "IQIYI_ECACHE_DEVICE_ID:$SN"; } || log_warn "未读取到 SN，稍后: docker exec ipes cat bin/ipes_sn"
+    CID=$(cat /data*/happ/happ.*/hdata/config/infos.json 2>/dev/null | grep client_id | awk -F'"' '{print $4}' | sort -u | head -1)
+    [ -n "$CID" ] && { log_info "clientid: $CID"; echo "IQIYI_ECACHE_CLIENT_ID:$CID"; }
+  else
+    log_error "ipes 容器未运行，请排查"
+  fi
+  write_device_code
 fi
 
-log_info "========== 1/5 确保 Docker =========="
-ensure_docker
-log_info "========== 2/5 清理旧节点 =========="
-cleanup_old
-log_info "========== 3/5 建目录 + custom.yml（${NUM_DIRS}路） =========="
-create_dirs
-log_info "========== 4/5 拉起容器（镜像 $DOCKER_IMAGE, reg_isp=$REG_ISP） =========="
-DOCKER_CMD=$(gen_docker_cmd)
-log_info "执行: $DOCKER_CMD"
-eval "$DOCKER_CMD" || { log_error "容器启动失败"; exit 1; }
-echo "$DOCKER_CMD" > /opt/ipes/docker_run; chmod +x /opt/ipes/docker_run
-log_info "docker_run 已保存: /opt/ipes/docker_run"
-insert_base_info
-log_info "========== 5/5 安装保活(健康检查) =========="
-install_health
-
-# 【r20-fix17】先绑定：节点自注册后立即提交业务41+流转服务中（SN 未就绪则空 hostname），
-# 让平台尽早接纳节点；慢速的对齐/预热在之后跑，最后用真 SN 覆盖。
-if [ "$BIND_FIRST" -eq 1 ]; then
-  log_info ">>> [先绑定] 节点自注册后立即绑定（SN 未就绪可空 hostname 流转服务中）"
-  BIND_REQUIRE_SN=0 run_binding
-fi
-
-if [ "$NO_ALIGN" -eq 0 ]; then run_align; else log_info "跳过对齐阶段（--no-align）"; fi
-log_info "等待容器注册生成 SN（${SN_WAIT}s）..."
-sleep "$SN_WAIT"
-if docker ps | grep -q ipes; then
-  SN=$(docker exec ipes cat bin/ipes_sn 2>/dev/null)
-  [ -n "$SN" ] && { log_info "设备SN: $SN"; echo "IQIYI_ECACHE_DEVICE_ID:$SN"; } || log_warn "未读取到 SN，稍后: docker exec ipes cat bin/ipes_sn"
-  CID=$(cat /data*/happ/happ.*/hdata/config/infos.json 2>/dev/null | grep client_id | awk -F'"' '{print $4}' | sort -u | head -1)
-  [ -n "$CID" ] && { log_info "clientid: $CID"; echo "IQIYI_ECACHE_CLIENT_ID:$CID"; }
-else
-  log_error "ipes 容器未运行，请排查"
-fi
-write_device_code
-
-# 【r20-fix17】后置绑定：用真实 76hex SN 覆盖 business_tags.hostName（先绑定时若 SN 未就绪，此处补齐）
-if [ "$BIND_FIRST" -eq 1 ]; then
-  log_info ">>> [绑定后置] 用真实 76hex SN 覆盖业务标签(hostName)"
-  BIND_REQUIRE_SN=1 run_binding
-fi
+run_binding
 
 log_info "========== 全部完成 =========="
 log_info "镜像: $DOCKER_IMAGE | reg_isp=$REG_ISP | happ路数=$NUM_DIRS | 业务=$BUSINESS_ID | 绑定+服务中已执行"

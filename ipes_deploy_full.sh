@@ -257,12 +257,26 @@ parse_arguments() {
         esac
     done
 
+    # [REV] full-finish-cred-exempt-20260919
+    # 补齐模式不注册设备 —— 豁免 --ak/--sk 必填校验。
+    #   APP_KEY/SECRET_KEY 的唯一使用点是 [4.5] 设备绑定注册（generate_sign），
+    #   该段已被 --finish-only 整段跳过 ⇒ 缺省时无需报错（与下面 --num-dirs 的豁免同源）。
+    #   --isp 不豁免：它是 nodeInfo.isp（后台「业务线运营商」列）的唯一来源，缺了会写空。
     local missing=0
-    if [ -z "$APP_KEY" ]; then
-        echo -e "${RED}[错误]${NC} 缺少参数: --ak"; missing=1
-    fi
-    if [ -z "$SECRET_KEY" ]; then
-        echo -e "${RED}[错误]${NC} 缺少参数: --sk"; missing=1
+    if [ "$FINISH_ONLY" -eq 1 ]; then
+        if [ -z "$APP_KEY" ]; then
+            echo "[INFO] --finish-only 补齐模式：未提供 --ak（本模式不注册设备，跳过校验）"
+        fi
+        if [ -z "$SECRET_KEY" ]; then
+            echo "[INFO] --finish-only 补齐模式：未提供 --sk（本模式不注册设备，跳过校验）"
+        fi
+    else
+        if [ -z "$APP_KEY" ]; then
+            echo -e "${RED}[错误]${NC} 缺少参数: --ak"; missing=1
+        fi
+        if [ -z "$SECRET_KEY" ]; then
+            echo -e "${RED}[错误]${NC} 缺少参数: --sk"; missing=1
+        fi
     fi
     if [ -z "$ISP" ]; then
         echo -e "${RED}[错误]${NC} 缺少参数: --isp"; missing=1

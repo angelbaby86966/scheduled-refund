@@ -31,9 +31,9 @@
 #     --replay               内部用：由 systemd 开机调用，静默模式，不自安装
 # =============================================================================
 set +e
-TUNE_ONLY_VERSION="2.0"
+TUNE_ONLY_VERSION="2.1"
 # ★版本指纹★：自安装时回读远端文件必须含这一行，否则判定拿到旧版（CDN 缓存）并放弃安装。
-TUNE_ONLY_REV="20260919-tuneonly-v2"
+TUNE_ONLY_REV="20260919-tuneonly-v21"
 SELF_URLS="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh
 https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_tune_only.sh
 https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_tune_only.sh"
@@ -322,11 +322,25 @@ GOV
 # =============================================================================
 # [5] 文件句柄上限（默认不重启 docker）
 # =============================================================================
+# ★CentOS7 的 systemd 219 不支持 `systemctl show --value`（返回空）★
+#   空值会让"生效值≠配置值"永远成立 ⇒ 旧部署脚本每次都会白重启一遍 docker 打断容器。
+#   双保险：systemctl 取值失败则回读 dockerd 进程 /proc/<pid>/limits。
+get_dockerd_nofile(){
+  local v pid
+  v=$(systemctl show docker -p LimitNOFILE 2>/dev/null | sed -n 's/^LimitNOFILE=//p')
+  if [ -z "$v" ]; then
+    pid=$(pgrep -x dockerd 2>/dev/null | head -1)
+    [ -n "$pid" ] && v=$(awk '/Max open files/{print $4}' /proc/$pid/limits 2>/dev/null)
+  fi
+  printf '%s' "$v"
+}
+
 fd_limits(){
   step "5/9" "nofile 上限（容器需 dockerd 继承）"
   local nr_open LIM cur p
   nr_open=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo 1048576)
   LIM=$(( nr_open < 1048576 ? nr_open : 1048576 ))
+  cur=$(get_dockerd_nofile)
   cat >/etc/security/limits.d/99-ipes.conf <<EOF
 # OWNER: ipes_tune (tune-only v${TUNE_ONLY_VERSION})
 *     soft nofile $LIM
@@ -341,8 +355,7 @@ LimitNOFILE=$LIM
 LimitNPROC=$LIM
 EOF
   systemctl daemon-reload >/dev/null 2>&1
-  cur=$(systemctl show docker -p LimitNOFILE --value 2>/dev/null)
-  info "配置已写 $LIM（dockerd 当前生效=$cur，fs.nr_open=$nr_open）"
+  info "配置已写 $LIM（dockerd 当前生效=${cur:-取不到}，fs.nr_open=$nr_open）"
 
   # 热提升已在跑的 dockerd/containerd（best-effort、零中断；此后新建的容器可继承到新上限）
   if command -v prlimit >/dev/null 2>&1; then
@@ -351,7 +364,9 @@ EOF
     done
   fi
 
-  if [ "$cur" != "$LIM" ] && systemctl is-active docker >/dev/null 2>&1; then
+  if [ -z "$cur" ]; then
+    warn "读不到 dockerd 生效值（docker 未运行或进程名不同）：配置已写好，待 docker 启动/重启后生效"
+  elif [ "$cur" != "$LIM" ]; then
     if [ "$FORCE_DOCKER_RESTART" = "1" ]; then
       warn "重启 docker 让容器内的 nofile 立即生效（约数秒掉上行）"
       systemctl restart docker >/dev/null 2>&1
@@ -493,7 +508,8 @@ guard(){
     [ "$got" = "$want" ] || bad=$((bad+1))
   done
   if [ "$bad" -gt 0 ]; then
-    warn "有 $bad 项不符，自动重放 sysctl（99-ipes.conf + 99z-uplink）"
+    warn "有 $bad 项不符：先重跑 sysctl 让位，再重放 99-ipes.conf + 99z-uplink"
+    deconflict_sysctl_files >/dev/null 2>&1
     sysctl -e -p "$SYSCTL_CONF" >/dev/null 2>&1
     sysctl -e -p /etc/sysctl.d/99z-ipes-uplink.conf >/dev/null 2>&1
     bad=0
@@ -512,24 +528,30 @@ report(){
   echo "================= 验收（$(hostname 2>/dev/null) $(date '+%F %T')） ================="
   printf "%-44s %-14s %-14s %s\n" "项目" "实际" "期望" "结果"
   printf "%-44s %-14s %-14s %s\n" "--------------------------------------------" "--------------" "--------------" "----"
-  local kv k want got mark sch ra gov thp cur mnt en cstat hh inc
+  local kv k want got mark sch ra gov govmark thp cur mnt en cstat hh inc
   for kv in "${KV[@]}"; do
     k=${kv%%=*}; want=${kv#*=}; got=$(sysctl -n "$k" 2>/dev/null)
     mark="OK"; [ "$got" = "$want" ] || mark="FAIL"
     printf "%-44s %-14s %-14s %s\n" "$k" "${got:-N/A}" "$want" "$mark"
   done
-  sch=$(cat /sys/block/vda/queue/scheduler 2>/dev/null | tr -d '\n')
+  sch=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/block/vda/queue/scheduler 2>/dev/null | awk '{print $1}')
+  [ -z "$sch" ] && sch=$(cat /sys/block/vda/queue/scheduler 2>/dev/null | tr -d '\n')
   ra=$(cat /sys/block/vda/queue/read_ahead_kb 2>/dev/null)
-  gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo n/a)
+  if [ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+    govmark="$([ "$gov" = performance ] && echo OK || echo FAIL)"
+  else
+    gov="无 cpufreq"; govmark="n/a"
+  fi
   thp=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
-  cur=$(systemctl show docker -p LimitNOFILE --value 2>/dev/null)
+  cur=$(get_dockerd_nofile)
   mnt=$(findmnt -no OPTIONS / 2>/dev/null)
   en=$(systemctl is-enabled ipes-tune.service 2>/dev/null || echo n/a)
-  printf "%-44s %-14s %-14s %s\n" "vda scheduler" "${sch:-N/A}" "none" "$([ "$sch" = none ] && echo OK || echo FAIL)"
+  printf "%-44s %-14s %-14s %s\n" "vda scheduler（[] 内为当前）" "${sch:-N/A}" "none" "$([ "$sch" = none ] && echo OK || echo FAIL)"
   printf "%-44s %-14s %-14s %s\n" "vda read_ahead_kb" "${ra:-N/A}" "256" "$([ "$ra" = 256 ] && echo OK || echo FAIL)"
-  printf "%-44s %-14s %-14s %s\n" "cpu governor" "$gov" "performance" "$([ "$gov" = performance ] && echo OK || echo FAIL)"
+  printf "%-44s %-14s %-14s %s\n" "cpu governor" "$gov" "performance" "$govmark"
   printf "%-44s %-14s %-14s %s\n" "transparent_hugepage" "${thp:-n/a}" "never" "$([ "$thp" = never ] && echo OK || echo FAIL)"
-  printf "%-44s %-14s %-14s %s\n" "dockerd LimitNOFILE" "${cur:-N/A}" "1048576" "$([ "$cur" = 1048576 ] && echo OK || echo '等下次重启')"
+  printf "%-44s %-14s %-14s %s\n" "dockerd LimitNOFILE" "${cur:-N/A}" "$LIM" "$([ "$cur" = "$LIM" ] && echo OK || echo '等下次重启')"
   printf "%-44s %-14s %-14s %s\n" "root 挂载选项含 commit=60" "$(echo "$mnt" | grep -q commit=60 && echo yes || echo no)" "yes" "$(echo "$mnt" | grep -q commit=60 && echo OK || echo '等下次重启')"
   printf "%-44s %-14s %-14s %s\n" "ipes-tune.service" "$en" "enabled" "$([ "$en" = enabled ] && echo OK || echo FAIL)"
   echo ""

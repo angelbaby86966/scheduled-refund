@@ -52,6 +52,8 @@ SUPABASE_ANON_KEY = os.environ.get(
 REST_BASE = SUPABASE_URL.rstrip("/") + "/rest/v1"
 
 # 支持的地域（与前端 REGION_INFO 一致）
+# ⚠️ 这里始终保留**全量 9 个地区**（代码不删，随时加回）；
+#    实际跑哪些地区由下面的 ACTIVE_REGIONS 决定。
 REGION_INFO = {
     "cn-hangzhou": "杭州",
     "cn-beijing": "北京",
@@ -63,6 +65,44 @@ REGION_INFO = {
     "cn-wuhan-lr": "武汉",
     "cn-wulanchabu": "乌兰察布",
 }
+
+# ===================== 地区启用 / 禁用（2026-09-19 新增） =====================
+# 需求：定时退订先不覆盖「河源 / 武汉 / 乌兰察布」，但地区代码保留，过几天可随时加回。
+# 三种用法（优先级从高到低）：
+#   1) 指定白名单：仓库 Actions 里设 env REGIONS="cn-hangzhou,cn-beijing"
+#      （GitHub Actions 可改 .github/workflows/scheduled-refund.yml 的 env，无需改代码）
+#   2) 指定黑名单：env DISABLED_REGIONS="cn-heyuan,cn-wuhan-lr"（留空字符串 = 全部启用）
+#   3) 都不设 → 用下面的默认黑名单
+DISABLED_REGIONS_DEFAULT = "cn-heyuan,cn-wuhan-lr,cn-wulanchabu"
+
+
+def _parse_region_csv(raw):
+    return [r.strip() for r in (raw or "").split(",") if r.strip()]
+
+
+_env_whitelist = _parse_region_csv(os.environ.get("REGIONS"))
+_env_blacklist = os.environ.get("DISABLED_REGIONS")
+
+if _env_whitelist:
+    ACTIVE_REGIONS = {k: REGION_INFO[k] for k in _env_whitelist if k in REGION_INFO}
+    REGION_SCOPE_NOTE = "白名单模式（环境变量 REGIONS）：" + ", ".join(
+        f"{REGION_INFO[k]}({k})" for k in ACTIVE_REGIONS
+    )
+else:
+    _disabled = _parse_region_csv(
+        _env_blacklist if _env_blacklist is not None else DISABLED_REGIONS_DEFAULT
+    )
+    _disabled = [r for r in _disabled if r in REGION_INFO]
+    ACTIVE_REGIONS = {k: v for k, v in REGION_INFO.items() if k not in _disabled}
+    REGION_SCOPE_NOTE = (
+        "禁用 " + ", ".join(f"{REGION_INFO[r]}({r})" for r in _disabled)
+        if _disabled
+        else "全部 9 个地区启用"
+    )
+
+# 兜底：万一配置把地区全禁掉，会导致「一台都不退」这种静默失效，直接报错退出更安全
+if not ACTIVE_REGIONS:
+    raise SystemExit("[FATAL] 地区配置把全部地区都禁用了，请检查 REGIONS / DISABLED_REGIONS 环境变量")
 
 # BSS 退订（锁定）错误模式（与前端 BSS_LOCKED_PATTERNS 一致）
 BSS_LOCKED_PATTERNS = [
@@ -493,8 +533,8 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
     for rnd in range(1, max_rounds + 1):
         # 1) 并行列出本轮该凭证全部地域实例
         all_instances = []
-        with ThreadPoolExecutor(max_workers=len(REGION_INFO)) as ex:
-            futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in REGION_INFO}
+        with ThreadPoolExecutor(max_workers=len(ACTIVE_REGIONS)) as ex:
+            futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in ACTIVE_REGIONS}
             for fut in as_completed(futs):
                 rid = futs[fut]
                 try:
@@ -625,6 +665,7 @@ def main():
         sys.exit(0)
 
     log("===== 定时退订任务启动（北京时间 " + beijing_now().strftime("%Y-%m-%d %H:%M:%S") + "）=====", "WARN")
+    log(f"地区范围：{REGION_SCOPE_NOTE}（共 {len(ACTIVE_REGIONS)} 个地区；全量注册表仍保留 {len(REGION_INFO)} 个）", "INFO")
     # 加载已退订状态（跨 cron 去重：对标参考站 lastTriggered）
     load_refunded_state()
     try:

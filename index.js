@@ -14,8 +14,25 @@ const RPCClient = require('@alicloud/pop-core');
 // ====== 配置 ======
 const AK = process.env.ALIYUN_AK || '';
 const SK = process.env.ALIYUN_SK || '';
-const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan-lr,cn-wulanchabu')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// ===== 地区启用 / 禁用（2026-09-19）=====
+// 全量地区清单常量保留（代码不删，随时加回）；实际跑哪些由：
+//   1) env REGIONS="cn-hangzhou,cn-beijing"（白名单，优先）
+//   2) env DISABLED_REGIONS="cn-heyuan,cn-wuhan-lr"（黑名单，留空=全启用）
+//   3) 都不设 → 默认黑名单，先摘掉河源/武汉/乌兰察布
+const ALL_REGIONS = ['cn-hangzhou', 'cn-beijing', 'cn-shanghai', 'cn-shenzhen',
+  'cn-chengdu', 'cn-guangzhou', 'cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu'];
+const DISABLED_REGIONS_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu'];
+const parseCsv = (raw) => (raw || '').split(',').map(s => s.trim()).filter(Boolean);
+
+const REGION_LIST = (() => {
+  const white = parseCsv(process.env.REGIONS).filter(r => ALL_REGIONS.includes(r));
+  if (white.length) return white;
+  const black = process.env.DISABLED_REGIONS !== undefined
+    ? parseCsv(process.env.DISABLED_REGIONS)
+    : DISABLED_REGIONS_DEFAULT.slice();
+  return ALL_REGIONS.filter(r => !black.includes(r));
+})();
+if (!REGION_LIST.length) throw new Error('地区配置把全部地区都禁用了，请检查 REGIONS / DISABLED_REGIONS');
 
 const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
 const REFUND_QPS = 8;             // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）

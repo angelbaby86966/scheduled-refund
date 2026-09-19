@@ -8,7 +8,7 @@
 #     --isp 电信 [--province 浙江 --city 杭州 --num-dirs 12 --usbw 200]
 # 未传 --province/--city 时，自动按本机公网 IP 识别；识别失败兜底为 浙江/杭州。
 set +e
-# [REV] wrapper-finish-passthrough-20260919
+# [REV] wrapper-finish-passthrough-20260919b-chancache
 
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
@@ -227,11 +227,31 @@ echo "[INFO] 上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf
 # 导致已建立连接回包被 INPUT 丢弃 → 云助手/SSH 断连（即此前"一跑脚本就断网"根因）。全脚本统一不再使用 NOTRACK。
 
 # ============ B) 完整部署（r20：用真实 nodeId 绑定，根治业务没落盘） ============
-SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh?t=$(date +%s)"
-SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_deploy_full.sh"
-for u in "$SRC1" "$SRC2"; do
-  curl -fsSL -m 60 "$u" -o /root/ipes_full.sh && grep -q singleIpRadio /root/ipes_full.sh && break
+# 【r20-fix11】分发通道去缓存（2026-09-19 真机实测）：
+#   ghproxy.net 会把同一 path 的旧版本长期缓存住，`?t=<ts>` **无效**（CDN 忽略 query），
+#   而它原本排在 SRC1 且循环「首个 curl 成功即 break」⇒ 旧版永远胜出 ⇒「改好了 full 也不生效」。
+#   实测（乌兰察布 1f9921de…）：raw 直连 / gh-proxy.com / jsDelivr 均为最新，ghproxy.net 为旧版。
+#   注：单靠体积区分不了新旧（旧版 137253 > 阈值），所以「谁不缓存」比「校验多严」更关键，
+#       权威源 raw 排第一（短超时，不通就下一条），gh-proxy.com 次之，jsDelivr 兜底。
+#   三条全失败 → 显式报错退出，绝不静默退回旧版。
+SRC1="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
+SRC2="https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
+SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_deploy_full.sh"
+FULL_OK=0; FULL_SRC=""
+for u in "$SRC1" "$SRC2" "$SRC3"; do
+  if curl -fsSL -m 25 "$u" -o /root/ipes_full.sh \
+     && [ "$(wc -c </root/ipes_full.sh 2>/dev/null | tr -d ' ')" -gt 100000 ] \
+     && grep -q singleIpRadio /root/ipes_full.sh \
+     && grep -q -- '--finish-only' /root/ipes_full.sh; then
+    FULL_OK=1; FULL_SRC="$u"; break
+  fi
 done
+if [ "$FULL_OK" != "1" ]; then
+  echo "[ERROR] 三个通道都没取到有效的 ipes_deploy_full.sh（CDN 缓存旧版或网络不通）"
+  echo "        手动兜底： curl -fsSL -m 60 \"$SRC2\" -o /root/ipes_full.sh"
+  exit 1
+fi
+echo "[INFO] ipes_deploy_full.sh 就绪：$(wc -c </root/ipes_full.sh | tr -d ' ') 字节 / sha256:$(sha256sum /root/ipes_full.sh 2>/dev/null | cut -c1-12) / $(grep -m1 '^SCRIPT_VERSION=' /root/ipes_full.sh | cut -d\" -f2) / 通道 ${FULL_SRC%%/https*}"
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
 export NODE_ACTIVATE_TOKEN="$JWT"
 

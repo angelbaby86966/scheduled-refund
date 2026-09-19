@@ -11,6 +11,7 @@
 #   2) 网卡 RPS + tc fq + ring 4096 + txqueuelen
 #   3) 文件句柄上限 limits.d + dockerd LimitNOFILE（仅不一致才重启 docker，约数秒掉上行）
 #   4) 磁盘队列 scheduler=none/rq_affinity=2 + ext4 commit=60（幂等，/var/lib/.ipes_disk_tuned 标记）
+#   5) 上行优先脏页方案 99z-ipes-uplink.conf(20/10) 覆盖 99-pcdn-disk.conf 的 30/50（方案 A）
 #
 # 用法: curl -fsSL "<本脚本URL>" | bash   或   bash ipes_tune_only.sh [--skip-docker-restart]
 #   --skip-docker-restart  跑量高峰时跳过 dockerd 重启（句柄上限下次重启自然生效）
@@ -159,11 +160,25 @@ tune_disk(){
   touch /var/lib/.ipes_disk_tuned
 }
 
+# ----------------------------- 4) 上行优先脏页方案（覆盖 99-pcdn-disk.conf 的 30/50） -----------------------------
+finalize_uplink(){
+  # ipes_deploy_full.sh 部署时会生成 99-pcdn-disk.conf(dirty=30/vfs=50)，按字母序晚于 99-ipes.conf 会覆盖上行方案。
+  # 用排序最后的 conf(99z > 99p)复述 20/10，保证「上行稳定优先」运行期与开机后都生效（幂等）。
+  cat > /etc/sysctl.d/99z-ipes-uplink.conf <<'EOF'
+vm.dirty_background_ratio = 10
+vm.dirty_ratio = 20
+vm.vfs_cache_pressure = 10
+EOF
+  sysctl -e -p /etc/sysctl.d/99z-ipes-uplink.conf >/dev/null 2>&1
+  log_info "上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf 的 30/50"
+}
+
 # ----------------------------- 主流程 -----------------------------
 log_info "========== IPES 存量机调优补丁（不重装/不动容器/不动绑定） =========="
 sys_tune
 tune_fd_limits
 tune_disk
+finalize_uplink
 log_info "========== 调优补丁完成 =========="
 log_info "验收: sysctl net.ipv4.udp_rmem_min net.ipv4.tcp_limit_output_bytes vm.dirty_ratio"
 log_info "      ulimit -n（新 shell）; cat /sys/block/vda/queue/scheduler; ls /var/lib/.ipes_disk_tuned"

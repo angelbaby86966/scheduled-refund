@@ -169,12 +169,48 @@ vm.dirty_background_ratio = 10
 vm.dirty_ratio = 20
 vm.vfs_cache_pressure = 10
 EOF
-  sysctl -e -p /etc/sysctl.d/99z-ipes-uplink.conf >/dev/null 2>&1
-  log_info "上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf 的 30/50"
-}
+    sysctl -e -p /etc/sysctl.d/99z-ipes-uplink.conf >/dev/null 2>&1
+    log_info "上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf 的 30/50"
+  }
 
-# ----------------------------- 主流程 -----------------------------
+  # ----------------------------- 0) fstab 自检前置（修复旧版写坏的 fstab，避免重启变只读/节点宕） -----------------------------
+  fstab_selfcheck(){
+    log_info "=== fstab 自检：检查是否被旧版脚本把 commit=60/barrier=0 写错列 ==="
+    local rootline=$(awk '$2=="/"{print; exit}' /etc/fstab 2>/dev/null)
+    [ -z "$rootline" ] && { log_info "未找到根挂载行，跳过自检"; return 0; }
+    local broken=0
+    if echo "$rootline" | grep -qE 'commit=60|barrier=0'; then
+      local opt4=$(echo "$rootline" | awk '{print $4}')
+      echo "$opt4" | grep -q 'commit=60' || broken=1
+    fi
+    if [ "$broken" -eq 0 ]; then
+      log_info "fstab 根行正常（commit=60 已在第4列），无需修复"
+      return 0
+    fi
+    log_warn "检测到旧版写坏的 fstab 根行，开始修复"
+    log_warn "  坏: $rootline"
+    cp -a /etc/fstab "/etc/fstab.ipes-bak.$(date +%s)" 2>/dev/null
+    awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4"){$4="defaults,noatime,nodiratime,commit=60,barrier=0"; $5="1"; $6="1"} print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab
+    log_info "  已修正：commit=60,barrier=0 写入第4列挂载选项，第5/6列复位为 1 1"
+    if mount | grep ' on / ' | grep -qE '\(ro[,)]'; then
+      log_warn "当前根分区为只读，立即 remount rw"
+      if mount -o remount,rw / 2>/dev/null; then
+        log_info "remount rw 成功"
+        if ! systemctl is-active --quiet docker; then
+          log_warn "docker 未运行，尝试拉起（best-effort）"
+          systemctl restart containerd 2>/dev/null; systemctl start docker 2>/dev/null
+          sleep 3; systemctl is-active --quiet docker && log_info "docker 已拉起" || log_error "docker 拉起失败，请手动处理"
+        fi
+      else
+        log_error "remount rw 失败，请手动处理（fstab 已修，重启即可恢复 rw）"
+      fi
+    fi
+    return 0
+  }
+
+  # ----------------------------- 主流程 -----------------------------
 log_info "========== IPES 存量机调优补丁（不重装/不动容器/不动绑定） =========="
+fstab_selfcheck
 sys_tune
 tune_fd_limits
 tune_disk

@@ -8,6 +8,7 @@
 #     --isp 电信 [--province 浙江 --city 杭州 --num-dirs 12 --usbw 200]
 # 未传 --province/--city 时，自动按本机公网 IP 识别；识别失败兜底为 浙江/杭州。
 set +e
+# [REV] wrapper-finish-passthrough-20260919
 
 AK=""; SK=""; JWT=""; ISP="电信"; PROVINCE=""; CITY=""; NUM_DIRS=12; USBW=200; BW_NUM=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
@@ -34,8 +35,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$AK" || -z "$SK" || -z "$JWT" ]]; then
-  echo "[ERROR] 缺少 --ak / --sk / --jwt，必须提供"
+if [ "${FINISH_ONLY:-0}" != "1" ] && [[ -z "$AK" || -z "$SK" || -z "$JWT" ]]; then
+  echo "[ERROR] 缺少 --ak / --sk / --jwt，必须提供（--finish-only 原地补齐模式不注册设备，可免）"
   echo "示例：curl -fsSL ... | bash -s -- --ak <ak> --sk <sk> --jwt <jwt> --isp 电信"
   exit 1
 fi
@@ -248,7 +249,10 @@ if ! flock -n "$LOCK_FILE" true 2>/dev/null; then
 fi
 ( flock -n 9 || { echo "[ERROR] 抢锁失败：已有部署在运行，本次退出"; exit 1; }
   echo "已获取部署锁 $LOCK_FILE"
-  exec setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt >/var/log/ipes_nohup.log 2>&1 </dev/null
+  [ "${FINISH_ONLY:-0}" = "1" ] && echo "[INFO] --finish-only 原地补齐模式（透传给 full 脚本：跳过安装/注册/容器重建）"
+  FINISH_ARG=""
+  [ "${FINISH_ONLY:-0}" = "1" ] && FINISH_ARG="--finish-only"
+  exec setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --skip-olmt $FINISH_ARG >/var/log/ipes_nohup.log 2>&1 </dev/null
 ) 9>"$LOCK_FILE" &
 DEPLOY_PID=$!
 echo "已后台启动部署 PID=$DEPLOY_PID（已持锁 $LOCK_FILE，互斥生效）"

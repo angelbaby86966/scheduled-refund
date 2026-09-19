@@ -55,6 +55,7 @@
           <div class="section-actions" data-page-node-id="q0gsPmzQmRXjDafiisrruV">
             <button class="btn btn-sm" id="regionSelectAllBtn" onclick="selectAllRegions()" data-page-node-id="NArJOcI2MJngLFNjS1gslP">全选地域</button>
             <button class="btn btn-sm" onclick="deselectAllRegions()" data-page-node-id="p7EI4V4evYYZEIcum5MA9B">取消全选</button>
+            <button class="btn btn-sm" id="regionManageBtn" onclick="openRegionManageModal()" title="启用 / 禁用地区（代码保留，随时勾回来）">⚙️ 地区管理</button>
             <div class="cred-multi-wrap">
               <button type="button" id="batchCredBtn" class="cred-multi-btn" onclick="toggleBatchCredDropdown()" title="选择本次批量操作使用的阿里云凭证（多账号场景，可多选并发执行）" data-page-node-id="X3aLScaGRrDGS0imSg3Fm3">— 选择凭证（多选）—</button>
               <div id="batchCredDropdown" class="cred-multi-dropdown" style="display:none;" data-page-node-id="hbcdropdown0"></div>
@@ -819,10 +820,10 @@
   </script>
   <script src="aliyun-client-v2.js?v=15"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=106"></script>
+  <script src="app.js?v=107"></script>
   <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
-  <script src="image-clone.js?v=18&r=30"></script>
+  <script src="image-clone.js?v=19&r=31"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」与「镜像克隆」
     (function() {

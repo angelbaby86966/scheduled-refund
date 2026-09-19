@@ -1668,8 +1668,12 @@
       // 因此“镜像出现在列表里”即视为就绪，不能再等 Status==='available'（永远等不到 → 超时中断 → 没有订单）。
       // 仅当 Status 字段存在且显式为 Creating/Waiting 时继续轮询，显式为失败时才报错。
       // 兜底：主地域一直空时跨地域扫描（镜像可能被路由到实例所在地域）。
-      var allRegions = ['cn-hangzhou','cn-beijing','cn-shanghai','cn-shenzhen','cn-chengdu',
-                        'cn-guangzhou','cn-heyuan','cn-wuhan-lr','cn-wulanchabu'];
+      // 跨地域扫描名单跟随「地区管理」的启用/禁用设置（app.js 的 activeRegionIds）；
+      // 取不到时退回全量 9 个地区，保证本文件单独加载也不会报错。
+      var allRegions = (typeof activeRegionIds === 'function')
+        ? activeRegionIds()
+        : ['cn-hangzhou','cn-beijing','cn-shanghai','cn-shenzhen','cn-chengdu',
+           'cn-guangzhou','cn-heyuan','cn-wuhan-lr','cn-wulanchabu'];
       var ready = reusedExisting;  // 复用已有镜像：列表里能查到即已就绪，无需轮询
       if (reusedExisting) step('✅ 复用已有镜像，直接进入开通环节');
       var lastInfo = '';

@@ -302,6 +302,130 @@ var REGION_COLORS = {
   'cn-wulanchabu': '#14b8a6',
 };
 
+// ====== 地区启用 / 禁用开关（2026-09-19 新增）======
+// 需求：先把「河源 / 武汉 / 乌兰察布」三个地区从页面与所有功能里摘掉，
+// 但**代码一律保留**（名字、配色都在下面的 REGION_INFO / REGION_COLORS 注册表里），
+// 过几天需要时只要在页面「⚙️ 地区管理」里勾一下就能加回来。
+// 实现：全量注册表不动，只维护一个「禁用名单」；所有需要遍历地区的代码统一走
+//       activeRegionIds()，被禁用的地区就不会参与任何展示、请求与批量操作。
+var REGION_DISABLED_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu']; // 默认禁用的三个地区
+var REGION_DISABLED_KEY = 'wb_region_disabled_v1';
+
+function getDisabledRegions() {
+  try {
+    var raw = localStorage.getItem(REGION_DISABLED_KEY);
+    if (raw !== null) {
+      var arr = JSON.parse(raw);
+      if (Object.prototype.toString.call(arr) === '[object Array]') {
+        return arr.filter(function (r) { return !!REGION_INFO[r]; });
+      }
+    }
+  } catch (e) { /* 无 local storage（隐私模式）时退回默认值 */ }
+  return REGION_DISABLED_DEFAULT.slice();
+}
+
+function isRegionEnabled(rid) {
+  return getDisabledRegions().indexOf(rid) === -1;
+}
+
+// 所有「要遍历地区」的地方统一从这里取 —— 已禁用地区一律不出现
+function activeRegionIds() {
+  return Object.keys(REGION_INFO).filter(isRegionEnabled);
+}
+
+// 名字后面带上「（已禁用）」标记，仅用于管理弹窗里区分状态
+function regionDisplayName(rid) {
+  return (REGION_INFO[rid] || rid) + (isRegionEnabled(rid) ? '' : '（已禁用）');
+}
+
+function saveDisabledRegions(arr) {
+  var clean = (arr || []).filter(function (r) { return !!REGION_INFO[r]; });
+  try { localStorage.setItem(REGION_DISABLED_KEY, JSON.stringify(clean)); } catch (e) {}
+  // 禁用某个地区后，把它从「已勾选」里剔除，避免后续批量操作仍打到已禁用地区
+  if (typeof state !== 'undefined' && state && state.selectedRegions) {
+    clean.forEach(function (r) { state.selectedRegions.delete(r); });
+  }
+  return clean;
+}
+
+function resetDisabledRegions() {
+  try { localStorage.removeItem(REGION_DISABLED_KEY); } catch (e) {}
+  if (typeof state !== 'undefined' && state && state.selectedRegions) {
+    REGION_DISABLED_DEFAULT.forEach(function (r) { state.selectedRegions.delete(r); });
+  }
+  return REGION_DISABLED_DEFAULT.slice();
+}
+
+// ====== 「⚙️ 地区管理」弹窗：勾选启用/禁用，随时加减地区 ======
+function openRegionManageModal() {
+  var disabled = getDisabledRegions();
+  var rows = Object.keys(REGION_INFO).map(function (rid) {
+    var on = disabled.indexOf(rid) === -1;
+    return '<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:6px;cursor:pointer;">' +
+      '<input type="checkbox" class="region-mgr-cb" value="' + rid + '"' + (on ? ' checked' : '') + '>' +
+      '<span style="font-size:13px;font-weight:500;">' + REGION_INFO[rid] + '</span>' +
+      '<span style="font-size:11px;color:#9ca3af;margin-left:auto;">' + rid + '</span>' +
+      '</label>';
+  }).join('');
+
+  var html =
+    '<div class="modal-mask" id="regionManageMask" onclick="if(event.target===this)closeRegionManageModal()">' +
+      '<div class="modal-dialog" style="max-width:520px;">' +
+        '<div class="modal-header"><h3>⚙️ 地区管理</h3>' +
+          '<button class="modal-close" onclick="closeRegionManageModal()">×</button></div>' +
+        '<div class="modal-body" style="max-height:60vh;overflow-y:auto;">' +
+          '<div style="background:#e7f3ff;border-left:4px solid #1677ff;padding:10px 14px;margin-bottom:14px;border-radius:4px;font-size:13px;color:#0b4a9e;">' +
+            '勾选 = 启用，取消勾选 = 从页面和所有功能中暂时摘掉。<br>' +
+            '<strong>地区代码不会删除</strong>，随时勾回来即可恢复，无需改代码。' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">' + rows + '</div>' +
+          '<div style="margin-top:14px;font-size:12px;color:#6b7280;" id="regionManageHint"></div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-sm" onclick="resetRegionManageModal()">恢复默认（只留 6 个地区）</button>' +
+          '<button class="btn btn-sm btn-primary" id="regionManageSaveBtn" onclick="confirmRegionManage()">保存</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeRegionManageModal() {
+  var m = document.getElementById('regionManageMask');
+  if (m) m.remove();
+}
+
+function resetRegionManageModal() {
+  var disabled = REGION_DISABLED_DEFAULT;
+  var cbs = document.querySelectorAll('.region-mgr-cb');
+  for (var i = 0; i < cbs.length; i++) {
+    cbs[i].checked = disabled.indexOf(cbs[i].value) === -1;
+  }
+  var hint = document.getElementById('regionManageHint');
+  if (hint) hint.textContent = '已重置为默认（河源 / 武汉 / 乌兰察布 禁用），点「保存」生效。';
+}
+
+function confirmRegionManage() {
+  var cbs = document.querySelectorAll('.region-mgr-cb');
+  var disabled = [];
+  var enabled = [];
+  for (var i = 0; i < cbs.length; i++) {
+    if (cbs[i].checked) enabled.push(cbs[i].value); else disabled.push(cbs[i].value);
+  }
+  if (enabled.length === 0) { alert('至少要启用一个地区'); return; }
+  saveDisabledRegions(disabled);
+  closeRegionManageModal();
+  log('⚙️ 地区设置已更新：启用 ' + enabled.length + ' 个（' +
+      enabled.map(function (r) { return REGION_INFO[r]; }).join('、') + '）' +
+      (disabled.length ? '；已禁用 ' + disabled.map(function (r) { return REGION_INFO[r]; }).join('、') : ''), 'info');
+  // 立刻按新名单重绘页面（已禁用的地区不再出现在卡片/实例列表/退订计数里）
+  if (typeof renderRegionCards === 'function') renderRegionCards();
+  if (typeof updateSelectAllBtn === 'function') updateSelectAllBtn();
+  if (typeof renderInstances === 'function') renderInstances();
+  if (typeof updateSelectedList === 'function') updateSelectedList();
+  if (typeof updateBatchUnsubBtn === 'function') updateBatchUnsubBtn();
+}
+
 // 超时设置的 fetch 封装（用于直接调用阿里云 API 的防超时）
 function safeApiCall(promiseFn, timeoutMs) {
   var tm = timeoutMs || 300000;
@@ -790,7 +914,7 @@ async function refreshAllRegions() {
 
   try {
     log('🌍 正在加载地域概览...', 'info');
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var results = await Promise.all(regionIds.map(function(rid) {
       return AliyunClient.listInstances(rid, { pageSize: 1 }).then(function(r) {
         return { regionId: rid, name: REGION_INFO[rid], totalCount: r.TotalCount || 0, error: null };
@@ -812,7 +936,7 @@ async function refreshAllRegions() {
 
 function renderRegionCards() {
   var container = document.getElementById('regionCards');
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
 
   container.innerHTML = regionIds.map(function(rid) {
     var rd = state.regionData[rid] || { name: REGION_INFO[rid], totalCount: 0, error: null };
@@ -866,7 +990,7 @@ function toggleRegion(regionId) {
 }
 
 function selectAllRegions() {
-  Object.keys(REGION_INFO).forEach(function(rid) {
+  activeRegionIds().forEach(function(rid) {
     if (state.regionData[rid] && !state.regionData[rid].error) {
       state.selectedRegions.add(rid);
     }
@@ -885,7 +1009,7 @@ function deselectAllRegions() {
 
 function updateSelectAllBtn() {
   var btn = document.getElementById('regionSelectAllBtn');
-  var total = Object.keys(REGION_INFO).length;
+  var total = activeRegionIds().length;
   if (state.selectedRegions.size === total) {
     btn.textContent = '取消全选';
     btn.onclick = deselectAllRegions;
@@ -929,7 +1053,7 @@ async function loadAllSelectedRegionInstances() {
 }
 
 async function loadAllRegionTemplatesSilent() {
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   try {
     var results = await Promise.all(regionIds.map(function(rid) {
       return AliyunClient.listFirewallTemplates(rid).then(function(data) {
@@ -1126,7 +1250,7 @@ function switchTab(tabName) {
 // ====== 防火墙 ======
 
 async function loadAllRegionTemplates() {
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('🔄 正在从阿里云同步防火墙模板...', 'info');
   try {
     var results = await Promise.all(regionIds.map(function(rid) {
@@ -1158,7 +1282,7 @@ function updateStep2TemplateName() {
   var container = document.getElementById('fwRegionGrid');
   if (!container) return;
 
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
 
   if (state.allTemplates.length === 0) {
     container.innerHTML = '<p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;">暂无模板，请先在步骤一中创建</p>';
@@ -1219,7 +1343,7 @@ async function batchApplyAllTemplates() {
     }
 
     var regionSelections = {};
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var anySelected = false;
 
     for (var i = 0; i < regionIds.length; i++) {
@@ -1387,7 +1511,7 @@ async function runFwApplyForProfile(pname, regionSelections, regionIds) {
 // ====== 命令助手 ======
 
 async function loadAllRegionCommands() {
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('🔄 正在从阿里云同步命令列表...', 'info');
   try {
     var results = await Promise.all(regionIds.map(function(rid) {
@@ -1418,7 +1542,7 @@ function updateCmdBatchTemplateSelect() {
   if (!sel) return;
 
   // 收集所有地域都存在的命令模板（按 commandId 去重）
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   var commandMap = {};
   regionIds.forEach(function(rid) {
     var cmds = state.regionCommands[rid] || [];
@@ -1454,7 +1578,7 @@ function applyBatchCommandTemplate() {
   var commandId = sel.value;
   if (!commandId) return;
 
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   var applied = 0, skipped = 0;
   regionIds.forEach(function(rid) {
     var regionSel = document.querySelector('#cmdRegionGrid select[data-region="' + rid + '"]');
@@ -1476,7 +1600,7 @@ function applyBatchCommandTemplate() {
 function updateCmdRegionGrid() {
   var container = document.getElementById('cmdRegionGrid');
   if (!container) return;
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
 
   container.innerHTML = regionIds.map(function(rid) {
     var regionName = REGION_INFO[rid];
@@ -1533,7 +1657,7 @@ async function batchExecuteAllCommands() {
       return;
     }
 
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var regionSelections = {};
 
     for (var i = 0; i < regionIds.length; i++) {
@@ -1790,7 +1914,7 @@ async function executeCancel() {
 
   try {
     // 第1步：遍历所有地域获取实例
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var allInstances = [];
     var byRegion = {};
 
@@ -1922,7 +2046,7 @@ async function searchRefundableInstances() {
     state.refundSelected.clear();
 
     // 1. 获取所有实例
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var allInstances = [];
     for (var i = 0; i < regionIds.length; i++) {
       var rid = regionIds[i];
@@ -2354,7 +2478,7 @@ async function executeScheduledRefund() {
     while (_round < _maxRounds) {
       _round++;
       // 获取该凭证下的所有实例
-      var regionIds = Object.keys(REGION_INFO);
+      var regionIds = activeRegionIds();
       var allInstances = [];
       for (var i = 0; i < regionIds.length; i++) {
         var rid = regionIds[i];
@@ -2491,7 +2615,7 @@ async function refreshOrderPlanInfo() {
 function initOrderGrid() {
   var container = document.getElementById('orderRegionGrid');
   var summary = document.getElementById('orderSummary');
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
 
   var items = regionIds.map(function(rid) {
     return '<div class="order-region-item" id="order-item-' + rid + '">' +
@@ -2732,7 +2856,7 @@ async function batchApplyQuota(desireValue) {
     return;
   }
 
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('📈 开始批量提升配额到 ' + desireValue + '，共 ' + regionIds.length + ' 个地区', 'info');
 
   var successCount = 0;
@@ -3322,7 +3446,7 @@ async function executeCustomCommandToAllRegions() {
 // 单凭证：加载 9 个地域全部实例并批量下发命令（原 executeCustomCommandToAllRegions 主体）
 async function runCustomCommandForAllRegions(opts, pname) {
   // 1) 加载 9 个地域的全部实例（只调用 listInstances，运维类 API 走地域 endpoint 不需要代理）
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('🔄 [凭证 ' + pname + '] 加载 9 个地域的实例…', 'info');
   if (!state.regionData) state.regionData = {};
 
@@ -3447,7 +3571,7 @@ function closeCreateCommandModal() {
 function initCrCmdRegionCheckboxes() {
   var container = document.getElementById('crCmdRegionCheckboxes');
   if (!container) return;
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   container.innerHTML = regionIds.map(function(rid) {
     return '<label style="cursor:pointer; font-size:13px;"><input type="checkbox" name="crCmdRegion" value="' + rid + '" checked> ' + REGION_INFO[rid] + '</label>';
   }).join('');
@@ -3514,7 +3638,7 @@ function openDeleteCommandModal() { document.getElementById('deleteCommandModal'
 function closeDeleteCommandModal() { document.getElementById('deleteCommandModal').style.display = 'none'; _delCmdState = { commands: {}, selected: {} }; }
 
 async function loadDeleteCommandList() {
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('🔄 加载所有地域命令列表...', 'info');
   _delCmdState = { commands: {}, selected: {} };
   var container = document.getElementById('delCmdListContainer');
@@ -3539,7 +3663,7 @@ async function loadDeleteCommandList() {
 
 function renderDeleteCommandList() {
   var container = document.getElementById('delCmdListContainer');
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   var html = '', totalCount = 0;
   for (var i = 0; i < regionIds.length; i++) {
     var rid = regionIds[i];
@@ -3625,7 +3749,7 @@ function closeCreateFirewallModal() { document.getElementById('createFirewallMod
 function initCreateFwRegionCheckboxes() {
   var container = document.getElementById('createFwRegionCheckboxes');
   if (!container) return;
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   container.innerHTML = regionIds.map(function(rid) {
     return '<label style="cursor:pointer; font-size:13px;"><input type="checkbox" name="createFwRegion" value="' + rid + '" checked> ' + REGION_INFO[rid] + '</label>';
   }).join('');
@@ -3849,7 +3973,7 @@ function openDeleteFirewallModal() { document.getElementById('deleteFirewallModa
 function closeDeleteFirewallModal() { document.getElementById('deleteFirewallModal').style.display = 'none'; _delFwState = { templates: {}, selected: {} }; }
 
 async function loadDeleteFirewallList() {
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   log('🔄 加载所有地域防火墙模板...', 'info');
   _delFwState = { templates: {}, selected: {} };
   var container = document.getElementById('delFwListContainer');
@@ -3874,7 +3998,7 @@ async function loadDeleteFirewallList() {
 
 function renderDeleteFirewallList() {
   var container = document.getElementById('delFwListContainer');
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   var html = '', totalCount = 0;
   for (var i = 0; i < regionIds.length; i++) {
     var rid = regionIds[i];
@@ -4497,7 +4621,7 @@ async function refundByRegionBatched(byRegion, opts) {
   // 只退当前 9 个地区（REGION_INFO 内的）
   var regionIds = Object.keys(byRegion).filter(function (rid) { return REGION_INFO[rid]; });
   if (!regionIds.length) {
-    log('   ⚠️ 没有命中的地区（仅处理 ' + Object.keys(REGION_INFO).join('/') + '），跳过', 'warn');
+    log('   ⚠️ 没有命中的地区（仅处理 ' + activeRegionIds().join('/') + '），跳过', 'warn');
     return total;
   }
 
@@ -5121,7 +5245,7 @@ function copyTextToClipboardImpl(text) {
 async function deleteAllCommands() {
   // 如果尚未加载命令，先同步一次
   var hasLoaded = state.regionCommands && Object.keys(state.regionCommands).length > 0;
-  var regionIds = Object.keys(REGION_INFO);
+  var regionIds = activeRegionIds();
   if (!hasLoaded) {
     log('🔄 尚未加载命令列表，先同步阿里云命令...', 'info');
     await loadAllRegionCommands();
@@ -5270,7 +5394,7 @@ async function exportPublicIpsFromPaste() {
   // 3) 仍未命中的 fallback 到阿里云 ListInstances（6地域，3并发）
   var stillMissing = ids.filter(function(id) { return !map[id]; });
   if (stillMissing.length) {
-    var regionIds = Object.keys(REGION_INFO);
+    var regionIds = activeRegionIds();
     var concurrency = 3;
     var queue = regionIds.slice();
     var running = [];

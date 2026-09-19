@@ -319,11 +319,20 @@
   function icInit() {
     var sel = document.getElementById('icRegion');
     if (sel && !sel.options.length && typeof REGION_INFO === 'object') {
-      Object.keys(REGION_INFO).forEach(function (rid) {
+      // 跟随「⚙️ 地区管理」的启用/禁用设置（app.js 的 activeRegionIds）；
+      // 取不到时退回全量 9 个地区，保证本文件单独加载也不会报错。
+      var icRegionIds = (typeof activeRegionIds === 'function')
+        ? activeRegionIds()
+        : Object.keys(REGION_INFO);
+      icRegionIds.forEach(function (rid) {
         var o = document.createElement('option');
         o.value = rid; o.textContent = REGION_INFO[rid] + ' (' + rid + ')';
         sel.appendChild(o);
       });
+      // 已禁用的地区不再出现在下拉里；若原选中项被禁用，回退到第一个可用地区
+      if (icRegionIds.length && icRegionIds.indexOf(sel.value) === -1) {
+        sel.value = icRegionIds[0];
+      }
     }
     var plan = document.getElementById('icPlanId');
     if (plan && !plan.value && typeof LOCKED_PLAN_ID !== 'undefined' && LOCKED_PLAN_ID) {
@@ -1738,7 +1747,8 @@
           // 实测 SWAS CreateCustomImage 通常在创建地域，跨地域是兜底防御 —— 做一次够用。
           if (i >= 4 && !crossScanDone && imgs.length === 0) {
             crossScanDone = true;
-            step('🌐 主地域 [' + region + '] 一直空，并发扫描其他 8 个地域...');
+            step('🌐 主地域 [' + region + '] 一直空，并发扫描其他 ' +
+              allRegions.filter(function (r) { return r !== region; }).length + ' 个地域...');
             try {
               var crossResults = await Promise.all(allRegions.filter(function (rid) { return rid !== region; }).map(function (rid) {
                 return Promise.race([

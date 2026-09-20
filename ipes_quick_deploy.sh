@@ -199,10 +199,43 @@ setup_data_disk() {
   mount -o noatime,nodiratime "$DATA_DISK" /data
 }
 
+# 【r20-fix18】docker 安装根治：避免 aliyun 镜像 CLOSE-WAIT 挂死永久卡住（张瑞瑶32 事故）
+harden_yum_conf() {
+    local f=/etc/yum.conf
+    [ -f "$f" ] || return 0
+    grep -qE '^timeout=' "$f" || echo 'timeout=30' >> "$f"
+    grep -qE '^retries=' "$f" || echo 'retries=3' >> "$f"
+    grep -qE '^metadata_expire=' "$f" || echo 'metadata_expire=300' >> "$f"
+}
+install_docker_hardened() {
+    harden_yum_conf
+    cat > /etc/yum.repos.d/docker-ce.repo <<EOF
+[docker-ce-stable]
+name=Docker CE Stable - \$basearch
+baseurl=https://mirrors.aliyun.com/docker-ce/linux/centos/\$releasever/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
+EOF
+    local try rc
+    for try in 1 2 3; do
+        echo "[1/5] docker-ce 在线安装 第 ${try}/3 次 (timeout 600) ..."
+        timeout 600 yum install -y --setopt=timeout=30 --setopt=retries=3 \
+            docker-ce docker-ce-cli containerd.io docker-compose-plugin > /tmp/docker_install.log 2>&1
+        rc=$?
+        tail -n 20 /tmp/docker_install.log
+        [ "$rc" -eq 0 ] && return 0
+        echo "[1/5] 第 ${try}/3 次失败(rc=$rc)，10s 后重试"
+        sleep 10
+    done
+    echo "[错误] docker-ce 安装失败（已重试 3 次）"
+    return 1
+}
+
 # ---------- 1) Docker ----------
 if ! command -v docker >/dev/null 2>&1; then
   echo "[1/5] 安装 Docker ..."
-  curl -fsSL -m 120 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/install_docker/install_docker-ce.sh | bash
+  install_docker_hardened
 fi
 systemctl enable --now docker 2>/dev/null || true
 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || { echo "[错误] Docker 未就绪"; exit 1; }

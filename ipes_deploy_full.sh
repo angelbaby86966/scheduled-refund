@@ -1422,6 +1422,57 @@ get_valid_sn() {
     return 1
 }
 
+
+# 【r20-fix18】docker 安装根治辅助函数（2026-09-20 张瑞瑶32 实机事故）
+harden_yum_conf() {
+    local f=/etc/yum.conf
+    [ -f "$f" ] || return 0
+    grep -qE '^timeout=' "$f" || echo 'timeout=30' >> "$f"
+    grep -qE '^retries=' "$f" || echo 'retries=3' >> "$f"
+    grep -qE '^metadata_expire=' "$f" || echo 'metadata_expire=300' >> "$f"
+}
+
+# 离线包：仅当 DOCKER_BUNDLE_BASE 非空才启用；多源竞速 + SHA256 校验后 localinstall
+fetch_docker_bundle() {
+    [ -n "${DOCKER_BUNDLE_BASE:-}" ] || return 1
+    local dest="$1" ver="${DOCKER_BUNDLE_VER:-27.3.1}" f="docker-ce-bundle-${ver}.tgz"
+    local base="${DOCKER_BUNDLE_BASE%/}" u tmp sha_exp sha_got
+    local urls=(
+        "${base}/${f}"
+        "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/docker/${f}"
+        "https://fastly.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/docker/${f}"
+        "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/docker/${f}"
+    )
+    tmp=$(mktemp -d)
+    sha_exp=""
+    for u in "${urls[@]}"; do
+        sha_exp=$(curl -fsSL --connect-timeout 15 --max-time 60 "${u}.sha256" 2>/dev/null | awk '{print $1}')
+        [ -n "$sha_exp" ] && break
+    done
+    for u in "${urls[@]}"; do
+        log_message "${CYAN}[bundle]${NC} 尝试: ${u}"
+        if curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/$f" "$u" 2>/dev/null && [ -s "$tmp/$f" ]; then
+            if [ -n "$sha_exp" ]; then
+                sha_got=$(sha256sum "$tmp/$f" 2>/dev/null | awk '{print $1}')
+                if [ "$sha_got" != "$sha_exp" ]; then
+                    log_message "${YELLOW}[bundle]${NC} SHA256 不符，换源"; rm -f "$tmp/$f"; continue
+                fi
+            fi
+            mkdir -p "$dest"
+            if tar -xzf "$tmp/$f" -C "$dest" 2>/dev/null && ls "$dest"/*.rpm >/dev/null 2>&1; then
+                log_message "${GREEN}[bundle]${NC} 离线包就绪: $dest"; rm -rf "$tmp"; return 0
+            fi
+        fi
+    done
+    rm -rf "$tmp"; return 1
+}
+
+docker_yum_install() {
+    log_message "安装 docker-ce（对齐渠道标准；带 timeout 600 + timeout/retries=3，输出可见）"
+    timeout 600 yum install -y --setopt=timeout=30 --setopt=retries=3 \
+        docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>&1 | tail -n 20
+}
+
 install_docker_step() {
     print_step "安装 docker"
     if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
@@ -1432,34 +1483,40 @@ install_docker_step() {
     fi
 
     # ---------------------------------------------------------------------
-    # 【r20-fix12】优先装 docker-ce（对齐渠道标准，版本必须 ≥23）。
-    #   根因（2026-09-17 09ec95ba 实测事故）：
-    #     渠道平台会经 zycloud agent 下发 install_docker-ce_v2.sh；该脚本判定
-    #     「Docker < 23.0.0 就重装」，而重装第一步是 Docker 官方套路：
-    #         yum remove -y docker* containerd.io docker-compose*
-    #     我们原先装的是 CentOS 自带 docker 1.13（远低于 23）→ 渠道**每次推送都先删 docker**，
-    #     与正在跑的部署并发互踩：docker 被删 → 容器全停 → 取不到业务 SN
-    #     → 后台业务ID 被写成 "ZHOUYI_XIAODU占位符"（表现为"脚本跑完但没绑定"）。
-    #   对齐到 docker-ce 后渠道判定版本达标，不再重复卸载重装，从根上止住这个循环。
-    #   失败自动回退 CentOS 自带 docker 1.13，不阻塞部署。
+    # 【r20-fix18·docker 安装根治】2026-09-20 张瑞瑶32 实机事故根因：
+    #   旧逻辑 `yum install -y docker-ce … >/dev/null 2>&1` 无超时/无重试/输出黑洞，
+    #   aliyun 镜像偶发 CLOSE-WAIT 挂死 -> 整台机永久卡死。
+    #   根治：① yum 全局加 timeout/retries；② 在线安装包 `timeout 600` + 可见输出 +
+    #        最多 3 次重试，绝不永久挂起；③ 可选离线包（DOCKER_BUNDLE_BASE 非空时
+    #        多源竞速+SHA256 校验后 localinstall），彻底摆脱公网 yum 镜像。
+    #   默认禁止回退 CentOS 自带 docker 1.13（<23 会触发渠道"版本<23就重装"互踩循环）。
     # ---------------------------------------------------------------------
+    harden_yum_conf
     if ! command -v docker >/dev/null 2>&1; then
-        if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
-            curl -fsSL --connect-timeout 8 --max-time 30 \
-                 -o /etc/yum.repos.d/docker-ce.repo \
-                 "https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo" 2>/dev/null || true
-        fi
-        if [ -f /etc/yum.repos.d/docker-ce.repo ]; then
-            log_message "安装 docker-ce（对齐渠道标准；避免渠道因版本<23 反复卸载重装）"
-            yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1 \
-              || yum install -y docker-ce docker-ce-cli containerd.io >/dev/null 2>&1 || true
+        [ -f /etc/yum.repos.d/docker-ce.repo ] || \
+            curl -fsSL --connect-timeout 8 --max-time 30 -o /etc/yum.repos.d/docker-ce.repo \
+                "https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo" 2>/dev/null || true
+        local bd=/tmp/docker_bundle; rm -rf "$bd"; mkdir -p "$bd"
+        if fetch_docker_bundle "$bd"; then
+            log_message "离线包 localinstall 开始"
+            ( cd "$bd" && yum localinstall -y ./*.rpm ) 2>&1 | tail -n 25
+        else
+            local try
+            for try in 1 2 3; do
+                docker_yum_install && break
+                log_message "${YELLOW}[警告]${NC} docker-ce 在线安装第 ${try}/3 次失败，10s 后重试"
+                sleep 10
+            done
         fi
     fi
 
     if ! command -v docker >/dev/null 2>&1; then
-        log_message "${YELLOW}[提醒]${NC} docker-ce 未装成，回退 CentOS 自带 docker 1.13"
-        if ! yum install -y docker; then
-            log_message "${YELLOW}[警告]${NC} docker 安装失败"; return 1
+        if [ "${ALLOW_DOCKER_1_13:-0}" = "1" ]; then
+            log_message "${YELLOW}[警告]${NC} 回退 CentOS 自带 docker 1.13（会触发渠道重装循环，仅应急）"
+            timeout 600 yum install -y --setopt=timeout=30 --setopt=retries=3 docker 2>&1 | tail -n 15
+        else
+            log_message "${RED}[错误]${NC} docker-ce 未能安装（离线包+在线均失败），部署中止于 docker 步骤"
+            return 1
         fi
     fi
 
@@ -1475,9 +1532,9 @@ install_docker_step() {
 }
 EOF
     systemctl daemon-reload
-    systemctl start docker
     systemctl enable docker
-
+    systemctl start docker
+    sleep 3
     if check_docker_running; then
         log_message "${GREEN}[成功]${NC} docker 已启动"
         return 0
@@ -1485,6 +1542,7 @@ EOF
     log_message "${YELLOW}[警告]${NC} docker 未正常启动"
     return 1
 }
+
 
 # -----------------------------------------------------------------------------
 # 【r20-fix11】保证每个 happ.N 的 xycould_base_info 是【文件】而不是【目录】。

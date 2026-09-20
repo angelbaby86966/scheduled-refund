@@ -225,6 +225,56 @@ detect_os(){
   elif [ -f /etc/debian_version ]; then OS=debian; VER=$(cat /etc/debian_version);
   else OS=unknown; fi; echo "$OS"
 }
+# 【r20-fix18】docker 安装根治辅助函数（2026-09-20 张瑞瑶32 实机事故）
+harden_yum_conf() {
+    local f=/etc/yum.conf
+    [ -f "$f" ] || return 0
+    grep -qE '^timeout=' "$f" || echo 'timeout=30' >> "$f"
+    grep -qE '^retries=' "$f" || echo 'retries=3' >> "$f"
+    grep -qE '^metadata_expire=' "$f" || echo 'metadata_expire=300' >> "$f"
+}
+
+# 离线包：仅当 DOCKER_BUNDLE_BASE 非空才启用；多源竞速 + SHA256 校验后 localinstall
+fetch_docker_bundle() {
+    [ -n "${DOCKER_BUNDLE_BASE:-}" ] || return 1
+    local dest="$1" ver="${DOCKER_BUNDLE_VER:-27.3.1}" f="docker-ce-bundle-${ver}.tgz"
+    local base="${DOCKER_BUNDLE_BASE%/}" u tmp sha_exp sha_got
+    local urls=(
+        "${base}/${f}"
+        "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/docker/${f}"
+        "https://fastly.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/docker/${f}"
+        "https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/docker/${f}"
+    )
+    tmp=$(mktemp -d)
+    sha_exp=""
+    for u in "${urls[@]}"; do
+        sha_exp=$(curl -fsSL --connect-timeout 15 --max-time 60 "${u}.sha256" 2>/dev/null | awk '{print $1}')
+        [ -n "$sha_exp" ] && break
+    done
+    for u in "${urls[@]}"; do
+        log_info "[bundle] 尝试: ${u}"
+        if curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/$f" "$u" 2>/dev/null && [ -s "$tmp/$f" ]; then
+            if [ -n "$sha_exp" ]; then
+                sha_got=$(sha256sum "$tmp/$f" 2>/dev/null | awk '{print $1}')
+                if [ "$sha_got" != "$sha_exp" ]; then
+                    log_warn "[bundle] SHA256 不符，换源"; rm -f "$tmp/$f"; continue
+                fi
+            fi
+            mkdir -p "$dest"
+            if tar -xzf "$tmp/$f" -C "$dest" 2>/dev/null && ls "$dest"/*.rpm >/dev/null 2>&1; then
+                log_info "[bundle] 离线包就绪: $dest"; rm -rf "$tmp"; return 0
+            fi
+        fi
+    done
+    rm -rf "$tmp"; return 1
+}
+
+docker_yum_install() {
+    log_info "安装 docker-ce（带 timeout 600 + timeout/retries=3，输出可见）"
+    timeout 600 yum install -y --setopt=timeout=30 --setopt=retries=3 \
+        docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>&1 | tail -n 20
+}
+
 install_docker_centos(){
   local cv=$1
   [ "$cv" -eq 8 ] && { dnf module enable -y container-tools 2>/dev/null || true; }
@@ -251,8 +301,43 @@ enabled=1
 gpgcheck=1
 gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
 EOF
-  yum install -y yum-utils device-mapper-persistent-data lvm2
-  yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+  # 【r20-fix18·docker 安装根治】2026-09-20 张瑞瑶32 实机事故根因：
+  #   旧逻辑 `yum install -y docker-ce …` 无超时/无重试，aliyun 镜像偶发
+  #   CLOSE-WAIT 挂死 -> 整台机永久卡死。根治：① yum 全局加 timeout/retries；
+  #   ② 在线安装包 `timeout 600` + 可见输出 + 最多 3 次重试；③ 可选离线包
+  #   （DOCKER_BUNDLE_BASE 非空时多源竞速+SHA256 校验后 localinstall）。
+  #   默认禁止回退 CentOS 自带 docker 1.13（<23 会触发渠道"版本<23就重装"互踩）。
+  harden_yum_conf
+  timeout 300 yum install -y --setopt=timeout=30 --setopt=retries=3 \
+      yum-utils device-mapper-persistent-data lvm2 2>&1 | tail -n 15
+
+  if command -v docker >/dev/null 2>&1; then
+    log_info "docker 已存在，跳过安装步骤"
+  else
+    local bd=/tmp/docker_bundle; rm -rf "$bd"; mkdir -p "$bd"
+    if fetch_docker_bundle "$bd"; then
+      log_info "离线包 localinstall 开始"
+      ( cd "$bd" && yum localinstall -y ./*.rpm ) 2>&1 | tail -n 25
+    else
+      local try
+      for try in 1 2 3; do
+        docker_yum_install && break
+        log_warn "docker-ce 在线安装第 ${try}/3 次失败，10s 后重试"
+        sleep 10
+      done
+    fi
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    if [ "${ALLOW_DOCKER_1_13:-0}" = "1" ]; then
+      log_warn "回退 CentOS 自带 docker 1.13（会触发渠道重装循环，仅应急）"
+      timeout 600 yum install -y --setopt=timeout=30 --setopt=retries=3 docker 2>&1 | tail -n 15
+    else
+      log_error "docker-ce 未能安装（离线包+在线均失败），部署中止于 docker 步骤"
+      return 1
+    fi
+  fi
 }
 install_docker_debian(){
   local dv=$1

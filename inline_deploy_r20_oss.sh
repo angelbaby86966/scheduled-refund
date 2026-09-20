@@ -237,17 +237,26 @@ echo "[INFO] 上行优先脏页方案(20/10)已锁定，覆盖 99-pcdn-disk.conf
 SRC1="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
 SRC2="https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
 SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_deploy_full.sh"
+# 【r20-fix18 排雷】除体积/singleIpRadius/--finish-only 校验外，强制校验 docker 安装硬化标记
+#   harden_yum_conf（仅 fix18 加固版具备）。缺此标记即旧版（yum install 无超时/重试，会 CLOSE-WAIT 卡死），
+#   宁可换源/报错也绝不用旧版去部署。
 FULL_OK=0; FULL_SRC=""
 for u in "$SRC1" "$SRC2" "$SRC3"; do
-  if curl -fsSL -m 25 "$u" -o /root/ipes_full.sh \
+  if curl -fsSL -m 25 "$u" -o /root/ipes_full.sh 2>/dev/null \
      && [ "$(wc -c </root/ipes_full.sh 2>/dev/null | tr -d ' ')" -gt 100000 ] \
      && grep -q singleIpRadio /root/ipes_full.sh \
      && grep -q -- '--finish-only' /root/ipes_full.sh; then
-    FULL_OK=1; FULL_SRC="$u"; break
+    if grep -q 'harden_yum_conf' /root/ipes_full.sh; then
+      FULL_OK=1; FULL_SRC="$u"; break
+    else
+      echo "[WARN] $u 返回的 full 脚本缺 harden_yum_conf 标记（旧版/CDN 缓存），换源重试"
+    fi
+  else
+    echo "[WARN] $u 未取到有效 full 脚本，换源重试"
   fi
 done
 if [ "$FULL_OK" != "1" ]; then
-  echo "[ERROR] 三个通道都没取到有效的 ipes_deploy_full.sh（CDN 缓存旧版或网络不通）"
+  echo "[ERROR] 三个通道都没取到「硬化版」ipes_deploy_full.sh（缺 harden_yum_conf：CDN 缓存旧版或网络不通）"
   echo "        手动兜底： curl -fsSL -m 60 \"$SRC2\" -o /root/ipes_full.sh"
   exit 1
 fi

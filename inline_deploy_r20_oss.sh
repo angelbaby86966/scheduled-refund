@@ -496,6 +496,41 @@ if __name__ == '__main__':
 
 PY
 
+# 持久化自修复环境（供重启后自愈钩子复用；含 JWT，属敏感，权限收紧）
+umask 077
+cat > /root/.ipes_repair_env <<ENV
+export NODE_ACTIVATE_TOKEN='${JWT}'
+export ADMIN_API_HOST='${ADMIN_API_HOST}'
+export BUSINESS_ID='${BUSINESS_ID}'
+export ISP='${ISP}'
+export PROVINCE='${PROVINCE}'
+export CITY='${CITY}'
+export NODE_NAT_TYPE='${NODE_NAT_TYPE}'
+export NODE_RESOURCE_TYPE='${NODE_RESOURCE_TYPE}'
+export NODE_DIAL_TYPE='${NODE_DIAL_TYPE}'
+export NODE_SINGLE_IP_RADIO='${NODE_SINGLE_IP_RADIO}'
+export NODE_USBW='${NODE_USBW}'
+export NODE_BW_NUM='${NODE_BW_NUM}'
+export DEPLOY_PID_FILE='/var/run/ipes_deploy.pid'
+ENV
+chmod 600 /root/.ipes_repair_env
+
+# 重启后自愈：部署末尾若触发内核升级重启，Phase C 进程会被 kill 而留下「待配置」。
+# 这里装一个 @reboot 钩子，开机 60s 后重新跑绑定自修复（仅当节点尚未服务中才真正流转）。
+cat > /root/ipes_repair_once.sh <<'WRAP'
+#!/bin/bash
+export PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:$PATH
+flock -n /var/lock/ipes_repair_once.lock true || exit 0
+. /root/.ipes_repair_env 2>/dev/null || true
+[ -n "$NODE_ACTIVATE_TOKEN" ] || exit 0
+sleep 60
+cd /root
+python3 /root/ipes_repair_binding.py >>/var/log/ipes_repair_reboot.log 2>&1
+WRAP
+chmod 700 /root/ipes_repair_once.sh
+# 幂等安装 @reboot 任务（先清旧的再装，避免重复）
+( crontab -l 2>/dev/null | grep -v 'ipes_repair_once.sh' ; echo '@reboot /bin/bash /root/ipes_repair_once.sh' ) | crontab -
+
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \
        NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO \
        NODE_USBW NODE_BW_NUM

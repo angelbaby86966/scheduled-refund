@@ -551,7 +551,7 @@ Deno.serve(async (req:Request)=>{
         if (!imageId) return json({error:"缺少 params.ImageId"},400);
         const endpoint = regionEndpoint(regionId);
 
-        // 1. 查询实例状态
+        // 1. 查询并确保实例处于 Stopped 状态（ResetSystem 前置条件）
         let stoppedFirst = false;
         if (autoStop) {
           try {
@@ -560,8 +560,15 @@ Deno.serve(async (req:Request)=>{
               InstanceId: instanceId,
             },ak_id,ak_secret);
             const inst = (desc.Instances || [])[0];
-            if (inst && inst.Status !== "Stopped") {
-              console.log("[resetSystem] 实例未停止:", inst.Status, "→ 先停机");
+            if (!inst) {
+              return json({success:false, error:"未找到指定实例"},404);
+            }
+            const status = inst.Status;
+            let needWait = false;
+            if (status === "Stopped") {
+              // 已停机，直接重置
+            } else if (status === "Running" || status === "RunningException") {
+              console.log("[resetSystem] 实例运行中:", status, "→ 先停机");
               await callAliyun(endpoint,"StopInstance",{
                 RegionId: regionId,
                 InstanceId: instanceId,
@@ -569,18 +576,37 @@ Deno.serve(async (req:Request)=>{
                 ClientToken: crypto.randomUUID(),
               },ak_id,ak_secret);
               stoppedFirst = true;
-              // 停机是异步，最多重试 3 次等停机完成（每次等 5 秒）
-              for (let i = 0; i < 3; i++) {
+              needWait = true;
+            } else if (status === "Stopping") {
+              console.log("[resetSystem] 实例正在停机:", status, "→ 等待完成");
+              needWait = true;
+            } else {
+              return json({success:false, error:`实例状态 ${status} 不支持重置系统`},400);
+            }
+
+            // 停机是异步，最多等 5 分钟（60×5s），必须确认 Stopped 才继续
+            if (needWait) {
+              let becameStopped = false;
+              for (let i = 0; i < 60; i++) {
                 await new Promise(r => setTimeout(r, 5000));
                 const desc2 = await callAliyun(endpoint,"ListInstances",{
                   RegionId: regionId,
                   InstanceId: instanceId,
                 },ak_id,ak_secret);
-                if ((desc2.Instances || [])[0]?.Status === "Stopped") break;
+                const st = (desc2.Instances || [])[0]?.Status;
+                console.log("[resetSystem] 等待停机:", i, "status=", st);
+                if (st === "Stopped") {
+                  becameStopped = true;
+                  break;
+                }
+              }
+              if (!becameStopped) {
+                return json({success:false, error:"等待实例停机超时（5分钟），未执行重置"},408);
               }
             }
           } catch (e:any) {
-            console.log("[resetSystem] 检查/停机实例状态失败，继续尝试重置:", e.message);
+            console.log("[resetSystem] 检查/停机实例失败:", e.message);
+            return json({success:false, error:"检查/停机实例失败: " + e.message},500);
           }
         }
 

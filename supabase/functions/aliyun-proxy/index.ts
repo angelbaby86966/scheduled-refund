@@ -295,6 +295,7 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyunV3(regionEndpoint(regionId), "CreateOrder", params, ak_id, ak_secret);
         return json({success:true,data});
       }
+      case "ListPlans":
       case "listPlans": {
         const {ak_id,ak_secret,regionId} = p;
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
@@ -312,6 +313,7 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyun(regionEndpoint(regionId),"ListImages",queryParams,ak_id,ak_secret);
         return json({success:true,data});
       }
+      case "createCustomImage":
       case "CreateCustomImage": {
         const {ak_id,ak_secret,params} = p;
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
@@ -325,6 +327,7 @@ Deno.serve(async (req:Request)=>{
         },ak_id,ak_secret);
         return json({success:true,data});
       }
+      case "createInstances":
       case "CreateInstances": {
         const {ak_id,ak_secret,params} = p;
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
@@ -383,6 +386,7 @@ Deno.serve(async (req:Request)=>{
         }
         return json({success:true,data});
       }
+      case "deleteCustomImage":
       case "DeleteCustomImage": {
         const {ak_id,ak_secret,params} = p;
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
@@ -414,6 +418,7 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyun(regionEndpoint(rid),"ListInstances",queryParams,ak_id,ak_secret);
         return json({success:true,data});
       }
+      case "RunCommand":
       case "runCommand": {
         // 在指定地域的某一台实例上执行一条命令
         // params: { RegionId, InstanceId, CommandContent, Type, WorkingDir?, Timeout?, Name?, EnableParameter?, Parameters? }
@@ -428,6 +433,7 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyun(regionEndpoint(regionId),"RunCommand",params,ak_id,ak_secret);
         return json({success:true,data});
       }
+      case "RebootInstance":
       case "rebootInstance": {
         // 重启单台实例
         // params: { RegionId, InstanceId }
@@ -446,6 +452,7 @@ Deno.serve(async (req:Request)=>{
         },ak_id,ak_secret);
         return json({success:true,data});
       }
+      case "RefundInstance":
       case "refundInstance": {
         // BSS 真正的退订（能退款），不是 SWAS 的 DeleteInstance
         // ProductCode 尝试顺序（按 SWAS 历史命名规范）：swas -> simpleappserver -> swas-open -> simpleAppserver
@@ -488,6 +495,7 @@ Deno.serve(async (req:Request)=>{
         // 所有 code 都试过还不支持，抛最后一个错误
         throw lastErr;
       }
+      case "ProbeProductCode":
       case "probeProductCode": {
         // 诊断：试多个 ProductCode 看哪个不返回 CommodityNotSupported
         // params: { InstanceId: string }
@@ -523,8 +531,12 @@ Deno.serve(async (req:Request)=>{
         }
         return json({success: true, trials});
       }
-      case "replaceSystemDisk": {
+      case "replaceSystemDisk":
+      case "resetSystem":
+      case "ResetSystem": {
         // SWAS 重置系统（实际 API 名是 ResetSystem，不是 ReplaceSystemDisk 那是 ECS 的）
+        // 【修复】前端 resetSystem() 发送 action:'ResetSystem'，此前代理无此 case → 落入 default 心跳分支，
+        // 返回 200 无 success 字段，前端误判"失败：HTTP 200"且根本没执行重置。此处与 replaceSystemDisk 合并。
         // 注意：实例必须处于 Stopped 状态。如果 Status=Running 自动先停机再重置
         // params: { RegionId, InstanceId, ImageId, autoStopIfRunning?: bool }
         const {ak_id,ak_secret,params} = p;
@@ -581,6 +593,7 @@ Deno.serve(async (req:Request)=>{
         },ak_id,ak_secret);
         return json({success:true, data, stoppedFirst});
       }
+      case "CreateQuotaApplication":
       case "createQuotaApplication": {
         // 阿里云配额中心：创建配额提升申请
         // params: {
@@ -627,6 +640,7 @@ Deno.serve(async (req:Request)=>{
         const data = await callAliyun(QUOTA_ENDPOINT, "CreateQuotaApplication", qParams, ak_id, ak_secret, QUOTA_VERSION);
         return json({success: true, data});
       }
+      case "RunCancelNow":
       case "runCancelNow": {
         const users = await loadCredsForUsers(p.ak_id,p.ak_secret);
         const results:Record<string,any> = {};
@@ -636,6 +650,7 @@ Deno.serve(async (req:Request)=>{
         }
         return json({success:true,results,time:new Date().toISOString()});
       }
+      case "RunScheduledCancel":
       case "runScheduledCancel": {
         // 🕐 自检时间模式（由 cron-job.org 每分钟调用一次）
         // 只对当前北京时间匹配 schedule_hour:schedule_minute 的用户执行退订
@@ -726,6 +741,7 @@ Deno.serve(async (req:Request)=>{
           hint: triggered > 0 ? "已触发退订" : "未到执行时间，跳过",
         });
       }
+      case "RunScheduleNow":
       case "runScheduleNow": {
         // 🚀 立即触发：忽略时间窗口，立即为当前用户执行退订（不受同天去重限制）
         // 适用于「定时时间过了但没退订成功」的场景
@@ -771,6 +787,7 @@ Deno.serve(async (req:Request)=>{
           hint: "立即触发模式（已忽略时间窗口和同天去重）",
         });
       }
+      case "CheckSchedule":
       case "checkSchedule": {
         // 轻量探测：只读 schedule 配置，不执行退订（给前端用来显示"下次执行时间"）
         const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=username,data`, {

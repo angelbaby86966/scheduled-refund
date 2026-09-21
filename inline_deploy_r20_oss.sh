@@ -309,6 +309,11 @@ NODE_DIAL_TYPE = os.environ.get('NODE_DIAL_TYPE','staticNetSingle')
 NODE_SINGLE_IP_RADIO = int(os.environ.get('NODE_SINGLE_IP_RADIO','0'))
 NODE_USBW = int(os.environ.get('NODE_USBW','200'))
 NODE_BW_NUM = int(os.environ.get('NODE_BW_NUM','1'))
+DEPLOY_PID_FILE = os.environ.get('DEPLOY_PID_FILE','/var/run/ipes_deploy.pid')
+# 等 Phase B 完整部署进程结束（8~20 分钟），最长 25 分钟；避免与它抢 stateflow
+WAIT_DEPLOY_SEC = int(os.environ.get('REPAIR_WAIT_DEPLOY','1500'))
+# 等节点注册 + 76hex 业务SN 就绪，最长 30 分钟；SN 只在容器起来后才有
+WAIT_READY_SEC = int(os.environ.get('REPAIR_WAIT_READY','1800'))
 
 CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode = ssl.CERT_NONE
 
@@ -394,27 +399,61 @@ def tag_ok(ni, sn):
     tags = ni.get('business_tags') or []
     return bool(tags) and any(t.get('hostName') == sn for t in tags)
 
-def do_bind(node_id, sn):
-    log(f"为本机节点 {node_id} 补绑业务 {BUSINESS_ID}")
-    for stage in ['configured','configured']:
-        code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": stage}, "POST")
-        log(f"  -> {stage}: HTTP {code} {txt[:120]}")
+def do_bind(node_id, sn, pubip, local_nid, max_try=6):
+    for attempt in range(1, max_try + 1):
+        log(f"为本机节点 {node_id} 补绑业务 {BUSINESS_ID}（第 {attempt}/{max_try} 次）")
+        # 1) 先降到 configured（平台规则：inService/waitAudit 下 updateEdgeNominalInfo 返 code:7，必须先降）
+        for _ in range(2):
+            code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "configured", "hostname": sn or ""}, "POST")
+            log(f"  -> configured: HTTP {code} {txt[:120]}")
+            time.sleep(1)
+        # 2) 写 nodeInfo（唯一写通道）
+        body = {
+            "nodeId": node_id, "province": PROVINCE or "浙江", "city": CITY or "杭州",
+            "isp": ISP, "natType": NODE_NAT_TYPE, "resourceType": NODE_RESOURCE_TYPE,
+            "dialType": NODE_DIAL_TYPE, "singleIpRadio": NODE_SINGLE_IP_RADIO,
+            "usbw": NODE_USBW, "bwNum": NODE_BW_NUM, "transMode": 0,
+            "transModeStr": "cm:0,ct:0,cu:0", "transProvRate": 0, "isTransProv": True,
+            "isIPv6Schedule": False, "isCrossNetwork": False, "crossNetworkIsp": None,
+            "vendorSuggestCustomers": BUSINESS_ID
+        }
+        code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
+        log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
         time.sleep(1)
-    body = {
-        "nodeId": node_id, "province": PROVINCE or "浙江", "city": CITY or "杭州",
-        "isp": ISP, "natType": NODE_NAT_TYPE, "resourceType": NODE_RESOURCE_TYPE,
-        "dialType": NODE_DIAL_TYPE, "singleIpRadio": NODE_SINGLE_IP_RADIO,
-        "usbw": NODE_USBW, "bwNum": NODE_BW_NUM, "transMode": 0,
-        "transModeStr": "cm:0,ct:0,cu:0", "transProvRate": 0, "isTransProv": True,
-        "isIPv6Schedule": False, "isCrossNetwork": False, "crossNetworkIsp": None,
-        "vendorSuggestCustomers": BUSINESS_ID
-    }
-    code, txt = admin_call("/api/edgeNode/updateEdgeNominalInfo", body, "POST")
-    log(f"  -> updateEdgeNominalInfo: HTTP {code} {txt[:120]}")
-    time.sleep(1)
-    # ★ hostname 必须是 76hex 真业务SN（写后台 hostName/业务标签），传 UUID 会毁标签
-    code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
-    log(f"  -> inService: HTTP {code} {txt[:120]}")
+        # 3) 升回服务中，携带真 76hex SN（hostname 绝不能用 UUID/空串，否则后台写占位符毁标签）
+        code, txt = admin_call("/api/edgeNode/stateflow", {"nodes": [node_id], "stage": "inService", "hostname": sn or ""}, "POST")
+        log(f"  -> inService: HTTP {code} {txt[:120]}")
+        time.sleep(3)
+        ni = pick_node(pubip, local_nid)
+        if ni and is_bound(ni) and (not sn or tag_ok(ni, sn)):
+            log(f"[OK] 修复成功（第 {attempt} 次）")
+            return True
+        time.sleep(5)
+    log("[ERROR] 多次重试仍未达标")
+    return False
+
+def deploy_still_running():
+    # Phase B 完整部署（ipes_full.sh）进程是否还在；不在则视为部署结束
+    try:
+        pid = int(open(DEPLOY_PID_FILE).read().strip())
+    except Exception:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+def wait_for(predicate, total_sec, step_sec, label):
+    waited = 0
+    while waited < total_sec:
+        if predicate():
+            return True
+        if waited % 60 == 0:
+            log(f"等待{label}... ({waited}/{total_sec}s)")
+        time.sleep(step_sec)
+        waited += step_sec
+    return predicate()
 
 def main():
     pubip = get_public_ip()
@@ -422,29 +461,39 @@ def main():
     log(f"本机公网 IP: {pubip}")
     local_nid = get_local_node_id()
     log(f"本机 device_code(nodeID): {local_nid or '未读到，走IP兜底'}")
+
+    # 1) 等 Phase B 完整部署进程结束（避免与它抢 stateflow；部署 8~20 分钟）
+    if wait_for(lambda: not deploy_still_running(), WAIT_DEPLOY_SEC, 5, "部署进程结束"):
+        log("部署进程已结束，进入绑定核验")
+    else:
+        log("[警告] 等待部署进程超时，仍继续尝试绑定核验")
+
+    # 2) 等节点注册 + 76hex 业务SN 就绪（SN 只在容器起来后才有）
     sn = None
     ni = None
-    for i in range(48):
+    deadline = time.time() + WAIT_READY_SEC
+    while time.time() < deadline:
         if not sn:
             sn = get_real_sn()
             if sn: log(f"本机 76hex 业务SN: {sn[:20]}...{sn[-12:]}")
         ni = pick_node(pubip, local_nid)
         if ni and sn: break
-        log(f"等待节点注册/SN就绪... ({i+1}/48)"); time.sleep(10)
-    if not ni: log("[ERROR] 8 分钟未找到节点，放弃"); sys.exit(1)
+        time.sleep(10)
+    # ★ 关键：SN 缺失绝不流转——否则后台写占位符 ZHOUYI_XIAODU 毁掉业务标签
+    if not ni or not sn:
+        log(f"[ERROR] 超时仍未就绪（node={'有' if ni else '无'} sn={'有' if sn else '无'}），放弃（不绑定空 SN）")
+        sys.exit(1)
+
     info = ni.get('nodeInfo') or {}
     log(f"节点: {ni.get('nodeID')} stage={ni.get('stage')} status={ni.get('status')} nodeInfo.vendor={info.get('vendorSuggestCustomers')} usbw={info.get('usbw')}")
     if is_bound(ni) and (not sn or tag_ok(ni, sn)):
         log("[OK] 已绑定且业务标签正确，无需修复"); sys.exit(0)
-    do_bind(ni.get('nodeID'), sn or "")
-    time.sleep(3)
-    ni = pick_node(pubip, local_nid)
-    if is_bound(ni) and (not sn or tag_ok(ni, sn)):
-        log("[OK] 修复成功"); sys.exit(0)
-    else: log("[ERROR] 修复后仍未达标"); sys.exit(1)
+    ok = do_bind(ni.get('nodeID'), sn, pubip, local_nid)
+    sys.exit(0 if ok else 1)
 
 if __name__ == '__main__':
     main()
+
 PY
 
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \

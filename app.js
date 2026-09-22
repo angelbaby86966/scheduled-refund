@@ -303,12 +303,11 @@ var REGION_COLORS = {
 };
 
 // ====== 地区启用 / 禁用开关（2026-09-19 新增）======
-// 需求：把「河源 / 武汉 / 乌兰察布」三个地区从页面与所有功能里暂时摘掉，
-// 但**代码一律保留**（名字、配色都在上面的 REGION_INFO / REGION_COLORS 注册表里），
-// 需要时只要在页面「⚙️ 地区管理」里勾一下就能加回来，不用改代码。
+// 需求：保留全量 9 个地区在页面与所有功能中可用；若后续需要临时摘掉某些地区，
+// 把对应 regionId 放进 REGION_DISABLED_DEFAULT 即可，页面「⚙️ 地区管理」里也可切换。
 // 实现：全量注册表不动，只维护一个「禁用名单」；所有需要遍历地区的代码统一走
 //       activeRegionIds()，被禁用的地区就不会参与任何展示、请求与批量操作。
-var REGION_DISABLED_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu']; // 默认禁用的三个地区
+var REGION_DISABLED_DEFAULT = []; // 默认不禁用任何地区
 var REGION_DISABLED_KEY = 'wb_region_disabled_v1';
 
 function getDisabledRegions() {

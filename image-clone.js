@@ -404,6 +404,26 @@
     return n;
   }
 
+  // 【v18r25】按名字查自定义镜像（带 ImageType 过滤 + 不带过滤双查，防 SWAS 过滤差异漏查）
+  async function icFindImageByName(region, name) {
+    if (!name) return null;
+    try {
+      var r = await AliyunClient.callCentralApi('ListImages', { RegionId: region, ImageType: 'custom' });
+      var hit = icParseImgs(r).filter(function (im) { return im.ImageName === name; })[0];
+      if (hit) return hit;
+    } catch (e) { /* 忽略，走兜底 */ }
+    try {
+      var r2 = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
+      return icParseImgs(r2).filter(function (im) { return im.ImageName === name; })[0] || null;
+    } catch (e2) { return null; }
+  }
+
+  // 【v18r25】生成唯一镜像名：原名-2 / 原名-3 ...（重名时自动换名，不再中断整个流程）
+  function icUniqueImageName(base, n) {
+    var stem = String(base || 'img').replace(/-\d+$/, '');
+    return icSanitizeImageName(stem + '-' + (n || 2));
+  }
+
   // ====== 🏆 黄金机身份保护（2026-09-07 事故后新增） ======
   // 事故：一键全流程「标准化」在黄金机上 rm -f /etc/.mac 并随机重生 → 黄金机以新身份上线，原设备掉线"消失"。
   // 规则：黄金机的 device_code 一经记录永不改变；克隆/绑定流程跳过黄金机；全流程结束后自动校验并恢复身份。
@@ -653,6 +673,33 @@
     throw lastErr || new Error('CreateOrder 调用失败');
   }
 
+  /**
+   * 【v18r26】逐台串行下单 —— 保证「填几台就生成几台」
+   *
+   * 背景（2026-09-11 用户反馈「要买 2 台，为啥只买了一台」）：
+   *   排查结论（实测三组对照）：
+   *     ① 直连阿里云 SWAS CreateOrder + Commodity.Amount=2 → 订单 Quantity=2（80 元）✅ 接口本身支持多台
+   *     ② 走线上 Supabase 代理 createOrder + Amount=2   → 订单 Quantity=2（80 元）✅ 代理也正常
+   *     ③ 用户实际生成的订单（OrderId 2003552603620989）→ Quantity=1（40 元）❌ 数量在链路上丢了
+   *   即：接口与代理都没问题，但用户实际链路（旧版前端缓存 / 旧版代理）会把 Commodity.Amount 吞掉，
+   *   后端按默认 Amount=1 下单。
+   *
+   *   由于前端无法回查订单数量做校验（代理未提供 QueryOrders/GetOrderDetail 接口），
+   *   唯一 100% 可控的办法就是「逐台调用、每单只买 1 台」：
+   *   无论 Amount 参数是否生效，最终台数都严格等于用户填写数量。
+   * 代价：生成 amount 个待支付订单 —— 阿里云「费用中心→订单管理」可勾选后批量支付。
+   */
+  async function icCreateOrdersOneByOne(region, imageId, planId, amount, period, onProgress) {
+    var orderIds = [];
+    for (var i = 0; i < amount; i++) {
+      if (i > 0) await icSleep(400);   // 轻微间隔，避免触发 SWAS 限流
+      var one = await icCreateOrder(region, imageId, planId, 1, period);
+      orderIds.push(one.OrderId);
+      if (onProgress) { try { onProgress(i + 1, amount, one.OrderId); } catch (e) { /* 忽略回调异常 */ } }
+    }
+    return orderIds;
+  }
+
   /** [合并自本地旧版] 删除当前选中的自定义镜像（无参包装，供按钮直接调用） */
   async function icDeleteSelectedImage() {
     var sel = document.getElementById('icImageSelect');
@@ -702,10 +749,18 @@
                                     : '下单已提交，请到阿里云控制台查看实例');
       } else {
         // 不扣费路径：SWAS CreateOrder，只生成待支付订单
-        var ord = await icCreateOrder(region, imageId, planId, amount, period);
-        st.innerHTML = '✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）';
-        res.innerHTML = '📋 订单号：<code>' + ord.OrderId + '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。';
-        icLog('[镜像克隆] 已生成待支付订单，镜像=' + imageId + ' 订单=' + ord.OrderId, 'success');
+        // 【v18r26】改为逐台下单，保证台数 == 用户填写数量（详见 icCreateOrdersOneByOne 注释）
+        st.innerHTML = '⏳ 正在逐台生成待支付订单（目标 ' + amount + ' 台）...';
+        var orderIds = await icCreateOrdersOneByOne(region, imageId, planId, amount, period,
+          function (n, total, oid) {
+            st.innerHTML = '⏳ 下单进度 <b>' + n + '/' + total + '</b>（最新订单 ' + oid + '）';
+          });
+        var shown = orderIds.slice(0, 10).join('</code><br><code>') +
+          (orderIds.length > 10 ? '</code><br>… 其余 ' + (orderIds.length - 10) + ' 个见控制台订单管理' : '');
+        st.innerHTML = '✅ 已生成 <b>' + orderIds.length + '</b> 个待支付订单（每单 1 台，<b style="color:#389e0d;">不扣费</b>）';
+        res.innerHTML = '📋 订单号（共 ' + orderIds.length + ' 个）：<br><code>' + shown + '</code><br>' +
+          '请到阿里云控制台「费用中心 - 订单管理」把这些订单<b>勾选后一起支付</b>，支付完成再回来绑定。';
+        icLog('[镜像克隆] 已生成 ' + orderIds.length + ' 个待支付订单，镜像=' + imageId + ' 订单=' + orderIds.join(','), 'success');
         return;
       }
       if (!ids.length) return;
@@ -803,6 +858,14 @@
 '# 双保险：再清一次节点身份',
 'rm -rf "$IPES_DATA_DIR"/* 2>/dev/null || true',
 '',
+'# 🌐 清理镜像继承的黄金机公网 IP 写死（避免克隆机向 admin 上报黄金机 IP，导致两台节点显示同一公网IP）',
+'GOLDEN_WAN_IP="118.178.193.66"',
+'for cfg in $(grep -rln "$GOLDEN_WAN_IP" /etc/ipescache /etc/ipes* /usr/local/edge /usr/local/edge_zycloud /opt/zycloud 2>/dev/null); do',
+'  sed -i "s|$GOLDEN_WAN_IP||g" "$cfg"',
+'  echo "  [firstboot] 已清理写死IP: $cfg"',
+'done',
+'# 容器内配置若也有写死（IPES 跑在 docker 容器里），启动后再清一遍',
+'',
 '# 启动缓存服务',
 'systemctl enable "$IPES_SERVICE"',
 'systemctl start "$IPES_SERVICE"',
@@ -866,36 +929,225 @@
     return new Promise(function (res) { setTimeout(res, ms); });
   }
 
+  // ============ 【v18r25 性能/健壮性优化】全流程并发锁 + 可中断等待 ============
+  // 背景（2026-09-11 用户反馈"太慢了，而且还容易卡住"）：
+  //   1) 标准化后硬等 120 秒；2) 镜像轮询 90×5s 且中断后仍在空转；3) 重复点击按钮 → 两个流程并发 → 镜像重名中断。
+  var icFlowRunning = false;       // 并发锁：同一时刻只允许一个全流程
+  var icFlowAbort = false;         // 中断标志：用户在流程中点按钮置真，各等待点会立即退出
+  var icFlowStartedAt = 0;
+  var IC_ABORT_MSG = '__IC_ABORT__';
+  function icFlowElapsed() { return Math.round((Date.now() - icFlowStartedAt) / 1000); }
+  // 全流程按钮状态：运行中变"⛔ 中断当前流程（已 N 秒）"，让用户看得见进度、随时能停
+  var icFlowBtnTimer = null;
+  function icSetFlowBtn(running, stopping) {
+    var btn = document.getElementById('icFlowBtn');
+    if (icFlowBtnTimer) { clearInterval(icFlowBtnTimer); icFlowBtnTimer = null; }
+    if (!btn) return;
+    if (!running) {
+      btn.textContent = stopping ? '⛔ 正在中断...' : '🚀 一键全流程（标准化→打镜像→开通，全自动）';
+      btn.style.background = '#cf1322';
+      return;
+    }
+    btn.style.background = '#d46b08';
+    var tick = function () { btn.textContent = '⛔ 中断当前流程（已 ' + icFlowElapsed() + ' 秒）'; };
+    tick();
+    icFlowBtnTimer = setInterval(tick, 1000);
+  }
+  function icAbortCheck() { if (icFlowAbort) throw new Error(IC_ABORT_MSG); }
+  // 可中断 sleep：把长等待切成 250ms 小片，任何时刻都能响应"中断"
+  async function icSleepIC(ms) {
+    var dl = Date.now() + ms;
+    while (Date.now() < dl) {
+      if (icFlowAbort) throw new Error(IC_ABORT_MSG);
+      await icSleep(Math.min(250, Math.max(1, dl - Date.now())));
+    }
+  }
+  // 从 DescribeCommandInvocations 响应取出第一条 InvokeInstances 记录
+  function icPickInvocation(out) {
+    var invs = (out && (out.CommandInvocations || out.commandInvocations || [])) || [];
+    if (!Array.isArray(invs) || !invs.length) return null;
+    var iis = invs[0].InvokeInstances || invs[0].invocationInstances || invs[0].InvocationInstances || [];
+    if (!Array.isArray(iis) || !iis.length) return null;
+    return iis[0];
+  }
+  // 轮询云助手命令是否执行完成（替代"硬等 N 秒"，快的话十几秒就能继续）
+  async function icWaitInvokeDone(region, invokeId, maxMs) {
+    var dl = Date.now() + (maxMs || 180000);
+    var last = '';
+    while (Date.now() < dl) {
+      if (icFlowAbort) throw new Error(IC_ABORT_MSG);
+      await icSleep(1500);
+      try {
+        var out = await AliyunClient.callSwasApi(region, 'DescribeCommandInvocations', {
+          RegionId: region, InvokeId: invokeId, IncludeOutput: true, PageSize: 1
+        });
+        var rec = icPickInvocation(out);
+        if (!rec) continue;
+        var stt = String(rec.InvocationStatus || '').toLowerCase();
+        last = stt;
+        if (stt === 'success' || stt === 'failed' || stt === 'stopped') {
+          return { status: stt, output: (rec.Output || '').trim() };
+        }
+      } catch (e) { /* 网络抖动：继续轮询 */ }
+    }
+    return { status: 'timeout', output: last };
+  }
+
   // ============ 舟翼云 admin 提交参数默认值（test.sh 第 1024 行硬编码）============
   // 这些值是 admin 后端业务参数，对齐 test.sh 行为；用户在「绑定舟翼云」面板无需填写
   var IC_DEFAULT_VENDOR_CUSTOMERS = 41;     // vendorSuggestCustomers
-  var IC_DEFAULT_TRANS_MODE = 1;            // transMode
-  var IC_DEFAULT_IS_CROSS_NETWORK = false;
+  // 【v18r30】transMode 1 → 0：对齐黄金机后台实际值。
+  //   背景（2026-09-11）：3 台克隆机按旧常量写成 1，与黄金机(0) 不一致，事后手工走
+  //   「降级→改→升回」才对齐。改常量后新克隆机开出来即为 0，不再出现该差异。
+  var IC_DEFAULT_TRANS_MODE = 0;            // transMode
+  var IC_DEFAULT_IS_CROSS_NETWORK = false;  // 是否异网：非异网（截图一致）
   var IC_DEFAULT_CROSS_NETWORK_ISP = null;
-  var IC_DEFAULT_IS_TRANS_PROV = false;
-  var IC_DEFAULT_USBW = 200;
-  var IC_DEFAULT_BW_NUM = 1;
+  var IC_DEFAULT_IS_TRANS_PROV = true;      // 跨省调度：跨省（2026-09-10 用户按截图改 true，test.sh 原 false 不再生效）
+  var IC_DEFAULT_USBW = 200;                // 单条上行：200 Mbps
+  var IC_DEFAULT_BW_NUM = 1;                // 线路数量：1
+  // ============ admin「编辑」页提交接口 + 截图额外字段（test.sh + 用户 2026-09-10 截图写死）============
+  var IC_DEFAULT_NOMINAL_PATH = '/api/edgeNode/updateEdgeNominalInfo';  // 提交带宽/业务接口（test.sh 1024 行实测此路径，非 updateEdgeRemark）
+  var IC_DEFAULT_EXPECTED_BIZ = '自研Q2';    // 期望业务（截图：自研Q2；admin 字段名 expectedBiz，见 icQueryEdgeDetail 解析）
+  var IC_DEFAULT_IP_SCHEDULE_TYPE = 0;       // IP调度：根据插件V4和V6是否存在来调度（截图；字段名暂按 ipScheduleType，待 admin 实际回包确认）
+  // ============ 状态流转固定值（用户 2026-09-10 写死；2026-09-11 r27 用户点名纠正接口）============
+  var IC_DEFAULT_DEPLOY_STATUS = '服务中';   // 状态流转目标：服务中
+  // 【v18r27 关键纠正｜实证来源：反查 admin 前端 bundle】
+  //   状态流转的真实接口 = POST /api/edgeNode/stateflow
+  //     证据1 edge.C3aujRsP.js：`c=d=>e({url:"/edgeNode/stateflow",method:"post",data:d})`
+  //     证据2 edge.BLOTNJY5.js「状态流转」弹窗模板：设备ID→nodes、业务ID→**hostname**、流转状态→stage
+  //           stage 取值：''=请选择 / 'configured'=待配置 / 'inService'=服务中
+  //   旧用的 /api/bigDeployLog/directDeployment 其实是后台「强制提交」/「再次提交」按钮：
+  //     `R({ nodeId:e.nodeID, isFormat:l })` —— body 只有 {nodeId,isFormat}，内部会跑
+  //     FormatQiYIInstallCodeForEcache 生成爱奇艺安装码 → 节点没有「业务线运营商」就报“未知运营商”。
+  //     （r22 往它 body 里加 vendorCustomer:41 属于误判，该接口不吃这个字段。）
+  //   ⚠️ stateflow 的「业务ID」在请求体里就叫 hostname，不是笔误，是后台约定。
+  var IC_DEFAULT_STATEFLOW_PATH = '/api/edgeNode/stateflow';
+  var IC_DEFAULT_STATEFLOW_STAGE = 'inService';
+  // 仅当 stateflow 路由缺失（HTTP 404/405）时的兜底老接口，正常流程不再使用
+  var IC_DEFAULT_DEPLOY_PATH = '/api/bigDeployLog/directDeployment';
 
   // ============ admin 后端 HMAC-SHA256 鉴权（test.sh 移植）============
   // test.sh 的签名逻辑：sign_str = "ak:timestamp"，sign = HMAC-SHA256(sk, sign_str)，hex 小写
   // 前端用 Web Crypto API 实现（浏览器原生，无依赖）
-  // 【v18r17 修复】HMAC 三件套 getter：优先读 localStorage（icInit 已 input 监听自动写入 key wb_zyy_admin_appid/ak/sk），
-  //                 DOM 仅作回填入口与兜底。
-  // 根因：旧版只读 DOM 输入框 value，而 SK/AK 经常通过粘贴/程序填入，输入框 value 看似有值但状态流转时 getter 取不到——直接走 x-token 兜底 → CORS 失败 + supabase 区域出口屏蔽 → 节点卡"待配置"。
-  // 修复后：填一次永远记住，刷新/换浏览器/重启页面都不用再填。
+  // 【v18r18 固化】HMAC 三件套 getter 优先级：localStorage > DOM > 硬编码常量。
+  // 用户明确要求"写死、不让填、以后不许改"——2026-09-10 锁定，任何人（包括 AI）不得改这三件套值。
+  // 硬编码值做轻混淆（字符数组 + atob），仅挡"路过扒源码"，挡不住专门逆向，部署在公网仍视为明文风险。
+  // ⚠️ 安全：SK 在公网前端代码里等于公开，强烈建议去 admin.zhouyi.top 后台轮换 SK 后更新此处常量。
+  var IC_HMAC_APPID = 'fg5c21pbzfgu6y2s2yqvanvr6uv99drq';
+  var IC_HMAC_AK    = 'ja3io44nq2m7hx63fjkpio7s422aksel';
+  var IC_HMAC_SK    = String.fromCharCode(121,100,68,71,117,103,117,90,56,67,79,99,74,78,52,90,116,108,51,76,115,105,99,51,90,48,48,122,71,69,97,110,105,56,102,89,79,80,105,89,107,50,88,88,67,117,88,81,49,65,72,121,121,55,69,49,115,103,86,52,100,121,68,84);
   function icAdminAppId() {
     try { var c = localStorage.getItem('wb_zyy_admin_appid'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminAppId'); return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminAppId'); if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_APPID;
   }
   function icAdminAk() {
     try { var c = localStorage.getItem('wb_zyy_admin_ak'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminAk');   return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminAk');   if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_AK;
   }
   function icAdminSk() {
     try { var c = localStorage.getItem('wb_zyy_admin_sk'); if (c && c.trim()) return c.trim(); } catch (e) {}
-    var el = document.getElementById('icBindAdminSk');   return el ? (el.value || '').trim() : '';
+    var el = document.getElementById('icBindAdminSk');   if (el && el.value && el.value.trim()) return el.value.trim();
+    return IC_HMAC_SK;
   }
   function icHasAdminHmac() { return !!(icAdminAppId() && icAdminAk() && icAdminSk()); }
+
+  // 【v18r27】状态流转统一入口（后台真实接口 = stateflow）
+  //   body = { nodes:[nodeId], hostname:<业务ID=IPES SN>, stage:'inService' }
+  //   ⚠️「业务ID」在后台的字段名就叫 hostname（见 admin 前端 edge 页状态流转弹窗模板）
+  //   call 可传调用方自己的 adminFn（保持各自的鉴权通道不变）
+  //   仅当 stateflow 路由缺失（HTTP 404/405）才兜底老的 directDeployment（body={nodeId,isFormat:false}）
+  async function icStateFlow(nodeId, businessId, call) {
+    var fn = call || icAdminCall;
+    try {
+      return await fn('POST', IC_DEFAULT_STATEFLOW_PATH, {
+        nodes: [nodeId],
+        hostname: businessId,
+        stage: IC_DEFAULT_STATEFLOW_STAGE,
+      });
+    } catch (e) {
+      var msg = String((e && e.message) || '');
+      var routeMissing = /HTTP\s*(404|405)/.test(msg) || /404 page not found|no route|not found/i.test(msg);
+      if (!routeMissing) throw e;
+      icLog('[镜像克隆] stateflow 路由缺失，回退 directDeployment 兜底', 'warn');
+      return await fn('POST', IC_DEFAULT_DEPLOY_PATH, { nodeId: nodeId, isFormat: false });
+    }
+  }
+
+  // ============ 【v18r29】建设带宽提交：状态降级 + 读回校验 + 自动重试 ============
+  // 实证根因（2026-09-11，3 台克隆机 usbw=40 事故复盘）：
+  //   ① updateEdgeNominalInfo 对 inService(服务中) / waitAudit(交付中) 节点**一律拒绝**：
+  //        code:7「设备处于服务中或交付中状态，不允许修改设备信息」
+  //      → 必须先 stateflow 回到 configured(待配置) 才能改建设带宽，改完再流回 inService。
+  //   ② 「接口返回 code:0 但数据根本没落库」确实存在（同族接口 PUT /edgeNode/bw 实测如此）
+  //      → 提交后**必须读回 nominalInfo.usbw 校验**，不符就重试，不能只看返回码。
+  // 返回 { ok, usbw, attempts, unverified }
+  //   ok=false  → 确实读回 usbw 与期望不符（调用方应中止流转，避免"带宽没写进去却流转成功"）
+  //   unverified → 读回通道本身异常（查询失败），属于"无法校验"，放行但告警，避免误杀
+  function icSleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  async function icAdminFindNode(fn, nodeId) {
+    // GET 不能带 body（浏览器规范禁止），query 直接拼进 path
+    var res = await fn('GET', '/api/edgeNode/findEdgeNode?nodeId=' + encodeURIComponent(nodeId), null);
+    return (res && res.data) || null;
+  }
+  async function icSubmitNominalVerified(fn, m, cfg, say) {
+    say = say || function () {};
+    var want = Number(cfg.usbw);
+    var attempts = 3, lastGot = null, mismatch = 0, verifyErr = 0;
+
+    for (var i = 1; i <= attempts; i++) {
+      // ① 前置降级：服务中/交付中不允许改建设带宽 → 先 stateflow 回「待配置」
+      try {
+        var d0 = await icAdminFindNode(fn, m.nodeId);
+        var st0 = d0 && d0.stage;
+        if (st0 === 'inService' || st0 === 'waitAudit') {
+          say('↺ 节点当前为「' + (st0 === 'inService' ? '服务中' : '交付中') + '」，先降级到「待配置」再改建设带宽', 'warn');
+          await fn('POST', IC_DEFAULT_STATEFLOW_PATH, {
+            nodes: [m.nodeId], hostname: m.businessId || '', stage: 'configured'
+          });
+          await icSleep(1200);
+        }
+      } catch (e) { /* 查询/降级失败不阻断，按原流程继续提交 */ }
+
+      // ② 提交建设带宽/业务（参数保持写死的 IC_DEFAULT_* 语义不变）
+      await fn('POST', IC_DEFAULT_NOMINAL_PATH, {
+        nodeId: m.nodeId,
+        businessId: m.businessId,
+        vendorSuggestCustomers: cfg.vendorSuggestCustomers,
+        transMode: cfg.transMode,
+        isCrossNetwork: cfg.isCrossNetwork,
+        crossNetworkIsp: cfg.crossNetworkIsp,
+        isTransProv: cfg.isTransProv,
+        usbw: cfg.usbw,
+        bwNum: cfg.bwNum,
+        expectedBiz: IC_DEFAULT_EXPECTED_BIZ,
+        ipScheduleType: IC_DEFAULT_IP_SCHEDULE_TYPE,
+      });
+
+      // ③ 读回校验：code:0 ≠ 已落库
+      await icSleep(1500);
+      try {
+        var d1 = await icAdminFindNode(fn, m.nodeId);
+        var ni = (d1 && d1.nodeInfo) || {};
+        lastGot = ni.usbw;
+        if (Number(ni.usbw) === want) {
+          say('✅ 建设带宽已写入并校验通过：usbw=' + ni.usbw + '（第 ' + i + ' 次提交）', 'ok');
+          return { ok: true, usbw: ni.usbw, attempts: i };
+        }
+        mismatch++;
+        say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回 usbw=' + ni.usbw + '（期望 ' + want + '）' +
+          (i < attempts ? '，稍后重试…' : '，仍未生效'), 'warn');
+      } catch (e) {
+        verifyErr++;
+        say('⚠️ 第 ' + i + '/' + attempts + ' 次提交后读回校验失败：' + e.message +
+          (i < attempts ? '，稍后重试…' : ''), 'warn');
+      }
+      if (i < attempts) await icSleep(1500);
+    }
+    // 只有"确实读到过不符"才算失败；全程读回异常 → 视为无法校验，放行
+    return { ok: (mismatch === 0), unverified: (mismatch === 0 && verifyErr > 0), usbw: lastGot, attempts: attempts };
+  }
 
   async function icAdminHmacSign(ak, sk, timestamp) {
     var signStr = ak + ':' + timestamp;
@@ -967,14 +1219,18 @@
         return await icAdminCallHmac(method, path, body);
       } catch (e) {
         hmacErr = e;
-        // 【v18r16】HMAC 通道失败时**直接抛出**，不要 fallback。
-        // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect error 110），
-        // 浏览器直连 admin 又被 CORS 拒（Failed to fetch），fallback 链走不到 admin。
-        // HMAC 是 admin 后端期望的机器对机器方式（参考 ipes_auto_deploy.sh + transition_to_service.sh），
-        // HMAC 拿到 code=7 是真业务拒绝（path 错 / 该接口只认 JWT）→ 立即告知，不被 fallback 链路吞掉。
+        // 【v18r27 修正 2026-09-21】实测 admin.zhouyi.top gin-vue-admin 后端**只认 x-token JWT**，
+        // HMAC 三件套对 stateflow / getEdgeNodeList 等接口一律返 code:7「未登录或非法访问」（已用真实请求验证）。
+        // 因此 HMAC 拿到 code=7 是「鉴权被拒」而非「真的路径错」——必须转 x-token 通道重试，
+        // 否则节点永远卡在「待配置」、流转不到「服务中」。
         if (!icIsNetworkErr(e)) {
-          // 业务错（含 code=7）→ 不 fallback，直接抛
-          throw e;
+          if (hmacErr && hmacErr.isAuthErr) {
+            // 鉴权被拒：不硬抛，继续走下方 x-token 通道兜底（浏览器直连 → supabase 转发）
+            try { icLog('[image-clone] ⚠️ HMAC 被后台拒绝（code=' + (hmacErr.adminCode || '?') + '，该接口只认 x-token），转 x-token 通道重试', 'warn'); } catch (e3) {}
+          } else {
+            // 其它业务错（参数错 / 节点不存在等）→ 直接抛，不被 fallback 吞掉
+            throw e;
+          }
         }
         // 仅网络/CORS 失败才继续往下走 fallback（但目前 supabase 直连 admin 也不通，几乎无解）
       }
@@ -1000,7 +1256,15 @@
       });
       var directJson = null;
       try { directJson = await directResp.json(); } catch (e) { /* 非 JSON 也继续 */ }
-      // 业务错（HTTP 4xx 业务码）→ 直接抛，不 fallback（兜底也救不了）
+      // 【一致性修复 2026-09-21】x-token 直连也要校验业务码：后台常以 HTTP 200 + {code:N} 返回业务结果，
+      // 否则 code:7（Token 失效）会被当成"成功"，节点仍卡在「待配置」。
+      if (directJson && typeof directJson === 'object' && directJson.code !== undefined && directJson.code !== 0) {
+        var e7 = new Error('admin 业务码 ' + directJson.code + '：' + (directJson.msg || JSON.stringify(directJson).slice(0, 200)));
+        e7.adminCode = directJson.code;
+        e7.isAuthErr = (directJson.code === 7 || /未登录|非法访问|unauthorized|未授权/i.test(String(directJson.msg || '')));
+        throw e7;
+      }
+      // HTTP 4xx 业务码 → 直接抛，不 fallback（兜底也救不了）
       if (directResp.status >= 400 && directResp.status < 500) {
         throw new Error('HTTP ' + directResp.status + (directJson ? ' · ' + (directJson.msg || directJson.message || JSON.stringify(directJson).slice(0, 200)) : ''));
       }
@@ -1011,7 +1275,7 @@
       // fallback 成功时日志（仅一次提示）
       if (hmacUsed && !icAdminCall._fallbackWarned) {
         icAdminCall._fallbackWarned = true;
-        try { icLog('[image-clone] ⚠️ HMAC 通道不可用（' + hmacErr.message + '），已自动回退到浏览器直连 admin（本会话仅提示一次）', 'warn'); } catch (e3) {}
+        try { icLog('[image-clone] ⚠️ HMAC 被后台拒绝（code=' + (hmacErr && hmacErr.adminCode || '?') + '），已自动回退到 x-token 通道（本会话仅提示一次）', 'warn'); } catch (e3) {}
       }
       return directJson;
     } catch (e) {
@@ -1078,6 +1342,40 @@
     return imgs;
   }
 
+  // 🔁 舟翼云设备注册命令生成器（带 code:-20「设备联网异常」重试）
+  // 背景（2026-09-11 上机实证）：克隆机身份刚被重置就发起注册，平台必然回 `code:-20 设备联网异常`；
+  //   而 zyy_init_max.sh 自带的 3 次重试只间隔 2 秒 → 3 次全失败后直接退出 →
+  //   节点 isp / province / city / channel_id / ownerId 全空 → 后台格式化安装码报「未知运营商」。
+  //   黄金机自己的历史日志给出标准样本：21:57:24 首次 -20 失败 → 21:58:54（90 秒后）重试即成功。
+  // 策略：先等 preWait 秒让设备在舟翼云上线；每轮跑完校验 /usr/local/edge/registration_info 是否出现
+  //   「注册状态: 成功」，未成功则等 gap 秒重试，最多 attempts 轮（默认 6 轮 × 40s ≈ 3.5 分钟窗口）。
+  function icZyyRegisterCmd(zAk, zSk, zIsp, opts) {
+    opts = opts || {};
+    var attempts = opts.attempts || 6;
+    var gap = opts.gap || 40;
+    var preWait = opts.preWait || 0;
+    if (!zAk || !zSk) return 'echo "未配置舟翼云 ak/sk，跳过自动绑定"';
+    var url = 'https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh';
+    var runOnce = 'curl -s ' + url + ' | bash -s -- --ak ' + zAk + ' --sk ' + zSk + ' --isp ' + (zIsp || '电信') + ' || true';
+    var seq = [];
+    for (var i = 1; i <= attempts; i++) seq.push(i);
+    return [
+      '# 🔁 舟翼云设备注册（含 -20「设备联网异常」重试，等设备上线后再注册）',
+      'ZYY_REG=FAIL',
+      preWait > 0
+        ? 'echo "[zyy] 等待 ' + preWait + 's 让新身份在舟翼云上线后再注册..."; sleep ' + preWait
+        : 'true',
+      'for _zyy_i in ' + seq.join(' ') + '; do',
+      '  echo "[zyy] 设备注册尝试 $_zyy_i/' + attempts + ' ..."',
+      '  ' + runOnce,
+      '  if grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then ZYY_REG=OK; echo "[zyy] ✅ 舟翼云注册成功"; break; fi',
+      '  echo "[zyy] ⚠️ 注册未成功（多为 code:-20 设备联网异常），' + gap + 's 后重试"',
+      '  if [ "$_zyy_i" -lt ' + attempts + ' ]; then sleep ' + gap + '; fi',
+      'done',
+      'echo "[zyy] 舟翼云注册最终结果: $ZYY_REG"'
+    ].join('\n');
+  }
+
   // 生成黄金主机标准化 bash 脚本
   function icBuildStandardizeScript() {
     // 读取已记住的舟翼云凭证，固化进首启脚本实现克隆机开机自动绑定
@@ -1109,14 +1407,13 @@
       'echo "[2/8] 停止 $IPES_SERVICE_NAME ..."',
       'systemctl stop "$IPES_SERVICE_NAME" 2>/dev/null || systemctl stop "$IPES_SERVICE" 2>/dev/null || true',
       '',
-      '# 3. 自动探测数据目录',
-      'IPES_DATA_DIR=$(find / -type d -iname "*ipescache*" 2>/dev/null | head -1)',
-      'if [ -z "$IPES_DATA_DIR" ]; then IPES_DATA_DIR="/var/lib/ipescache"; mkdir -p "$IPES_DATA_DIR"; fi',
-      'echo "[3/8] 探测到数据目录: $IPES_DATA_DIR"',
+      '# 3. 真实缓存目录（2026-09-11 实测确认：IPES 真缓存在 /data/happ/happ.N/hdata/cache，不是 /var/lib/ipescache）',
+      'PCDN_CACHE_DIR="/data/happ"',
+      'echo "[3/8] 缓存目录 $PCDN_CACHE_DIR 体积: $(du -sh "$PCDN_CACHE_DIR" 2>/dev/null | awk \'{print $1}\')（正常应数十GB；若为 0 = 黄金机无缓存，打的镜像将不带缓存！）"',
       '',
-      '# 4. 只清理节点身份/令牌，保留缓存数据（克隆机要继承黄金机的缓存）',
-      'echo "[4/8] 清理节点身份/令牌（保留缓存数据）..."',
-      'find "$IPES_DATA_DIR" -maxdepth 3 -type f \\( -iname "*token*" -o -iname "*regist*" -o -iname "*node*id*" -o -iname "*auth*" -o -iname "*secret*" \\) -delete 2>/dev/null || true',
+      '# 4. 只清节点身份/令牌，【绝不删 /data/happ 缓存】（克隆机就靠它开机即带缓存）',
+      'echo "[4/8] 只清理节点身份/令牌，保留 $PCDN_CACHE_DIR 缓存 ..."',
+      'find "$PCDN_CACHE_DIR" -maxdepth 4 -type f \\( -iname "*token*" -o -iname "*regist*" -o -iname "*auth*" -o -iname "*secret*" \\) -delete 2>/dev/null || true',
       'rm -f /usr/local/edge/registration_info 2>/dev/null || true',
       'find /etc -maxdepth 3 -iname "*ipes*node*" -delete 2>/dev/null || true',
       'find /etc -maxdepth 3 -iname "*ipes*.token" -delete 2>/dev/null || true',
@@ -1141,6 +1438,18 @@
       '  systemctl disable ipes-firstboot 2>/dev/null || true',
       '  exit 0',
       'fi',
+      '# 📦 缓存还原（根治 v18r24）：SWAS 自定义镜像不打包 /data，标准化时已把 /data/happ 硬链接备份到 /opt/ipescache-seed，',
+      '#    这里在 IPES 启动前把种子 mv 回 /data/happ（同盘 rename，瞬间完成、不占额外空间），让克隆机开机即带缓存。',
+      'if [ -d /opt/ipescache-seed ]; then',
+      '  docker stop ipes 2>/dev/null || true',
+      '  mkdir -p /data/happ',
+      '  rm -rf /data/happ/* 2>/dev/null || true',
+      '  mv /opt/ipescache-seed/* /data/happ/ 2>/dev/null || true',
+      '  rmdir /opt/ipescache-seed 2>/dev/null || true',
+      '  echo "[firstboot] ✅ 已从缓存种子还原 /data/happ，体积: $(du -sh /data/happ 2>/dev/null | awk \'{print $1}\')"',
+      'else',
+      '  echo "[firstboot] ⚠️ 未发现 /opt/ipescache-seed —— 镜像未携带缓存（克隆机将冷启动、无继承缓存）"',
+      'fi',
       '# 克隆机首启：生成全新身份（三处同步：/etc/machine-id + /etc/.mac + /usr/local/edge_zycloud/device_code），与黄金机永不冲突',
       'rm -f /etc/machine-id /etc/.mac',
       'head -c 16 /dev/urandom | xxd -p > /etc/machine-id',
@@ -1162,9 +1471,20 @@
       'IPES_SERVICE_NAME=${IPES_SERVICE_NAME%.service}',
       'systemctl enable "$IPES_SERVICE_NAME"',
       'systemctl start "$IPES_SERVICE_NAME"',
+      '# 🌐 清理镜像继承的黄金机公网 IP 写死（避免克隆机向 admin 上报黄金机 IP，导致两台节点显示同一公网IP）',
+      'GOLDEN_WAN_IP="118.178.193.66"',
+      'for cfg in $(grep -rln "$GOLDEN_WAN_IP" /etc/ipescache /etc/ipes* /usr/local/edge /usr/local/edge_zycloud /opt/zycloud 2>/dev/null); do',
+      '  sed -i "s|$GOLDEN_WAN_IP||g" "$cfg"',
+      '  echo "  [firstboot] 已清理写死IP(宿主机): $cfg"',
+      'done',
+      '# IPES 跑在 docker 容器里时，容器内配置也可能写死，启动后清一遍并重启容器',
+      'if command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}" 2>/dev/null | grep -qw ipes; then',
+      '  docker exec ipes sh -c "grep -rln \'$GOLDEN_WAN_IP\' /etc /bin /usr/local 2>/dev/null | while read f; do sed -i \"s|$GOLDEN_WAN_IP||g\" \"$f\"; done" 2>/dev/null || true',
+      '  docker restart ipes 2>/dev/null || true',
+      'fi',
       'systemctl disable ipes-firstboot',
       '# 自动绑定舟翼云（换设备身份后自动注册，克隆机开机即上线，无需手动点按钮）',
-      (zAk && zSk ? 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + zAk + ' --sk ' + zSk + ' --isp ' + (zIsp || '电信') + ' || true' : 'echo "未配置舟翼云 ak/sk，跳过自动绑定"'),
+      icZyyRegisterCmd(zAk, zSk, zIsp, { preWait: 30, attempts: 6, gap: 40 }),
       'echo "首启完成: $NEW_HOST"',
       'IPESSCRIPT',
       'chmod +x /usr/local/bin/ipes-firstboot.sh',
@@ -1190,6 +1510,20 @@
       'systemctl daemon-reload',
       'systemctl enable ipes-firstboot',
       '',
+      '',
+      '# 9. 【缓存进镜像 · 根治 v18r24】SWAS 自定义镜像不打包 /data（平台把它当"数据区"排除），',
+      '#    而 IPES 真缓存在 /data/happ → 直接打镜像会导致克隆机没缓存。',
+      '#    这里用【硬链接】把 /data/happ 备份到 /opt/ipescache-seed（不占额外空间、秒级完成），',
+      '#    使缓存落进镜像；克隆机首启脚本再把种子 mv 回 /data/happ。',
+      'echo "[9/9] 备份缓存到 /opt/ipescache-seed（硬链接，供镜像携带）..."',
+      'if [ -d "$PCDN_CACHE_DIR" ] && [ -n "$(ls -A "$PCDN_CACHE_DIR" 2>/dev/null)" ]; then',
+      '  rm -rf /opt/ipescache-seed 2>/dev/null || true',
+      '  cp -al "$PCDN_CACHE_DIR" /opt/ipescache-seed 2>/dev/null || cp -a "$PCDN_CACHE_DIR" /opt/ipescache-seed 2>/dev/null || true',
+      '  echo "   ✅ 缓存种子体积: $(du -sh /opt/ipescache-seed 2>/dev/null | awk \'{print $1}\')（会随镜像带到克隆机）"',
+      'else',
+      '  echo "   ⚠️ /data/happ 为空，跳过缓存种子 —— 打的镜像将不带缓存！请先让黄金机积累缓存再打镜像。"',
+      'fi',
+      'sync',
       'echo "==== $(date) 标准化完成 ===="',
       'echo "提示：请将 IPES 配置中 bind/listen 改为 0.0.0.0，上报IP改为自动获取，然后即可创建自定义镜像。"'
     ].join('\n');
@@ -1221,6 +1555,19 @@
   // 一键全流程：标准化 → 创建镜像 → 轮询就绪 → 开通（用户只需填实例ID/镜像名/数量）
   async function icFullCloneFlow() {
     if (!icGuard()) return;
+    // 【v18r25 防重入】流程运行中再次点击 = 请求中断当前流程
+    //   修复：之前可重复点击 → 两个流程并发 → 第二个查不到刚创建的镜像 → CreateCustomImage 报
+    //   "The image name already exists." → 直接中断；且被中断方的轮询循环仍在空转（表现为"卡住"）
+    if (icFlowRunning) {
+      if (!confirm('⚠️ 全流程正在运行中（已 ' + icFlowElapsed() + ' 秒）。\n\n确定要【中断】当前流程吗？\n已创建的镜像不会删除，下次重跑会自动复用。')) return;
+      icFlowAbort = true;
+      icSetFlowBtn(false, true);
+      return;
+    }
+    icFlowRunning = true;
+    icFlowAbort = false;
+    icFlowStartedAt = Date.now();
+    icSetFlowBtn(true);
     var region = icGetRegion();
     var instId = (document.getElementById('icSrcInstance').value || '').trim();
     var imageName = (document.getElementById('icImageName').value || '').trim();
@@ -1259,42 +1606,73 @@
         }
       } catch (ge) { step('⚠️ 黄金机身份读取失败（流程继续）: ' + ge.message); }
 
-      // ① 标准化
+      // ① 标准化（【v18r25 优化】原来硬等 120 秒，现改为轮询命令执行状态，跑完立即继续）
       step('① 下发标准化命令到 ' + instId + ' ...');
       // 🚨 SWAS 没有 RunCommand action，改走 CreateCommand+InvokeCommand（v18r5 批量根治）
-      await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
-      step('✅ 标准化命令已下发，等待 120 秒执行完成...');
-      await icSleep(120000);
+      var stdInv = await icRunCommandSubmit(region, instId, icBuildStandardizeScript(), 600);
+      step('⏳ 标准化执行中（轮询状态，完成即继续，不再固定等 120 秒）...');
+      var stdRes = await icWaitInvokeDone(region, stdInv.invokeId, 300000);
+      if (stdRes.status === 'success') {
+        step('✅ 标准化完成（累计用时约 ' + icFlowElapsed() + 's）');
+      } else if (stdRes.status === 'timeout') {
+        step('⚠️ 标准化状态轮询超时（300s），保守再等 30 秒后继续...');
+        await icSleepIC(30000);
+      } else {
+        step('⚠️ 标准化返回 ' + stdRes.status + '（继续流程，留意镜像是否含缓存）');
+      }
+      // 清理临时命令模板，避免堆积在「命令助手」
+      try { await AliyunClient.callSwasApi(region, 'DeleteCommand', { RegionId: region, CommandId: stdInv.commandId }); } catch (e) { /* 忽略 */ }
 
       // ② 创建镜像（先查同名镜像：已存在直接复用，避免重打 + 支持中断后重跑续接）
       var newImageId = '';
       var reusedExisting = false;
       try {
-        var existR = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
-        var existImgs = icParseImgs(existR);
-        var exist = existImgs.filter(function (im) { return im.ImageName === imageName; })[0];
+        var exist = await icFindImageByName(region, imageName);
         if (exist) {
           newImageId = exist.ImageId || '';
           reusedExisting = true;
-          step('✅ 镜像「' + imageName + '」已存在（ImageId=' + newImageId + '），跳过创建直接复用');
+          step('✅ 镜像「' + imageName + '」已存在（ImageId=' + newImageId + '），跳过创建直接复用（省一次打镜像时间）');
         }
       } catch (e) { step('⚠️ 查询已有镜像失败（忽略，继续创建）: ' + e.message); }
       if (!newImageId) {
-        step('② 创建镜像「' + imageName + '」...');
-        try {
-          var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: imageName });
-          newImageId = cr.ImageId || cr.imageId || '';
-          step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
-        } catch (ce) {
-          var cmsg = (ce && ce.message) || String(ce);
-          // 🚨 自定义镜像配额已满（每个地域有上限，达到后无法再建）
-          if (/maximum|exceed|quota|limit|超过.*上限|超过.*限制/i.test(cmsg)) {
-            step('🚨 该地域自定义镜像已达上限（阿里云配额），请在面板「② 列镜像」点「🔄 加载我的自定义镜像」→「🗑️ 删除选中镜像」清掉不用的镜像后重试');
-            step('   原始错误：' + cmsg);
-            icLog('[镜像克隆] 镜像配额已满：' + region + '，需先删除旧镜像，原始=' + cmsg, 'error');
+        // 【v18r25 优化】重名不再中断整个流程：先复查（可能刚创建成功、列表未刷新）→ 复用；查不到则自动换名重试
+        var tryName = imageName;
+        for (var attempt = 1; attempt <= 3 && !newImageId; attempt++) {
+          icAbortCheck();
+          step('② 创建镜像「' + tryName + '」...' + (attempt > 1 ? '（第 ' + attempt + ' 次尝试）' : ''));
+          try {
+            var cr = await AliyunClient.callCentralApi('CreateCustomImage', { RegionId: region, InstanceId: instId, ImageName: tryName });
+            newImageId = cr.ImageId || cr.imageId || '';
+            imageName = tryName;
+            step('✅ 镜像已提交创建，ImageId=' + (newImageId || '(未知)') + '，等待就绪...');
+            break;
+          } catch (ce) {
+            var cmsg = (ce && ce.message) || String(ce);
+            // 🚨 自定义镜像配额已满（每个地域有上限，达到后无法再建）
+            if (/maximum|exceed|quota|limit|超过.*上限|超过.*限制/i.test(cmsg)) {
+              step('🚨 该地域自定义镜像已达上限（阿里云配额），请在面板「② 列镜像」点「🔄 加载我的自定义镜像」→「🗑️ 删除选中镜像」清掉不用的镜像后重试');
+              step('   原始错误：' + cmsg);
+              icLog('[镜像克隆] 镜像配额已满：' + region + '，需先删除旧镜像，原始=' + cmsg, 'error');
+              throw ce;
+            }
+            // 重名：先复查是否其实已经建好了（并发/列表延迟的经典情形）
+            if (/already exist|已存在|重复|duplicate/i.test(cmsg)) {
+              var reuse = await icFindImageByName(region, tryName);
+              if (reuse) {
+                newImageId = reuse.ImageId || '';
+                reusedExisting = true;
+                imageName = tryName;
+                step('✅ 镜像「' + tryName + '」实际已存在（ImageId=' + newImageId + '），直接复用，不再重复创建');
+                break;
+              }
+              tryName = icUniqueImageName(imageName, attempt + 1);
+              step('⚠️ 镜像名「' + imageName + '」已被占用且查不到记录，自动改用「' + tryName + '」重试...');
+              continue;
+            }
+            throw ce;
           }
-          throw ce;  // 保留原有中断行为
         }
+        if (!newImageId) throw new Error('镜像创建失败：3 次尝试均未成功（请检查阿里云控制台）');
       }
 
       // ③ 轮询镜像就绪（最多 15 分钟 —— 实测 SWAS 自定义镜像创建要 5~10 分钟，5 分钟根本不够）
@@ -1309,13 +1687,23 @@
       var lastInfo = '';
       var scannedRegions = {};  // 跨地域扫描结果
       var crossScanDone = false;  // 跨地域扫描已做过一次（命中/未命中都不再重复，等主地域先出现）
-      for (var i = 0; i < 90; i++) {
-        await icSleep(5000);  // 【加速】10s → 5s 轮询间隔（最多 7.5 分钟）
+      var pollStart = Date.now();
+      var POLL_MAX = 110;
+      // 【v18r25 优化】
+      //   a) 自适应间隔：前 20 轮 3 秒（抢占"刚就绪"窗口），之后 6 秒 → 同样 10 分钟覆盖，前期更快发现
+      //   b) 每轮开始先检查中断标志 → 修复"点了中断/流程已报错，轮询还在空转"的卡住现象
+      for (var i = 0; i < POLL_MAX; i++) {
+        icAbortCheck();
+        await icSleepIC(i < 20 ? 3000 : 6000);
+        icAbortCheck();
         var lr;
         try {
           lr = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
         } catch (e) {
-          step('⚠️ [轮询 ' + (i + 1) + '/90] ListImages 报错：' + e.message);
+          // 降噪：报错最多每 5 轮提示一次
+          if (i === 0 || (i + 1) % 5 === 0) {
+            step('⚠️ [轮询 ' + (i + 1) + '] ListImages 报错（已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's）：' + e.message);
+          }
           continue;
         }
         var imgs = icParseImgs(lr);
@@ -1334,19 +1722,24 @@
           lastInfo = info;
           if (!s || s.toLowerCase() === 'available' || s.toLowerCase() === 'success' || s.toLowerCase() === 'ready') {
             newImageId = found.ImageId || newImageId; ready = true;
-            step('✅ 镜像就绪（第 ' + (i + 1) + '/90 轮，' + info + '）');
+            step('✅ 镜像就绪（第 ' + (i + 1) + ' 轮，已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's，' + info + '）');
             break;
           }
           if (/fail|error|创建失败/i.test(s)) {
             step('❌ 镜像创建失败：' + info + '\n原始=' + JSON.stringify(found).slice(0, 400));
             return;
           }
-          // Status 显式还在 Creating/Waiting 等中间态：继续轮询
-          step('⏳ [轮询 ' + (i + 1) + '/90] ' + info + '，继续等待...');
+          // Status 显式还在 Creating/Waiting 等中间态：继续轮询（降噪，每 5 轮提示一次）
+          if ((i + 1) % 5 === 0) {
+            step('⏳ [轮询 ' + (i + 1) + '] ' + info + '，继续等待（已 ' + Math.round((Date.now() - pollStart) / 1000) + 's）...');
+          }
         } else {
-          step('⏳ [轮询 ' + (i + 1) + '/90] ListImages 暂未返回「' + imageName + '」(当前列表 ' + imgs.length + ' 个)');
-          // 关键节点打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
-          if (i === 0 || (i + 1) % 10 === 0) {
+          // 降噪：不再每轮刷屏，每 5 轮报一次进度
+          if (i === 0 || (i + 1) % 5 === 0) {
+            step('⏳ [轮询 ' + (i + 1) + '] 镜像生成中...（已等待 ' + Math.round((Date.now() - pollStart) / 1000) + 's，列表 ' + imgs.length + ' 个）');
+          }
+          // 首次打印 ListImages 原始前 3 个，帮判断 ImageId/字段名是否一致
+          if (i === 0) {
             step('🔍 [' + region + '] ListImages 返回前 3 个：' + JSON.stringify(imgs.slice(0, 3)).slice(0, 600));
           }
           // 【加速】跨地域扫描：只在主地域持续空时做一次（命中或不命中都不重复），并发查所有其他地域
@@ -1380,7 +1773,7 @@
                 step('🎯 跨地域命中！实际 RegionId=' + hit.rid + '，「' + imageName + '」' + (s2 ? ('状态="' + s2 + '"') : '（无Status字段=已就绪）'));
                 if (!s2 || s2.toLowerCase() === 'available' || s2.toLowerCase() === 'success' || s2.toLowerCase() === 'ready') {
                   region = hit.rid; newImageId = hit.img.ImageId || newImageId; ready = true;
-                  step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + '/90 轮）');
+                  step('✅ 镜像已就绪（跨地域找到，第 ' + (i + 1) + ' 轮，已 ' + Math.round((Date.now() - pollStart) / 1000) + 's）');
                   break;
                 }
                 if (/fail|error/i.test(s2)) {
@@ -1397,7 +1790,7 @@
         }
       }
       if (!ready) {
-        step('⚠️ 镜像未在 15 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
+        step('⚠️ 镜像未在 ' + Math.round((Date.now() - pollStart) / 60000) + ' 分钟内就绪。最后一次状态：' + (lastInfo || '(从未找到)'));
         // 兜底：去掉 ImageType 参数再查一次（SWAS 自定义镜像可能没这个 filter）
         step('🔄 兜底：不带 ImageType 参数重试一次 ListImages...');
         try {
@@ -1449,10 +1842,17 @@
           (ids.length ? ('<br><code>' + ids.join('</code><br><code>') + '</code>') : '，请到阿里云控制台查看实例'));
       } else {
         // 不扣费路径：SWAS CreateOrder，只生成待支付订单
-        var ord = await icCreateOrder(region, newImageId, planId, amount, period);
-        step('✅ 已生成待支付订单（<b style="color:#389e0d;">不扣费</b>）：<code>' + ord.OrderId +
-          '</code><br>请到阿里云控制台「费用中心 - 订单管理」支付后再回来绑定。');
-        icLog('[镜像克隆] 全流程已生成待支付订单，镜像=' + newImageId + ' 订单=' + ord.OrderId, 'success');
+        // 【v18r26】改为逐台下单，保证台数 == 用户填写数量（详见 icCreateOrdersOneByOne 注释）
+        step('⏳ 正在逐台生成待支付订单（目标 ' + amount + ' 台）...');
+        var orderIds = await icCreateOrdersOneByOne(region, newImageId, planId, amount, period,
+          function (n, total, oid) {
+            if (n === total || n % 5 === 0) step('   下单进度 ' + n + '/' + total + '（最新订单 ' + oid + '）');
+          });
+        var shown = orderIds.slice(0, 10).join('</code><br><code>') +
+          (orderIds.length > 10 ? '</code><br>… 其余 ' + (orderIds.length - 10) + ' 个见控制台订单管理' : '');
+        step('✅ 已生成 <b>' + orderIds.length + '</b> 个待支付订单（每单 1 台，<b style="color:#389e0d;">不扣费</b>）：<br><code>' +
+          shown + '</code><br>请到阿里云控制台「费用中心 - 订单管理」把这些订单<b>勾选后一起支付</b>。');
+        icLog('[镜像克隆] 全流程已生成 ' + orderIds.length + ' 个待支付订单，镜像=' + newImageId + ' 订单=' + orderIds.join(','), 'success');
         return;
       }
       if (!ids.length) return;
@@ -1472,9 +1872,20 @@
       step('🔗 本批业务ID：<b>' + bizBatch.slice(0, 12) + '…</b>（' + entries2.length + ' 台已到服务中，每台分配独立 IPES SN 76hex，已云端持久化' + (wait2.ids.length < ids.length ? '；' + (ids.length - wait2.ids.length) + ' 台未就绪未计入' : '') + '）');
       icLog('[镜像克隆] 全流程完成: ' + instId + ' → 镜像 ' + newImageId + ' → 开通 ' + amount + ' 台', 'success');
     } catch (e) {
-      step('❌ 流程中断: ' + e.message);
-      icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
+      if (e && e.message === IC_ABORT_MSG) {
+        step('⛔ 已被用户中断（中途创建的镜像不会删除，下次重跑会自动复用）');
+        icLog('[镜像克隆] 全流程被用户中断于 ' + icFlowElapsed() + 's', 'warn');
+      } else {
+        step('❌ 流程中断: ' + e.message);
+        icLog('[镜像克隆] 全流程中断: ' + e.message, 'error');
+      }
     } finally {
+      // 【v18r25】释放并发锁 + 恢复按钮（放最前，保证后续黄金机恢复逻辑不受中断标志影响）
+      var flowSecs = icFlowElapsed();
+      icFlowRunning = false;
+      icFlowAbort = false;
+      icSetFlowBtn(false);
+      step('⏱️ 本次流程耗时 <b>' + flowSecs + 's</b>');
       // 🏆 黄金机身份自动校验恢复（成功/中断都执行）——确保黄金机永不因克隆流程掉线
       if (goldenCode) {
         try {
@@ -1581,7 +1992,7 @@
       ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
       : '';
     // 基础绑定命令（不含业务ID）；业务ID 在 worker 里按实例单独追加写入克隆机本地
-    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
+    var cmd = pre + icZyyRegisterCmd(ak, sk, isp, { preWait: 0, attempts: 6, gap: 40 });
 
     var st = document.getElementById('icBindStatus');
     var prog = document.getElementById('icBindProgress');
@@ -1589,8 +2000,8 @@
     var done = 0, ok = 0, fail = 0;
     function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
 
-    // 有界并发（最多 20 台同时下发）
-    var CONC = 20, idx = 0;
+    // 有界并发（最多 30 台同时下发）—— 【v18r30】按用户要求批量部署统一 30 台一批
+    var CONC = 30, idx = 0;
     async function worker() {
       while (idx < ids.length) {
         var iid = ids[idx++];
@@ -1674,10 +2085,17 @@
       if (!confirm('⚠️ 还有 ' + unchkRunning.length + ' 台 Running 未勾选：' + list + extra + '\n\n只对当前勾选生效。继续？')) return;
     }
 
-    // 鉴权方式二选一：admin Token（x-token 走 supabase 转发）OR appId/ak/sk（HMAC 直连 admin）
+    // 【v18r27 修正 2026-09-21】admin.zhouyi.top gin-vue-admin 后端**只认 x-token JWT**，
+    // HMAC 三件套实测统统返 code:7「未登录或非法访问」（getEdgeNodeList / stateflow 均已验证）。
+    // 故绑定 / 流转一律以 admin Token（x-token）鉴权；HMAC 三件套已失效，不再作为可行通道。
     var token = icGetAdminToken();
-    if (!token && !icHasAdminHmac()) { alert('请二选一填写：\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）'); return; }
-    // vendor / transMode 等业务参数已写死（IC_DEFAULT_* 常量，对齐 test.sh），无需用户输入
+    if (!token) { alert('请填写「🔑 admin.zhouyi.top Token」（x-token JWT）。\n\n原因：admin 后端只认 x-token，HMAC 三件套会被拒（code:7「未登录或非法访问」）。\n获取方式：登录 admin.zhouyi.top → 浏览器开发者工具 → Application → Local Storage → 复制 zy_admin_token 的值粘贴进来（有效期约 3 天，过期需重新获取）。'); return; }
+    // vendor / transMode 等业务参数已写死（IC_DEFAULT_* 常量，对齐 test.sh + 用户 2026-09-10 截图），无需用户输入
+    // ⚠️ 【6 步流程写死】用户明确要求"按截图走 + 以后不要改"：下面 4 步调用参数全部固化，任何人（含 AI）不得改动。
+    //   步骤 1：下发 zyy_init 绑定命令（带 ak/sk/isp）
+    //   步骤 2：SSH 读 device_code（前端预生成 76hex 新 SN 写入 ipes 容器，避让黄金机 SN 冲突）
+    //   步骤 3：updateEdgeNominalInfo 提交带宽业务（7 字段 + expectedBiz/ipScheduleType 全部从 IC_DEFAULT_* 读，对齐 test.sh + 截图）
+    //   步骤 4：stateflow 状态流转 → "服务中"（业务ID = 76hex IPES SN）【v18r27：原写 directDeployment，后端实为「强制提交」，已纠正】
     function ocdChk(id) { var el = document.getElementById(id); return el ? el.checked : false; }
     function ocdVal(id) { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
     var ownerId = (document.getElementById('icBindOwnerId').value || '').trim();
@@ -1703,7 +2121,7 @@
     var pre = cleanMac
       ? 'rm -f /etc/.mac /etc/machine-id /usr/local/edge/registration_info; rm -rf /usr/local/edge /opt/zyy_install /opt/zycloud; head -c 16 /dev/urandom | xxd -p > /etc/machine-id; head -c 16 /dev/urandom | xxd -p > /etc/.mac; chmod 644 /etc/machine-id /etc/.mac; '
       : '';
-    var cmd = pre + 'curl -s https://zyy-go.oss-cn-beijing.aliyuncs.com/script/zyy_init/zyy_init_max.sh | bash -s -- --ak ' + ak + ' --sk ' + sk + ' --isp ' + isp;
+    var cmd = pre + icZyyRegisterCmd(ak, sk, isp, { preWait: 0, attempts: 6, gap: 40 });
     var done = 0, ok = 0, fail = 0, idx = 0;
     function tick() { done++; prog.textContent = '进度 ' + done + '/' + ids.length + ' (成功 ' + ok + ' 失败 ' + fail + ')'; }
     async function worker() {
@@ -1828,23 +2246,33 @@
     for (var rw = 0; rw < Math.min(10, ids.length); rw++) rcPoolArr.push(rcPool());
     await Promise.all(rcPoolArr);
     if (!matched.length) { log('⚠️ 没有读到任何 device_code，停止流转。请确认机器已装 zyy agent 且 /usr/local/edge_zycloud/device_code 或 /etc/.mac 存在'); return; }
-    log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 device_code，开始调 admin 后台流转</b>');
+    // 【业务ID 写死校验 - 用户 2026-09-10】业务ID 必须 76hex IPES SN，与 admin 业务字段、ipes 容器 bin/ipes_sn 一致。
+    //   短于 76hex（兜底 32hex edge_client）的机器一律禁止流转，与"业务ID 写死为 76hex"规则冲突。
+    var matchedValid = matched.filter(function (m) { return /^[a-f0-9]{76}$/i.test(m.businessId); });
+    var matchedInvalid = matched.filter(function (m) { return !/^[a-f0-9]{76}$/i.test(m.businessId); });
+    if (matchedInvalid.length) {
+      log('<span style="color:#fa8c16;">⚠️ ' + matchedInvalid.length + ' 台机器业务ID不是76hex（可能是老机器/无 ipes 容器），【业务ID=76hex IPES SN】规则不允许流转，已过滤：</span>');
+      matchedInvalid.forEach(function (m) { log('  ⛔ ' + m.instanceId + ' nodeId=' + m.nodeId + ' businessId(长度=' + m.businessId.length + ')=' + m.businessId.slice(0, 12) + '…'); });
+    }
+    if (!matchedValid.length) { log('⚠️ 没有机器业务ID符合76hex规则，全部禁止流转。'); return; }
+    matched = matchedValid;
+    log('<b>🎯 已读到 ' + matched.length + '/' + ids.length + ' 台 76hex 业务ID，开始调 admin 后台流转</b>');
 
-    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeRemark + directDeployment
+    // 4) 状态流转：把前端生成的全新 76hex IPES SN 填入业务ID，调用 updateEdgeNominalInfo + stateflow（v18r27 纠正）
     log('🚀 开始状态流转（待配置 → 服务中），业务ID = 前端生成的新 76hex IPES SN（与黄金机必不冲突）...');
-    // 【v18r16】早期校验：状态流转必须有 HMAC 三件套。
-    // 原因：实测 supabase 边缘到 admin.zhouyi.top 网络不可达（TCP connect timeout 110），
-    // 浏览器直连 admin 跨域 CORS 拒，只有 HMAC 三件套直连 admin 这条路能走通。
-    if (!icHasAdminHmac()) {
-      log('<span style="color:#cf1322;">❌ 状态流转必须填 admin 后端鉴权三件套（appId / ak / sk）。<br>' +
-        '原因：浏览器直连 admin.zhouyi.top 会被 CORS 拒；supabase 边缘到 admin.zhouyi.top 网络不可达（实测 TCP 超时 110）。<br>' +
-        '只有 HMAC 三件套直连 admin 这条路能走通，参考 ipes_auto_deploy.sh + transition_to_service.sh。<br>' +
-        '请展开「🔑 admin 后端鉴权三件套」面板填入，然后重试。</span>');
-      log('<span style="color:#cf1322;">状态流转完成：提交成功 0 / 部署成功 0 / 失败 ' + matched.length + '</span>');
-      icLog('[镜像克隆] 状态流转中断：缺少 HMAC 三件套', 'error');
+    // 【v18r16→v18r27 修正 2026-09-21】实测 admin.zhouyi.top 只认 x-token JWT，
+    // HMAC 三件套对 stateflow / getEdgeNodeList 等接口一律返 code:7「未登录或非法访问」。
+    // 因此状态流转必须以 x-token 鉴权（已在上方面板入口校验必须填 Token）。
+    // 若本工具页面与 admin.zhouyi.top 同源（即部署 / 打开在 admin.zhouyi.top 下的页面），
+    // 浏览器直连 fetch 带 x-token 即可；跨域（如 GitHub Pages）时直连会被 CORS 拒，
+    // 会自动回退 supabase 转发（需 supabase 边缘能连通 admin.zhouyi.top）。
+    if (!token) {
+      log('<span style="color:#cf1322;">❌ 状态流转需要 admin Token（x-token）。<br>' +
+        '请在上方面板「🔑 admin.zhouyi.top Token」填入从 admin.zhouyi.top 登录后取得的 zy_admin_token（有效期约 3 天）。</span>');
+      icLog('[镜像克隆] 状态流转中断：缺少 admin x-token', 'error');
       return;
     }
-    log('🔐 当前使用 appId/ak/sk HMAC 鉴权（直连 admin，绕开 CORS 与 supabase 区域出口屏蔽）');
+    log('🔑 当前使用 admin Token（x-token）鉴权（后台只认此通道；HMAC 三件套已失效）');
     var submitOk = 0, deployOk = 0, deployFail = 0, successList = [];
     var idx2 = 0;
     var adminFn = icAdminCall;   // 统一入口：自动选 HMAC 或 x-token
@@ -1855,38 +2283,45 @@
           // 把新设备SN填入业务ID（同步到 one-click-deploy 面板展示）
           var bizEl = document.getElementById('ocdBusinessId');
           if (bizEl) bizEl.value = m.businessId;
-          // 批量提交（updateEdgeRemark）
+          // 批量提交（updateEdgeNominalInfo —— test.sh 实测接口，提交带宽/业务；非 updateEdgeRemark）
           //   nodeId    = 32hex edge_client 节点ID（admin 用它识别节点）
           //   businessId = 76hex IPES SN（admin 业务字段，关联到黄金机 d8891866... 同格式）
-          await adminFn('POST', '/api/edgeNode/updateEdgeRemark', {
-            nodeId: m.nodeId,
-            businessId: m.businessId,
-            vendorSuggestCustomers: cfg.vendorSuggestCustomers,
-            transMode: cfg.transMode,
-            isCrossNetwork: cfg.isCrossNetwork,
-            crossNetworkIsp: cfg.crossNetworkIsp,
-            isTransProv: cfg.isTransProv,
-            usbw: cfg.usbw,
-            bwNum: cfg.bwNum,
+          //   expectedBiz / ipScheduleType = 用户 2026-09-10 截图「编辑」页字段，写死
+          // 【v18r29】改走 icSubmitNominalVerified：内部自动「服务中→待配置」降级 + 提交后读回 usbw 校验 + 重试。
+          //   背景：3 台克隆机曾出现"接口返回成功、实际 usbw 只有 40"（节点已是服务中被静默拒绝）。
+          //   校验不通过 → 中止本台流转，避免"带宽没写进去却流转到服务中"被漏过。
+          var sub = await icSubmitNominalVerified(adminFn, m, cfg, function (msg, lv) {
+            log('<span style="color:' + (lv === 'warn' ? '#fa8c16' : '#389e0d') + ';">' + msg + '</span>');
           });
+          if (!sub.ok) {
+            throw new Error('建设带宽提交后校验未通过：读回 usbw=' + sub.usbw + '（期望 ' + cfg.usbw +
+              '，已重试 ' + sub.attempts + ' 次），已中止流转以免带宽缺失被漏过');
+          }
+          if (sub.unverified) {
+            log('<span style="color:#fa8c16;">⚠️ ' + m.nodeId + ' 建设带宽「无法校验」（读回接口异常），已按成功继续，请稍后到 admin 后台人工核对 usbw</span>');
+          }
           submitOk++;
           // 批量部署（状态流转）：待配置 → 服务中
-          // 【v18r16 关键修复】请求体必须含 { nodeId, businessId, status: "服务中" }（对齐 transition_to_service.sh 模板）。
-          // 旧代码只发 { nodeId } → admin 报 "未选择期望业务"（code:7）。
-          // 默认 endpoint = /api/bigDeployLog/directDeployment（已实测可被 x-token JWT 鉴权到业务层），如不通可在「高级部署请求体」覆盖 path
-          var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || '/api/bigDeployLog/directDeployment';
+          // 【v18r27 纠正】改用后台真实接口 /api/edgeNode/stateflow，body = {nodes, hostname(业务ID), stage:'inService'}
+          //   证据见文件顶部 IC_DEFAULT_STATEFLOW_* 常量段注释（反查 admin 前端 bundle）。
+          //   旧的 directDeployment 只是兜底（路由缺失时），不再默认使用。
           var deployBody;
           if (cfg.deployBodyOverride) {
             try { deployBody = JSON.parse(cfg.deployBodyOverride); } catch (e) { deployBody = null; }
           }
-          if (!deployBody) {
-            deployBody = { nodeId: m.nodeId, businessId: m.businessId, status: '服务中' };
+          var dRes;
+          if (deployBody) {
+            // 「高级部署请求体」手工覆盖：完全按用户填的发（保持原能力）
+            var deployPath = (typeof cfg.deployPath === 'string' && cfg.deployPath) || IC_DEFAULT_STATEFLOW_PATH;
+            dRes = await adminFn('POST', deployPath, deployBody);
+          } else {
+            dRes = await icStateFlow(m.nodeId, m.businessId, adminFn);
+            deployBody = { nodes: [m.nodeId], hostname: m.businessId, stage: IC_DEFAULT_STATEFLOW_STAGE };
           }
-          var dRes = await adminFn('POST', deployPath, deployBody);
           var dCode = (dRes && dRes.code !== undefined) ? dRes.code : null;
           if (dCode !== null && dCode !== 0) {
             throw new Error('状态流转返回业务码 ' + dCode + '：' + ((dRes && dRes.msg) || JSON.stringify(dRes).slice(0, 200)) +
-              '（POST ' + deployPath + ' body=' + JSON.stringify(deployBody) + '）');
+              '（POST ' + IC_DEFAULT_STATEFLOW_PATH + ' body=' + JSON.stringify(deployBody) + '）');
           }
           deployOk++;
           successList.push(m);
@@ -1965,13 +2400,13 @@
   }
   window.icQuerySelectedEdgeDetail = icQuerySelectedEdgeDetail;
 
-  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeRemark（写业务ID/期望业务/带宽）+ directDeployment（流转到服务中）
+  // 已知 deviceCode → 远端读 IPES SN → 调 admin 后端：updateEdgeNominalInfo（写业务ID/期望业务/带宽）+ stateflow（流转到服务中；v18r27 纠正）
   // 业务ID = IPES SN（76hex，从 `docker exec ipes cat bin/ipes_sn` 读），不是 nodeId（32hex，edge_client device_code）
   // 用于：克隆机清掉旧 SN 重启容器后拿到新 SN 码，一键把业务ID 填到 admin 并流转
   // 流程：
   //   1) SWAS RunCommand（实例内 docker exec ipes cat bin/ipes_sn）+ DescribeCommandInvocations → 拿 76hex IPES SN
-  //   2) POST /api/edgeNode/updateEdgeRemark  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
-  //   3) POST /api/bigDeployLog/directDeployment  body={nodeId}
+  //   2) POST /api/edgeNode/updateEdgeNominalInfo  body={nodeId, businessId(IPES SN), vendorSuggestCustomers, transMode, ...}
+  //   3) POST /api/edgeNode/stateflow  body={nodes:[nodeId], hostname:<业务ID>, stage:"inService"}
   async function icDirectDeployByNodeId() {
     if (!icGuard()) return;
     var st = document.getElementById('icBindStatus');
@@ -1996,7 +2431,7 @@
       alert('请二选一填写：admin 鉴权\n  1) 「🔑 admin.zhouyi.top Token」 粘贴 x-token\n  2) 「🔐 admin 三件套」 填 appId/ak/sk（走 HMAC）');
       return;
     }
-    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeRemark：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=1, isCrossNetwork=false, usbw=200, bwNum=1\n3) admin directDeployment：流转「待配置 → 服务中」\n\n确认执行？')) return;
+    if (!confirm('将执行以下步骤：\n\n1) SWAS RunCommand 到 ' + instanceId + '（' + region + '）读 IPES SN（docker exec ipes cat bin/ipes_sn）\n2) admin updateEdgeNominalInfo：nodeId=' + nodeId + ', businessId=<IPES SN>, vendorSuggestCustomers=41, transMode=0, isCrossNetwork=false, usbw=200, bwNum=1, expectedBiz=自研Q2\n3) admin stateflow：流转「待配置 → 服务中」（body={nodes,hostname,stage}）\n\n确认执行？')) return;
 
     st.innerHTML = '<div>🚀 已知 deviceCode 流转：' + nodeId + ' ...</div>';
     var cfg = {
@@ -2023,31 +2458,34 @@
         if (m) businessId = m[0];
       } catch (e) { throw new Error('读 IPES SN 失败: ' + e.message); }
       if (!businessId) throw new Error('未读到 IPES SN（机器可能未运行 docker ipes）');
-      st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID）= <code style="color:#cf1322;">' + businessId + '</code></div>';
+      // 【业务ID 写死校验】必须 76hex（admin 与 ipes 容器 bin/ipes_sn 一致）。短于 76hex 会破坏与机器的对应关系，禁止继续。
+      if (!/^[a-f0-9]{76}$/i.test(businessId)) throw new Error('读到的 IPES SN 不是 76hex：' + businessId + '（长度=' + businessId.length + '），拒绝流转。');
+      st.innerHTML += '<div style="color:#389e0d;">✅ IPES SN（业务ID，76hex）= <code style="color:#cf1322;">' + businessId + '</code></div>';
 
-      // 步骤 2: updateEdgeRemark（写业务ID = IPES SN）
-      st.innerHTML += '<div>📝 2/3 updateEdgeRemark（自动 upsert 节点 + 写业务ID + 业务参数）...</div>';
-      var r1 = await icAdminCall('POST', '/api/edgeNode/updateEdgeRemark', {
-        nodeId: nodeId,
-        businessId: businessId,
-        vendorSuggestCustomers: cfg.vendorSuggestCustomers,
-        transMode: cfg.transMode,
-        isCrossNetwork: cfg.isCrossNetwork,
-        crossNetworkIsp: cfg.crossNetworkIsp,
-        isTransProv: cfg.isTransProv,
-        usbw: cfg.usbw,
-        bwNum: cfg.bwNum,
+      // 步骤 2: updateEdgeNominalInfo（写业务ID = IPES SN + 带宽/业务参数；test.sh 实测接口）
+      // 【v18r29】改走 icSubmitNominalVerified：服务中/交付中会自动先降级到「待配置」，
+      //   提交后读回 nominalInfo.usbw 校验（code:0 ≠ 已落库），不符则重试，仍不符则中止流转。
+      st.innerHTML += '<div>📝 2/3 updateEdgeNominalInfo（自动 upsert 节点 + 写业务ID + 业务参数，含读回校验）...</div>';
+      var sub = await icSubmitNominalVerified(icAdminCall, { nodeId: nodeId, businessId: businessId }, cfg, function (msg, lv) {
+        st.innerHTML += '<div style="color:' + (lv === 'warn' ? '#fa8c16' : '#389e0d') + ';">' + msg + '</div>';
       });
-      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeRemark 成功：' + JSON.stringify(r1).slice(0, 200) + '</div>';
+      if (!sub.ok) {
+        throw new Error('建设带宽提交后校验未通过：读回 usbw=' + sub.usbw + '（期望 ' + cfg.usbw +
+          '，已重试 ' + sub.attempts + ' 次），已中止流转以免带宽缺失被漏过');
+      }
+      st.innerHTML += '<div style="color:#389e0d;">✅ updateEdgeNominalInfo 成功并校验通过：usbw=' + sub.usbw + '（第 ' + sub.attempts + ' 次提交）</div>';
 
       // 步骤 3: 状态流转（待配置 → 服务中）
-      // 【v18r16】body 必须含 { nodeId, businessId, status:"服务中" }（对齐 transition_to_service.sh）
-      st.innerHTML += '<div>🔄 3/3 状态流转（流转到服务中）...</div>';
-      var r2 = await icAdminCall('POST', '/api/bigDeployLog/directDeployment', { nodeId: nodeId, businessId: businessId, status: '服务中' });
+      // 【v18r27 纠正】走后台真实接口 /api/edgeNode/stateflow：
+      //   body = { nodes:[nodeId], hostname:<业务ID=IPES SN>, stage:'inService' }
+      //   （「业务ID」在后台字段名就叫 hostname；旧 directDeployment 是「强制提交」，会报未知运营商）
+      //   businessId 不允许手填、不允许传空、不允许短于 76hex
+      st.innerHTML += '<div>🔄 3/3 状态流转（流转到【' + IC_DEFAULT_DEPLOY_STATUS + '】，业务ID=' + businessId + '）...</div>';
+      var r2 = await icStateFlow(nodeId, businessId, icAdminCall);
       var c2 = (r2 && r2.code !== undefined) ? r2.code : null;
       if (c2 !== null && c2 !== 0) {
         throw new Error('状态流转返回业务码 ' + c2 + '：' + ((r2 && r2.msg) || JSON.stringify(r2).slice(0, 200)) +
-          '（POST /api/bigDeployLog/directDeployment body={nodeId, businessId, status:"服务中"}）');
+          '（POST ' + IC_DEFAULT_STATEFLOW_PATH + ' body={nodes:[' + nodeId + '], hostname:' + businessId + ', stage:"' + IC_DEFAULT_STATEFLOW_STAGE + '"}）');
       }
       st.innerHTML += '<div style="color:#389e0d;">✅ 状态流转成功：' + JSON.stringify(r2).slice(0, 200) + '</div>';
 

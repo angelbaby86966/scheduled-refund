@@ -291,14 +291,40 @@ def swas_endpoint(region_id):
 
 # ===================== 黄金机硬保护 =====================
 # 与 image-clone.js / aliyun-client-v2.js / fc/index.py 中同款的权威常量。
-# 黄金机（118.178.193.66）是基准镜像源机，任何情况下都不得退订 / 释放 / 重置。
+# 黄金机是基准镜像源机，任何情况下都不得退订 / 释放 / 重置（一旦误退，克隆链路断掉，全盘节点失源）。
 # 双保险：既按实例 ID 过滤，也按公网 IP 过滤（IP 可能被重新绑定给别的实例）。
-GOLDEN_INSTANCE_IDS = {"9f2adaf7f4d9467aa42982db05ff77fc"}
-GOLDEN_PUBLIC_IPS = {"118.178.193.66"}
+# ⚠️ 权威 ID 来自「舟翼云 PCDN 项目长期记忆 · 锁定区」：
+#    现役黄金机 = 上海 1341164c82ed49a6ae0ab8c89b7eed37（IP 47.116.51.223）。
+#    legacy 项 9f2adaf7…（杭州，账号已注销不可达）仅作兜底保留，不会出现在 ListInstances 中，无害。
+GOLDEN_INSTANCE_IDS = {
+    "1341164c82ed49a6ae0ab8c89b7eed37",  # ← 现役黄金机（cn-shanghai，IP 47.116.51.223）—— 锁死，绝不退订
+    "9f2adaf7f4d9467aa42982db05ff77fc",  # ← legacy 黄金机（杭州，账号注销，兜底保留）
+}
+GOLDEN_PUBLIC_IPS = {
+    "47.116.51.223",   # ← 现役黄金机公网 IP
+    "118.178.193.66",  # ← legacy 黄金机公网 IP
+}
 
 
 def is_golden(instance_id, public_ip=None):
     return (instance_id in GOLDEN_INSTANCE_IDS) or (public_ip and public_ip in GOLDEN_PUBLIC_IPS)
+
+
+# ===================== 退订豁免名单 =====================
+# 与上面的「黄金机」区别：黄金机是【镜像源机】，语义上克隆/部署/退订统统不得触碰；
+# 这里只免除【定时退订】——即需要长期在线的正式节点，不想被每日 23:35 的定时任务退掉。
+# 双保险：实例 ID + 公网 IP（IP 可能被重新绑定给别的实例；实例 ID 全局唯一永不复用）。
+# 维护：新增豁免时同步改 fc 侧代码（FC 定时退订是独立实现，不读本文件）。
+REFUND_EXEMPT_INSTANCE_IDS = {
+    "09ec95ba247642418bfc73da1b6ce8e4",   # 上海 · 张瑞瑶30 · 106.15.92.45（2026-09-17 用户要求保活不误退）
+}
+REFUND_EXEMPT_PUBLIC_IPS = {
+    "106.15.92.45",
+}
+
+
+def is_refund_exempt(instance_id, public_ip=None):
+    return (instance_id in REFUND_EXEMPT_INSTANCE_IDS) or (public_ip and public_ip in REFUND_EXEMPT_PUBLIC_IPS)
 
 
 def list_instances(ak, sk, region_id):
@@ -317,6 +343,9 @@ def list_instances(ak, sk, region_id):
                 continue
             if is_golden(iid, it.get("PublicIpAddress")):
                 log(f"\U0001f6d1 跳过黄金机 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
+                continue
+            if is_refund_exempt(iid, it.get("PublicIpAddress")):
+                log(f"\U0001f6e1 跳过退订豁免实例 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
                 continue
             out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0
@@ -496,11 +525,14 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
             break
 
         # 2) 有界并发退订：线程池封顶 + 令牌桶限 QPS + 限流自动退避重试
-        # 退订前再过滤一次黄金机（双保险：列出时已过滤，这里兜底）
+        # 退订前再过滤一次黄金机 / 豁免实例（双保险：列出时已过滤，这里兜底；即使某实例
+        # 绕过列出阶段的 IP 判断，也绝不会进入 RefundInstance 调用）。
         targets = [(it["regionId"], it["instanceId"]) for it in all_instances
-                   if not is_golden(it["instanceId"])]
-        if len(targets) != len(all_instances):
-            log(f"\U0001f6d1 已剔除 {len(all_instances) - len(targets)} 台黄金机，绝不退订", "WARN")
+                   if not is_golden(it["instanceId"])
+                   and not is_refund_exempt(it["instanceId"])]
+        dropped = len(all_instances) - len(targets)
+        if dropped:
+            log(f"\U0001f6d1 已剔除 {dropped} 台黄金机/豁免实例，绝不退订", "WARN")
         round_success = 0
         regions_seen = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:

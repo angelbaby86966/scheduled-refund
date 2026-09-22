@@ -523,13 +523,18 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:$PATH
 flock -n /var/lock/ipes_repair_once.lock true || exit 0
 . /root/.ipes_repair_env 2>/dev/null || true
 [ -n "$NODE_ACTIVATE_TOKEN" ] || exit 0
-sleep 60
+# @reboot 调用时等 60s 让网络/容器就绪；周期 cron 调用时传 nowait 跳过等待
+[ "$1" = "nowait" ] || sleep 60
 cd /root
 python3 /root/ipes_repair_binding.py >>/var/log/ipes_repair_reboot.log 2>&1
 WRAP
 chmod 700 /root/ipes_repair_once.sh
-# 幂等安装 @reboot 任务（先清旧的再装，避免重复）
-( crontab -l 2>/dev/null | grep -v 'ipes_repair_once.sh' ; echo '@reboot /bin/bash /root/ipes_repair_once.sh' ) | crontab -
+# 幂等安装 @reboot + 周期任务（先清旧的再装，避免重复）
+# @reboot：覆盖「内核升级重启 kill 掉 Phase C」场景
+# */10 * * * *：覆盖「容器重建/业务 ID 漂移但宿主机未重启」场景
+( crontab -l 2>/dev/null | grep -v 'ipes_repair_once.sh' ; \
+  echo '@reboot /bin/bash /root/ipes_repair_once.sh' ; \
+  echo '*/10 * * * * /bin/bash /root/ipes_repair_once.sh nowait' ) | crontab -
 
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \
        NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO \

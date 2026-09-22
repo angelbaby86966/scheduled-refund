@@ -14,25 +14,8 @@ const RPCClient = require('@alicloud/pop-core');
 // ====== 配置 ======
 const AK = process.env.ALIYUN_AK || '';
 const SK = process.env.ALIYUN_SK || '';
-// ===== 地区启用 / 禁用（2026-09-19）=====
-// 全量地区清单常量保留（代码不删，随时加回）；实际跑哪些由：
-//   1) env REGIONS="cn-hangzhou,cn-beijing"（白名单，优先）
-//   2) env DISABLED_REGIONS="cn-heyuan,cn-wuhan-lr"（黑名单，留空=全启用）
-//   3) 都不设 → 默认黑名单，先摘掉河源/武汉/乌兰察布
-const ALL_REGIONS = ['cn-hangzhou', 'cn-beijing', 'cn-shanghai', 'cn-shenzhen',
-  'cn-chengdu', 'cn-guangzhou', 'cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu'];
-const DISABLED_REGIONS_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu'];
-const parseCsv = (raw) => (raw || '').split(',').map(s => s.trim()).filter(Boolean);
-
-const REGION_LIST = (() => {
-  const white = parseCsv(process.env.REGIONS).filter(r => ALL_REGIONS.includes(r));
-  if (white.length) return white;
-  const black = process.env.DISABLED_REGIONS !== undefined
-    ? parseCsv(process.env.DISABLED_REGIONS)
-    : DISABLED_REGIONS_DEFAULT.slice();
-  return ALL_REGIONS.filter(r => !black.includes(r));
-})();
-if (!REGION_LIST.length) throw new Error('地区配置把全部地区都禁用了，请检查 REGIONS / DISABLED_REGIONS');
+const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan-lr,cn-wulanchabu')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
 const REFUND_QPS = 8;             // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）
@@ -51,6 +34,45 @@ const REGION_NAMES = {
   'cn-wuhan-lr': '武汉',
   'cn-wulanchabu': '乌兰察布',
 };
+
+// ====== 黄金机 / 退订豁免 硬保护 ======
+// ⚠️ 权威 ID 来自「舟翼云 PCDN 项目长期记忆 · 锁定区」：
+//    现役黄金机 = 上海 1341164c82ed49a6ae0ab8c89b7eed37（公网 IP 47.116.51.223）。
+//    黄金机是基准镜像源机，任何情况下都不得退订 / 释放 / 重置（误退即断克隆链路，全盘节点失源）。
+//    退订豁免 = 需长期在线的正式节点（不误退）。双保险：实例 ID + 公网 IP。
+//    与 scheduled_refund.py 保持同源常量（两通道：GitHub Actions 走 py，FC 走本文件）。
+const GOLDEN_INSTANCE_IDS = new Set([
+  '1341164c82ed49a6ae0ab8c89b7eed37',  // ← 现役黄金机（cn-shanghai，IP 47.116.51.223）—— 锁死，绝不退订
+  '9f2adaf7f4d9467aa42982db05ff77fc',  // ← legacy 黄金机（杭州，账号注销，兜底保留）
+]);
+const GOLDEN_PUBLIC_IPS = new Set([
+  '47.116.51.223',   // ← 现役黄金机公网 IP
+  '118.178.193.66',  // ← legacy 黄金机公网 IP
+]);
+const REFUND_EXEMPT_INSTANCE_IDS = new Set([
+  '09ec95ba247642418bfc73da1b6ce8e4',  // 上海 · 张瑞瑶30 · 106.15.92.45（保活不误退）
+]);
+const REFUND_EXEMPT_PUBLIC_IPS = new Set([
+  '106.15.92.45',
+]);
+
+function publicIpOf(it) {
+  const v = it && (it.PublicIpAddress || it.PublicIpAddresses);
+  if (Array.isArray(v)) return (v.find(Boolean) || '');
+  return (v || '');
+}
+function isGolden(it) {
+  const id = it && it.InstanceId;
+  if (id && GOLDEN_INSTANCE_IDS.has(id)) return true;
+  const ip = publicIpOf(it);
+  return !!(ip && GOLDEN_PUBLIC_IPS.has(ip));
+}
+function isRefundExempt(it) {
+  const id = it && it.InstanceId;
+  if (id && REFUND_EXEMPT_INSTANCE_IDS.has(id)) return true;
+  const ip = publicIpOf(it);
+  return !!(ip && REFUND_EXEMPT_PUBLIC_IPS.has(ip));
+}
 
 // ====== 工具 ======
 function now() { return new Date().toLocaleString('zh-CN', { hour12: false }); }
@@ -144,6 +166,11 @@ async function listInstancesInRegion(regionId) {
 }
 
 async function refundOne(regionId, instanceId, bucket) {
+  // 双保险：即使某实例绕过队列构建阶段的 IP 判断，也绝不对黄金机/豁免实例发起 RefundInstance
+  if (GOLDEN_INSTANCE_IDS.has(instanceId) || REFUND_EXEMPT_INSTANCE_IDS.has(instanceId)) {
+    log(`\u{1F6D1} [${REGION_NAMES[regionId] || regionId}] ${instanceId} 是黄金机/豁免实例，绝不退订`, 'warn');
+    return { ok: false, id: instanceId, skipped: true };
+  }
   await bucket.take(1);
   const clientToken = `scheduled-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   const regionName = REGION_NAMES[regionId] || regionId;
@@ -225,8 +252,14 @@ async function main() {
   Object.keys(byRegion).forEach(rid => {
     const arr = byRegion[rid] || [];
     if (!arr.length) { log(`[${REGION_NAMES[rid] || rid}] 无实例，跳过`, 'info'); return; }
-    arr.forEach(it => tasks.push({ rid, iid: it.InstanceId }));
-    log(`[${REGION_NAMES[rid] || rid}] 共 ${arr.length} 台待退订`, 'info');
+    let added = 0;
+    arr.forEach(it => {
+      if (isGolden(it)) { log(`\u{1F6D1} [${REGION_NAMES[rid] || rid}] 跳过黄金机 ${it.InstanceId}（${publicIpOf(it) || '无公网'}），绝不退订`, 'warn'); return; }
+      if (isRefundExempt(it)) { log(`\u{1F6E1} [${REGION_NAMES[rid] || rid}] 跳过退订豁免实例 ${it.InstanceId}（${publicIpOf(it) || '无公网'}）`, 'warn'); return; }
+      tasks.push({ rid, iid: it.InstanceId });
+      added++;
+    });
+    log(`[${REGION_NAMES[rid] || rid}] 共 ${arr.length} 台，待退订 ${added} 台（已剔除黄金机/豁免实例）`, 'info');
   });
 
   if (!tasks.length) {

@@ -20,6 +20,21 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
+// ====== 黄金机 硬保护（网页退订路径）======
+// ⚠️ 现役 2 台黄金机（cn-shanghai），任何情况下都不得退订 / 释放 / 重置：
+//    ① 1341164c82ed49a6ae0ab8c89b7eed37（公网 IP 47.116.51.223）
+//    ② f05cf2489e41413382dfc944773386b8（公网 IP 47.101.145.6）
+// 曾经的黄金机（杭州 9f2adaf7…）账号已注销，按用户要求「 former 不管」，不纳入保护。
+// 双保险：实例 ID + 公网 IP。与 scheduled_refund.py / index.js(FC) 保持同源常量。
+const GOLDEN_INSTANCE_IDS = new Set([
+  "1341164c82ed49a6ae0ab8c89b7eed37",
+  "f05cf2489e41413382dfc944773386b8",
+]);
+const GOLDEN_PUBLIC_IPS = new Set([
+  "47.116.51.223",
+  "47.101.145.6",
+]);
+
 const REGION_INFO: Record<string, string> = {
   "cn-hangzhou": "杭州","cn-shanghai": "上海","cn-beijing": "北京",
   "cn-shenzhen": "深圳","cn-guangzhou": "广州","cn-nanjing": "南京",
@@ -195,6 +210,11 @@ async function listAll(ak:string,sk:string) {
 }
 
 async function cancelOne(rid:string,iid:string,ak:string,sk:string) {
+  // 🛡 黄金机硬保护（防御性兜底；runFullCancel 已先过滤，这里再保险一层）
+  if (GOLDEN_INSTANCE_IDS.has(iid)) {
+    console.log(`[refund] 🛡 跳过黄金机 ${iid}（${rid}），绝不退订`);
+    return;
+  }
   // 用 BSS RefundInstance 真正退订（能退款到原账户，不只是删除）
   // RefundInstance 是中心 endpoint，不分地域；地域信息仅用于日志
   // 自动尝试多个 ProductCode（swas / simpleappserver / swas-open）
@@ -243,16 +263,22 @@ async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:s
 }
 
 async function runFullCancel(ak:string,sk:string) {
-  const all = await listAll(ak,sk);
-  if (all.length===0) return {success:0,skipped:0,locked:0,failed:0,message:"无实例"};
+  const raw = await listAll(ak,sk);
+  // 🛡 黄金机硬保护：从待退订清单中剔除，绝不退订
+  const golden = raw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
+  if (golden.length) console.log(`[refund] 🛡 已剔除 ${golden.length} 台黄金机，绝不退订: ${golden.map(x=>x.instanceId).join(", ")}`);
+  const all = raw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId));
+  if (all.length===0) return {success:0,skipped:golden.length,locked:0,failed:0,message:"无实例", goldenSkipped: golden.length};
   const r1 = await batchCancel(all,ak,sk);
-  let res:any = {...r1, firstRoundInstances: all.length};
+  let res:any = {...r1, firstRoundInstances: all.length, goldenSkipped: golden.length};
   if (r1.failed>0) {
     await new Promise(r=>setTimeout(r,10*60*1000));
-    const rem = await listAll(ak,sk);
+    const remRaw = await listAll(ak,sk);
+    const remGolden = remRaw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
+    const rem = remRaw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId));
     if (rem.length>0) {
       const r2 = await batchCancel(rem,ak,sk);
-      res = {success:r1.success+r2.success,skipped:r1.skipped+r2.skipped,locked:r1.locked+r2.locked,failed:r2.failed,firstRound:r1,secondRound:r2};
+      res = {success:r1.success+r2.success,skipped:r1.skipped+r2.skipped,locked:r1.locked+r2.locked,failed:r2.failed,firstRound:r1,secondRound:r2,goldenSkipped: golden.length+remGolden.length};
     }
   }
   return res;
@@ -455,6 +481,12 @@ Deno.serve(async (req:Request)=>{
         if (!ak_id||!ak_secret) return json({error:"缺少凭证"},400);
         if (!params) return json({error:"缺少 params"},400);
         if (!params.InstanceId) return json({error:"缺少 params.InstanceId"},400);
+
+        // 🛡 黄金机硬保护：单实例退订也绝不退订
+        if (GOLDEN_INSTANCE_IDS.has(params.InstanceId) || (params.PublicIpAddress && GOLDEN_PUBLIC_IPS.has(params.PublicIpAddress))) {
+          console.log(`[refundInstance] 🛡 跳过黄金机 ${params.InstanceId}，绝不退订`);
+          return json({success:false, skipped:true, reason:"golden-machine-protected", instanceId: params.InstanceId});
+        }
 
         const TRIED_CODES = params.ProductCode
           ? [params.ProductCode]   // 用户指定就只试这个

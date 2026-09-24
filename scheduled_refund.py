@@ -360,9 +360,11 @@ def is_golden(instance_id, public_ip=None):
 # 维护：新增豁免时同步改 fc 侧代码（FC 定时退订是独立实现，不读本文件）。
 REFUND_EXEMPT_INSTANCE_IDS = {
     "09ec95ba247642418bfc73da1b6ce8e4",   # 上海 · 张瑞瑶30 · 106.15.92.45（2026-09-17 用户要求保活不误退）
+    "36a5f79c209c49c4933a799df5aa27d0",   # 张瑞瑶33 · cn-hangzhou · 47.111.123.188（2026-09-23/24 用户要求保护、不得退订）
 }
 REFUND_EXEMPT_PUBLIC_IPS = {
     "106.15.92.45",
+    "47.111.123.188",
 }
 
 

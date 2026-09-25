@@ -79,8 +79,6 @@ vm.swappiness = 0
 vm.dirty_ratio = 15
 vm.dirty_background_ratio = 5
 vm.overcommit_memory = 1
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_available_congestion_control = bbr cubic reno
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_max_syn_backlog = 65535
@@ -91,9 +89,8 @@ net.core.rps_sock_flow_entries = 32768
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_window_scaling = 1
 EOF
-modprobe nf_conntrack tcp_bbr 2>/dev/null
+modprobe nf_conntrack 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf
-sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$nic" ]; then ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 ))); for q in /sys/class/net/$nic/queues/rx-*; do echo "$mask" > "$q/rps_cpus" 2>/dev/null; echo 4096 > "$q/rps_flow_cnt" 2>/dev/null; done; fi
 iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null; iptables -t raw -A OUTPUT -j NOTRACK 2>/dev/null

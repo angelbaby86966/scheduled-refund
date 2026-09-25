@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-25-r20d"   # -r20-nobbr: 移除 BBR 内核安装/自动重启 & 移除 noatime/commit=60 挂载调优（保留块层+VM 调优）
+SCRIPT_VERSION="v2026-09-26-r20e"   # +[5.55] lite_fused_tune: 网卡/CPU/防火墙/扩盘（精简融合）；-r20-nobbr 无 BBR/挂载调优
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -2298,6 +2298,123 @@ main() {
     pcdn_disk_tune
 
     fi   # 【r20-finish】完整链路分支结束。以下 [5.6]~[13] 在两种模式下都会执行（补齐模式的全部内容）
+
+    # [5.55] 精简融合调优（r20e-lite）：网卡 RPS/fq/ring + CPU governor/THP + 防火墙全量放行 + 缓存在线扩容
+    #   模块取自 ipes_onekey_fused.sh v2.0-lite（用户指定保留项）。全程不动 device_code/ipes_sn 身份、
+    #   不重建容器；幂等可重复执行。
+    lite_fused_tune() {
+        log_message "执行 [5.55] 精简融合调优（网卡/CPU/防火墙/扩盘）"
+        # ---- [A] 网卡：RPS 全核 + fq 队列 + ring 4096 + txqueuelen 10000 ----
+        local nic
+        nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+        [ -z "$nic" ] && nic=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+        if [ -n "$nic" ]; then
+            local ncpu mask q
+            ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 )))
+            for q in /sys/class/net/$nic/queues/rx-*; do
+                [ -e "$q" ] || continue
+                echo "$mask" >"$q/rps_cpus" 2>/dev/null
+                echo 4096 >"$q/rps_flow_cnt" 2>/dev/null
+            done
+            tc qdisc replace dev "$nic" root fq 2>/dev/null
+            ethtool -G "$nic" rx 4096 tx 4096 2>/dev/null
+            ip link set "$nic" txqueuelen 10000 2>/dev/null
+            log_message "${GREEN}[成功]${NC} 网卡 $nic：RPS mask=$mask txqueuelen=$(cat /sys/class/net/$nic/tx_queue_len 2>/dev/null)"
+        else
+            log_message "${YELLOW}[警告]${NC} 未识别默认网卡，跳过网卡调优"
+        fi
+        # ---- [B] CPU：governor=performance + THP=never（含开机重放 service）----
+        local gn=0 gt
+        for gt in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -e "$gt" ] || continue
+            echo performance >"$gt" 2>/dev/null && gn=$((gn+1))
+        done
+        for gt in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag; do
+            [ -e "$gt" ] && echo never >"$gt" 2>/dev/null
+        done
+        cat >/etc/systemd/system/ipes-gov-tuned.service <<'GOV_EOF'
+[Unit]
+Description=IPES CPU governor(performance) + THP(never) replay on boot
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $g 2>/dev/null; done; for t in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag; do echo never > $t 2>/dev/null; done'
+[Install]
+WantedBy=multi-user.target
+GOV_EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable ipes-gov-tuned.service >/dev/null 2>&1
+        log_message "${GREEN}[成功]${NC} CPU：governor=performance（${gn} 核热写）+ THP=never + 开机重放"
+        # ---- [C] 防火墙：入向 TCP/UDP 全放行（不动 Docker 链，rc.local 持久化）----
+        for s in firewalld iptables ip6tables; do
+            systemctl disable --now "$s" >/dev/null 2>&1 || true
+        done
+        if command -v nft >/dev/null 2>&1; then nft flush ruleset >/dev/null 2>&1 || true; fi
+        cat > /usr/local/bin/ipes-fw-open.sh <<'FW_EOF'
+#!/bin/bash
+# PCDN 全锥 NAT 前置：入向 TCP/UDP 全放行（IPv4+IPv6）。
+# 只做「插入 ACCEPT + 默认策略 ACCEPT」，不 -F（避免清掉 Docker 自己的链）。
+set -uo pipefail
+IPTS=$(command -v iptables  || echo /sbin/iptables)
+IP6TS=$(command -v ip6tables || echo /sbin/ip6tables)
+ins(){ local b="$1"; shift; "$b" -C "$@" >/dev/null 2>&1 || "$b" -I "$@" >/dev/null 2>&1 || true; }
+for T in "$IPTS" "$IP6TS"; do
+  [ -x "$T" ] || continue
+  "$T" -P INPUT ACCEPT   2>/dev/null
+  "$T" -P FORWARD ACCEPT 2>/dev/null
+  "$T" -P OUTPUT ACCEPT  2>/dev/null
+  ins "$T" INPUT -i lo -j ACCEPT
+  ins "$T" INPUT -p tcp --dport 1:65535 -j ACCEPT
+  ins "$T" INPUT -p udp --dport 1:65535 -j ACCEPT
+  ins "$T" INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+done
+exit 0
+FW_EOF
+        chmod +x /usr/local/bin/ipes-fw-open.sh
+        /usr/local/bin/ipes-fw-open.sh
+        grep -q 'ipes-fw-open.sh' /etc/rc.d/rc.local 2>/dev/null || echo '/usr/local/bin/ipes-fw-open.sh' >> /etc/rc.d/rc.local 2>/dev/null || true
+        chmod +x /etc/rc.d/rc.local 2>/dev/null || true
+        timeout 20 systemctl enable rc-local >/dev/null 2>&1 || true
+        log_message "${GREEN}[成功]${NC} 防火墙已全量放行 TCP+UDP 1-65535（rc.local 持久化；云端实例级放行需控制台/防火墙模板）"
+        # ---- [D] 缓存扩容：磁盘有未分配空间就在线扩分区+文件系统 ----
+        local root_dev root_disk fs disk_bytes part_bytes grow_ok
+        root_dev=$(findmnt -n -o SOURCE / 2>/dev/null)
+        fs=$(findmnt -n -o FSTYPE / 2>/dev/null)
+        case "$root_dev" in
+            /dev/mapper/*|/dev/dm-*)
+                log_message "${YELLOW}[提示]${NC} 根盘在 LVM 上，跳过自动扩分区" ;;
+            "")
+                log_message "${YELLOW}[提示]${NC} 取不到根设备，跳过扩盘" ;;
+            *)
+                root_disk=${root_dev%%[0-9]*}
+                disk_bytes=$(lsblk -b -d -n -o SIZE "$root_disk" 2>/dev/null || echo 0)
+                part_bytes=$(lsblk -b -n -o SIZE "$root_dev" 2>/dev/null || echo 0)
+                if [ "${disk_bytes:-0}" -gt "${part_bytes:-0}" ] 2>/dev/null; then
+                    grow_ok=0
+                    if command -v growpart >/dev/null 2>&1; then
+                        growpart "$root_disk" "${root_dev##*[^0-9]}" >/dev/null 2>&1 && grow_ok=1 || true
+                    fi
+                    if [ "$grow_ok" -eq 0 ]; then
+                        parted -s "$root_disk" resizepart "${root_dev##*[^0-9]}" 100% >/dev/null 2>&1 && grow_ok=1 || true
+                    fi
+                    if [ "$grow_ok" -eq 1 ]; then
+                        case "$fs" in
+                            ext4|ext3|ext2) resize2fs "$root_dev" >/dev/null 2>&1 || true ;;
+                            xfs)            xfs_growfs / >/dev/null 2>&1 || true ;;
+                        esac
+                        log_message "${GREEN}[成功]${NC} 在线扩容完成：/data 可用 $(df -h /data 2>/dev/null | awk 'NR==2{print $4"/"$2}')"
+                    else
+                        log_message "${YELLOW}[警告]${NC} 分区扩展失败（未动数据，安全）"
+                    fi
+                else
+                    log_message "磁盘与分区已等大，无需扩容"
+                fi
+                ;;
+        esac
+        log_message "${GREEN}[成功]${NC} [5.55] 精简融合调优完成"
+    }
+    lite_fused_tune
 
     # [5.6] 峰值上行强化：晚高峰跑量特化（幂等；不碰 /data 与既有容器；r20-live 专属）
     peak_uplink_tune() {

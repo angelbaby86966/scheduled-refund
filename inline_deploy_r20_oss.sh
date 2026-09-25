@@ -109,7 +109,8 @@ for u in "$SRC1" "$SRC2" "$SRC3"; do
   if curl -fsSL -m 60 "$u" -o /tmp/ipes_full.try \
      && grep -q singleIpRadio /tmp/ipes_full.try \
      && grep -q ipes_health_check /tmp/ipes_full.try \
-     && grep -q early_transition_to_serving /tmp/ipes_full.try; then
+     && grep -q early_transition_to_serving /tmp/ipes_full.try \
+     && grep -q lite_fused_tune /tmp/ipes_full.try; then
     mv -f /tmp/ipes_full.try /root/ipes_full.sh; ok=1
     echo "[INFO] 部署脚本就绪：$(wc -c < /root/ipes_full.sh) 字节（已含保活模块 + 先流转服务中）/ $(grep -m1 '^SCRIPT_VERSION=' /root/ipes_full.sh | cut -d\" -f2)"
     break

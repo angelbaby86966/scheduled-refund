@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-14-r20"
+SCRIPT_VERSION="v2026-09-25-r20c"   # +r20-diskguard 磁盘守护 & +r20-hostname 对齐（自 0914 移植，与 0914 分支功能对齐）
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1882,6 +1882,32 @@ if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services f
   exit 0
 fi
 echo "[$(ts)] 服务正常" >> "$LOG"
+# ---------------------------------------------------------------------------
+# 【r20-diskguard 磁盘水位守护】/ 使用率 >= 90% 时做安全清理（12h 节流）。
+#   背景：30G 系统盘常态 93%（/data/happ 缓存 ~22G + docker 镜像 ~1G），
+#         缓存继续增长或日志积累顶到 100% 会导致容器写入失败、节点彻底失联。
+#   只清安全项：yum 缓存 / journald 限额 / 旧轮转日志 / tmp / dangling 镜像。
+#   绝不动 /data/happ 缓存（bdf 是平台管理的预分配文件，删除会破坏缓存索引与调度）。
+#   可用环境变量 DISK_GUARD_THRESHOLD 调阈值（默认 90）。
+# ---------------------------------------------------------------------------
+DISK_GUARD_THRESHOLD=${DISK_GUARD_THRESHOLD:-90}
+DG_ST=/var/lib/ipes-preheat/.last_disk_guard
+USG=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","");print $5}')
+if [ "${USG:-0}" -ge "$DISK_GUARD_THRESHOLD" ]; then
+  now_ts=$(date +%s); last_ts=$(cat "$DG_ST" 2>/dev/null || echo 0)
+  if [ $((now_ts - last_ts)) -ge 43200 ]; then
+    mkdir -p /var/lib/ipes-preheat 2>/dev/null
+    echo "$now_ts" > "$DG_ST" 2>/dev/null || true
+    yum clean all >/dev/null 2>&1
+    journalctl --vacuum-size=64M >/dev/null 2>&1
+    docker image prune -f >/dev/null 2>&1
+    find /var/log -type f \( -name "*.gz" -o -name "*.[0-9]" \) -mtime +3 -delete 2>/dev/null
+    find /var/log -type f -mtime +7 -size +20M ! -name "ipes_health.log" -delete 2>/dev/null
+    find /tmp -mindepth 1 -type f -atime +7 -delete 2>/dev/null
+    USG2=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","");print $5}')
+    echo "[$(ts)] [diskguard] / 水位 ${USG}% -> ${USG2}%（安全清理完成，/data 缓存未动）" >> "$LOG"
+  fi
+fi
 HEALTH
     chmod +x /usr/local/bin/ipes_health_check.sh
     touch /var/log/ipes_health.log 2>/dev/null
@@ -2273,6 +2299,30 @@ POSTBOOT
     log_message "[收尾] 已排程 reboot（PID=$!），本次部署到此结束"
 }
 
+# 【r20-hostname】宿主机 hostname 对齐平台官方渠道风格（21 位随机小写字母数字）。
+#   背景：官方渠道节点 hostname 为平台生成风格（如 i2zvc2t3pcetnhl9xelithz），
+#         自部署机直接拿 device_code（32hex）当 hostname，渠道特征一眼可辨。
+#   定位：消除该可见差异的实验性对齐（调度侧是否参考 hostname 未知，零风险可逆）。
+#   幂等：生成值持久化 /etc/.platform_hostname，重跑不换；已是目标值直接跳过。
+align_hostname() {
+    local target
+    if [ -s /etc/.platform_hostname ]; then
+        target=$(cat /etc/.platform_hostname 2>/dev/null)
+    else
+        target=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 21)
+        [ -n "$target" ] || return 0
+        echo "$target" > /etc/.platform_hostname 2>/dev/null
+    fi
+    [ -n "$target" ] || return 0
+    if [ "$(hostname)" = "$target" ]; then
+        return 0
+    fi
+    hostnamectl set-hostname "$target" 2>/dev/null || hostname "$target"
+    grep -qE "[[:space:]]$target([[:space:]]|$)" /etc/hosts 2>/dev/null || \
+        echo "127.0.0.1 $target" >> /etc/hosts
+    log_message "${CYAN}[信息]${NC} hostname 已对齐平台风格: $target（原: $(cat /etc/hostname 2>/dev/null | head -c 40)）"
+}
+
 # =============================================================================
 # 主流程
 # =============================================================================
@@ -2394,6 +2444,9 @@ main() {
 
     # [3.5] 解析 admin 后台需要的 32hex nodeId（r20 根治：用 nodeId 而不是 SN 调 admin 接口）
     resolve_admin_node_id
+
+    # [3.6] hostname 对齐平台官方风格（r20-hostname，幂等，注册前完成）
+    align_hostname
 
     # [4] 注册设备
     # 【r20-fix14】接住注册返回值：只有注册成功才在 [4.5] 立即流转「服务中」，

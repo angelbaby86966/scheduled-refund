@@ -55,6 +55,7 @@ if [ -z "$PROVINCE" ] || [ -z "$CITY" ]; then
   echo "[INFO] 使用地理位置: $PROVINCE / $CITY"
 fi
 
+# [REV] early-flow-port-20260925：注册成功→先提交业务41(q2)+200M→流转「服务中」→再继续部署（移植自 r20-live/fix14）
 # ============ A) 系统调优 ============
 cat > /etc/sysctl.d/99-ipes.conf <<'EOF'
 net.netfilter.nf_conntrack_max = 1048576
@@ -98,26 +99,28 @@ if [ -n "$nic" ]; then ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 ))); fo
 iptables -t raw -A PREROUTING -j NOTRACK 2>/dev/null; iptables -t raw -A OUTPUT -j NOTRACK 2>/dev/null
 
 # ============ B) 完整部署（r20：用真实 nodeId 绑定，根治业务没落盘） ============
-SRC1="https://ghproxy.net/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-success-0914/ipes_deploy_full.sh?t=$(date +%s)"
-SRC2="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-success-0914/ipes_deploy_full.sh"
-SRC3="https://fastly.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-success-0914/ipes_deploy_full.sh"
-# 验收闸门（2026-09-18 加固）：必须同时含「绑定标记 singleIpRadio」与「保活模块 ipes_health_check」。
-# 起因：SRC2 原本钉在旧 commit（jsdelivr @a214464 = 73918B，无保活、无 fix11 硬自愈），主源一抖动
-#       就会静默装上"完全没有保活"的机器 —— 装完日志全绿，几天后容器 Exited 无人拉起，最难事后发现。
-# 现在：任一源取回的脚本只要缺保活即被拒收并换下一个源；三源都不合格则直接中止，拒绝静默装旧版。
+# 【r20-fix14-port 20260925】分发通道去缓存：ghproxy.net 会把同一 path 的旧版本长期缓存住
+#   （?t=<ts> 无效，CDN 忽略 query），权威源 raw 排第一（短超时），gh-proxy.com 次之，jsDelivr 兜底。
+#   同时强制校验「先流转服务中」标记 early_transition_to_serving（缺即旧版，换源/报错，绝不静默装旧版）。
+SRC1="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-success-0914/ipes_deploy_full.sh"
+SRC2="https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-success-0914/ipes_deploy_full.sh"
+SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-success-0914/ipes_deploy_full.sh"
+# 验收闸门：必须同时含「绑定标记 singleIpRadio」「保活模块 ipes_health_check」「先流转标记 early_transition_to_serving」。
+# 任一源取回的脚本缺任一标记即被拒收并换下一个源；三源都不合格则直接中止，拒绝静默装旧版。
 ok=0
 for u in "$SRC1" "$SRC2" "$SRC3"; do
   if curl -fsSL -m 60 "$u" -o /tmp/ipes_full.try \
      && grep -q singleIpRadio /tmp/ipes_full.try \
-     && grep -q ipes_health_check /tmp/ipes_full.try; then
+     && grep -q ipes_health_check /tmp/ipes_full.try \
+     && grep -q early_transition_to_serving /tmp/ipes_full.try; then
     mv -f /tmp/ipes_full.try /root/ipes_full.sh; ok=1
-    echo "[INFO] 部署脚本就绪：$(wc -c < /root/ipes_full.sh) 字节（已含保活模块）"
+    echo "[INFO] 部署脚本就绪：$(wc -c < /root/ipes_full.sh) 字节（已含保活模块 + 先流转服务中）/ $(grep -m1 '^SCRIPT_VERSION=' /root/ipes_full.sh | cut -d\" -f2)"
     break
   fi
 done
 rm -f /tmp/ipes_full.try
 if [ "$ok" != "1" ]; then
-  echo "[ERROR] 三个源都未取到「含保活模块」的 ipes_deploy_full.sh，已中止部署（拒绝静默装旧版）。"
+  echo "[ERROR] 三个源都未取到「含保活模块+先流转服务中」的 ipes_deploy_full.sh，已中止部署（拒绝静默装旧版）。"
   echo "        源1: $SRC1"
   echo "        源2: $SRC2"
   echo "        源3: $SRC3"

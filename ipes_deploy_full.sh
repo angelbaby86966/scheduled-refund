@@ -60,7 +60,8 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-14-r20"
+SCRIPT_VERSION="v2026-09-25-r20a"   # +r20-fix14-port: [4.5] 注册成功先流转服务中再部署
+EARLY_FLOW_MARKER="r20-fix14-port-20260925"
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -1798,6 +1799,98 @@ check_ipes_containers() {
 }
 
 # =============================================================================
+# 【r20-fix14-port】绑定成功后立即流转「服务中」（移植自 r20-live，2026-09-25）
+#   用户要求：注册/绑定成功 → 先提交业务41(q2)+200M → 流转「服务中」→ 再继续部署。
+#   此刻容器未起、拿不到真业务ID → 先占位流转（平台写 ZHOUYI_XIAODU占位符），
+#   真 76hex SN 由后面保留不动的 [9]/[11.5] 自动回填。
+#   只单次探测、绝不等待、绝不 exit，失败仅告警返回 1，交给 [9] 兜底。
+# =============================================================================
+early_transition_to_serving() {
+    print_step "[4.5] 绑定成功 → 提交业务 ${BUSINESS_ID}(q2)+${NODE_USBW}M → 流转「服务中」（业务ID 稍后回填）"
+
+    # 取 node id（32hex）：[3.5] 通常已解析好；若为空则现场再解析一次
+    local node="${ADMIN_NODE_ID:-}"
+    if [ -z "$node" ]; then
+        resolve_admin_node_id >/dev/null 2>&1 || true
+        node="${ADMIN_NODE_ID:-}"
+    fi
+    if [ -z "$node" ]; then
+        log_message "${YELLOW}[警告]${NC} 未解析到 nodeId，跳过「服务中」流转（不影响后续 [9] 业务绑定）"
+        return 1
+    fi
+
+    # stateflow 需要 X-Token(JWT)；没有就跳过，交给 [9] 用签名方式兜底
+    if [ -z "${NODE_ACTIVATE_TOKEN:-}" ]; then
+        log_message "${YELLOW}[警告]${NC} 未提供 NODE_ACTIVATE_TOKEN，跳过「服务中」流转（不影响后续 [9] 业务绑定）"
+        return 1
+    fi
+
+    # 单次快探真业务ID（不等待）：命中就带上，避免覆盖存量机的真 SN；
+    # 取不到就留空 → 走"不带 hostname"路径（平台写占位符，后续 [9]/[11.5] 回填）。
+    # ⚠️ 此刻 docker 可能还没装，`docker exec` 会报错 —— 必须 2>/dev/null 静默。
+    local biz_sn="${NODE_HOSTNAME:-}"
+    if ! echo "$biz_sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+        biz_sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
+    fi
+    if ! echo "$biz_sn" | grep -qE '^[a-fA-F0-9]{64,80}$'; then
+        biz_sn=""
+    fi
+
+    # 组 body：平台不带 hostname 时会写占位符业务ID
+    local request_body
+    if [ -n "$biz_sn" ]; then
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"inService\",\"hostname\":\"$biz_sn\"}"
+        log_message "快探到本机已有业务ID: $biz_sn（携带流转，保护存量真业务ID）"
+    else
+        request_body="{\"nodes\":[\"$node\"],\"stage\":\"inService\"}"
+        log_message "容器尚未就绪，暂无法取到业务ID → 先占位流转（稍后由 [9]/[11.5] 自动回填真 SN）"
+    fi
+
+    # 平台规则：只有「待配置」状态才允许改设备信息（服务中/交付中会返回 code:7），
+    # 故顺序必须是：确保待配置 → 提交业务 ${BUSINESS_ID}(q2) + 带宽 ${NODE_USBW}M → 流转「服务中」。
+    log_message "转「服务中」之前：先提交业务 ${BUSINESS_ID}（q2）与带宽 ${NODE_USBW}M"
+    downgrade_to_configured "$node" || true
+    submit_business "$node" || true
+
+    local response http_code body
+    response=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    http_code=$(echo "$response" | tail -n1)
+    body=$(echo "$response" | sed '$d')
+    log_message "立即流转「服务中」响应 [HTTP $http_code]: $(echo "$body" | tail -n1)"
+
+    if [ "$http_code" = "200" ] && echo "$body" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 后台现在应显示「服务中」；业务ID 暂为占位符，容器起来后由 [9]/[11.5] 自动回填真 SN"
+        return 0
+    fi
+
+    # 兜底一次：刚注册的节点可能还不处于 configured（例如 bound 状态），
+    #   平台只允许 configured <-> inService 互转，故先降到 configured 再升回来。
+    log_message "${YELLOW}[警告]${NC} 首次流转未成功，尝试兜底：先降「待配置」再升「服务中」"
+    local down_body
+    if [ -n "$biz_sn" ]; then
+        down_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\",\"hostname\":\"$biz_sn\"}"
+    else
+        down_body="{\"nodes\":[\"$node\"],\"stage\":\"configured\"}"
+    fi
+    local resp1 resp2
+    resp1=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$down_body")
+    log_message "兜底-降级(->待配置) 响应 [HTTP $(echo "$resp1" | tail -n1)]: $(echo "$resp1" | sed '$d')"
+    sleep 3
+    resp2=$(admin_api_request_xtoken POST "$ADMIN_STATUS_API" "$request_body")
+    http_code=$(echo "$resp2" | tail -n1)
+    body=$(echo "$resp2" | sed '$d')
+    log_message "兜底-升回(->服务中) 响应 [HTTP $http_code]: $(echo "$body" | tail -n1)"
+
+    if [ "$http_code" = "200" ] && echo "$body" | grep -q '"code":0'; then
+        log_message "${GREEN}[成功]${NC} 兜底流转成功：后台现在应显示「服务中」（业务ID 稍后由 [9]/[11.5] 回填）"
+        return 0
+    fi
+
+    log_message "${YELLOW}[警告]${NC} 「服务中」流转仍未成功（不影响后续 [9] 的业务绑定，[9] 会再次尝试携带真业务ID流转）"
+    return 1
+}
+
+# =============================================================================
 # 主流程
 # =============================================================================
 main() {
@@ -1848,11 +1941,22 @@ main() {
     resolve_admin_node_id
 
     # [4] 注册设备
+    # 【r20-fix14-port】接住注册返回值：只有注册成功才在 [4.5] 立即流转「服务中」，
+    #   注册失败就跳过，避免把未绑定成功的节点误顶状态。
+    local reg_ok=1
     if [ -n "$DEVICE_ID" ]; then
         get_location_info
-        register_device "$DEVICE_ID" "$province" "$city" "$ISP" "$REMARK"
+        if register_device "$DEVICE_ID" "$province" "$city" "$ISP" "$REMARK"; then
+            reg_ok=0
+        fi
     else
         log_message "${YELLOW}[警告]${NC} 无法获取设备SN，跳过注册"
+    fi
+
+    # [4.5] 【r20-fix14-port】注册成功 → 立即提交业务41(q2)+200M并流转「服务中」，再继续部署。
+    #   真 76hex 业务ID 由后面 [9]/[11.5] 自动回填；此步只做"先让平台看到服务中"。
+    if [ $reg_ok -eq 0 ]; then
+        early_transition_to_serving
     fi
 
     # [5] Docker

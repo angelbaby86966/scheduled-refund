@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-25-r20a"   # +r20-fix14-port: [4.5] 注册成功先流转服务中再部署
+SCRIPT_VERSION="v2026-09-25-r20b"   # +r20-fix14-port: [4.5] 注册成功先流转服务中再部署
 EARLY_FLOW_MARKER="r20-fix14-port-20260925"
 
 # CDN/OSS 下载配置
@@ -1575,6 +1575,32 @@ if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services f
   exit 0
 fi
 echo "[$(ts)] 服务正常" >> "$LOG"
+# ---------------------------------------------------------------------------
+# 【r20-diskguard 磁盘水位守护】/ 使用率 >= 90% 时做安全清理（12h 节流）。
+#   背景：30G 系统盘常态 93%（/data/happ 缓存 ~22G + docker 镜像 ~1G），
+#         缓存继续增长或日志积累顶到 100% 会导致容器写入失败、节点彻底失联。
+#   只清安全项：yum 缓存 / journald 限额 / 旧轮转日志 / tmp / dangling 镜像。
+#   绝不动 /data/happ 缓存（bdf 是平台管理的预分配文件，删除会破坏缓存索引与调度）。
+#   可用环境变量 DISK_GUARD_THRESHOLD 调阈值（默认 90）。
+# ---------------------------------------------------------------------------
+DISK_GUARD_THRESHOLD=${DISK_GUARD_THRESHOLD:-90}
+DG_ST=/var/lib/ipes-preheat/.last_disk_guard
+USG=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","");print $5}')
+if [ "${USG:-0}" -ge "$DISK_GUARD_THRESHOLD" ]; then
+  now_ts=$(date +%s); last_ts=$(cat "$DG_ST" 2>/dev/null || echo 0)
+  if [ $((now_ts - last_ts)) -ge 43200 ]; then
+    mkdir -p /var/lib/ipes-preheat 2>/dev/null
+    echo "$now_ts" > "$DG_ST" 2>/dev/null || true
+    yum clean all >/dev/null 2>&1
+    journalctl --vacuum-size=64M >/dev/null 2>&1
+    docker image prune -f >/dev/null 2>&1
+    find /var/log -type f \( -name "*.gz" -o -name "*.[0-9]" \) -mtime +3 -delete 2>/dev/null
+    find /var/log -type f -mtime +7 -size +20M ! -name "ipes_health.log" -delete 2>/dev/null
+    find /tmp -mindepth 1 -type f -atime +7 -delete 2>/dev/null
+    USG2=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","");print $5}')
+    echo "[$(ts)] [diskguard] / 水位 ${USG}% -> ${USG2}%（安全清理完成，/data 缓存未动）" >> "$LOG"
+  fi
+fi
 HEALTH
     chmod +x /usr/local/bin/ipes_health_check.sh
     touch /var/log/ipes_health.log 2>/dev/null

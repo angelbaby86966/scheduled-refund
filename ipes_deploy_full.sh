@@ -142,7 +142,7 @@ ISP=""
 NUM_DIRS=""
 REMARK=""
 BUSINESS_ID="41"
-TARGET_HAPP="12"
+TARGET_HAPP="9"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
 SKIP_REBOOT=0
@@ -1751,22 +1751,42 @@ if ! docker exec ipes sh -c 'ps -ef | grep -q "[i]pes start"' 2>/dev/null; then
   docker exec ipes /app/ipes/bin/ipes start >/dev/null 2>&1
   logger -t ipes_watchdog "ipes master was down -> restarted"
 fi
-# 2) happ 路数防回弹（后台重推 12 路 / 配置被改回时自动裁回 TARGET_HAPP）
-#    直接改【宿主文件】（custom.yml 是单文件 bind-mount 的源，docker cp 写不回），再重启容器。
-#    带 10 分钟冷却：防止「裁剪重启->再被改回->再重启」形成重启风暴
-WANT="${TARGET_HAPP:-12}"
+# 2) happ 路数守护（r20-happ-floor：2026-09-25 改为「下限守护」）
+#    新规则：>= TARGET_HAPP 一律不管（平台推到 12 路就让它跑 12 路，绝不裁剪）；
+#            < TARGET_HAPP（默认 9）自动补回 9 —— 配置被裁则扩回 9 路，进程挂则重启容器拉起。
+#    带 10 分钟冷却：防止「补回重启->再被改->再重启」形成重启风暴
+WANT="${TARGET_HAPP:-9}"
 CFG="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
 [ -f "$CFG" ] || exit 0
 CUR=$(grep -oE 'happ[.][0-9]+' "$CFG" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-[ -n "$CUR" ] && [ "$CUR" -gt "$WANT" ] || exit 0
-NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_align.last 2>/dev/null || echo 0)
+[ -n "$CUR" ] || exit 0
+if [ "$CUR" -ge "$WANT" ]; then
+  # 配置 >= 下限：只查运行进程数，进程不足（如挂掉）则重启容器按配置拉起
+  RUN=$(pgrep -c -f 'happ' 2>/dev/null || echo 0)
+  if [ "${RUN:-0}" -ge "$WANT" ]; then exit 0; fi
+  NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_floor.last 2>/dev/null || echo 0)
+  [ $((NOW - LAST)) -lt 600 ] && exit 0
+  docker restart ipes >/dev/null 2>&1
+  echo "$NOW" > /var/run/ipes_happ_floor.last 2>/dev/null
+  logger -t ipes_watchdog "happ processes ${RUN}->restart (cfg=$CUR>=$WANT), floor guard"
+  exit 0
+fi
+# 配置 < 下限：在最后一个 happ 条目后补齐缺失的 happ.N（新列表格式），重启生效
+NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_floor.last 2>/dev/null || echo 0)
 [ $((NOW - LAST)) -lt 600 ] && exit 0
-awk -v w="$WANT" 'match($0,/happ[.][0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ[.][0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' "$CFG" > /tmp/_w_custom.new
+awk -v w="$WANT" '
+  { lines[NR]=$0 }
+  match($0, /^[[:space:]]*-[[:space:]]*\/data\/happ\/happ\.[0-9]+/) { last=NR }
+  END{
+    if (last==0) exit 1
+    for(i=1;i<=NR;i++){ if(match(lines[i],/happ\.[0-9]+/)){ num=substr(lines[i],RSTART+5,RLENGTH-5)+0; have[num]=1 } }
+    for(i=1;i<=NR;i++){ print lines[i]; if(i==last){ for(k=0;k<w;k++){ if(!(k in have)) print "  - /data/happ/happ." k } } }
+  }' "$CFG" > /tmp/_w_custom.new || { rm -f /tmp/_w_custom.new; exit 0; }
 if [ -s /tmp/_w_custom.new ]; then
   cat /tmp/_w_custom.new > "$CFG"
   docker restart ipes >/dev/null 2>&1
-  echo "$NOW" > /var/run/ipes_happ_align.last 2>/dev/null
-  logger -t ipes_watchdog "happ rebound ${CUR}->${WANT}, trimmed & restarted"
+  echo "$NOW" > /var/run/ipes_happ_floor.last 2>/dev/null
+  logger -t ipes_watchdog "happ floor guard: cfg ${CUR}->${WANT}, expanded & restarted"
 fi
 rm -f /tmp/_w_custom.new
 WATCHDOG
@@ -1927,15 +1947,15 @@ run_ipes_onekey() {
     return $?
 }
 
-# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（默认 12；2026-09-17 由 9 升 12，与后台模板一致）
+# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（2026-09-25 起默认 9：初始 9 路，平台推到 12 不干预，低于 9 看门狗自动补回）
 # 背景：后台默认下发的 custom.yml 多为 12 路（通用大内存模板），
-#       在 1GB 小内存机上 12 路 happ:vod 空载就吃 ~240MB，跑量后易 OOM 杀进程失联。
+#       初始按 TARGET_HAPP=9 落地；调度推高到 12 时顺其自然，掉到 9 以下自动补回。
 #       这里在部署完成后把配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 TARGET_HAPP」。
 # r20-fix3【关键修复】custom.yml 是【宿主单文件 bind-mount】的源（/opt/ipes/... 挂到容器 /app/ipes/...）。
 #       对 bind-mount 的单文件用 docker cp 写回【不会落盘】（只在容器 overlay 生效，重启即失效）→ 裁剪空转。
 #       正确做法：直接原地改宿主文件（保 inode），再 docker restart ipes。老镜像无宿主文件时回退 docker cp。
 align_happ_count() {
-    local want="${TARGET_HAPP:-12}"
+    local want="${TARGET_HAPP:-9}"
     if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
         return 0

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-26-r20e"   # +[5.55] lite_fused_tune: 网卡/CPU/防火墙/扩盘（精简融合）；-r20-nobbr 无 BBR/挂载调优
+SCRIPT_VERSION="v2026-09-26-r20f"   # +[r20f] get_ipes_sn 双读落定（根治 SN 瞬态值回填漂移）; +[5.55] lite_fused_tune; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -984,10 +984,28 @@ submit_business() {
 # 读取 IPES 容器生成的序列号 = 后台列表显示的「业务ID」（business_tags.hostName）
 # 例：072605d9d5eca5cfe6fcd43f535621e746c9c65f6cb8bc876f4edb2110333bba69bccfe3bf24（76 位 hex）
 get_ipes_sn() {
-    local sn=""
+    local sn="" sn2="" i=0
     sn=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
     if [ -z "$sn" ]; then
         sn=$(docker exec ipes cat /opt/soft/disk/IPES_SN 2>/dev/null | tr -d '\r\n')
+    fi
+    # 【r20f 根治瞬态值】容器首启后 agent 会重算 ipes_sn（实测约 1 分钟内落定），
+    # 单次读取可能拿到瞬态值 → 被回填进后台 → 业务ID 永久漂移（2026-09-26 47.104.108.113 实测）。
+    # 对策：双读一致性——间隔 8s 两次读取相同才视为落定；未落定则继续重读，
+    # 最多 15 次（约 2 分钟封顶），超时返回最后一次读取值。容器未就绪（空值）快速返回不等待。
+    if [ -n "$sn" ]; then
+        while [ $i -lt 15 ]; do
+            sleep 8
+            sn2=$(docker exec ipes cat /app/ipes/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
+            if [ -z "$sn2" ]; then
+                sn2=$(docker exec ipes cat /opt/soft/disk/IPES_SN 2>/dev/null | tr -d '\r\n')
+            fi
+            if [ "$sn2" = "$sn" ]; then
+                break
+            fi
+            sn="$sn2"
+            i=$((i+1))
+        done
     fi
     echo "$sn"
 }

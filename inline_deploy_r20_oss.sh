@@ -156,8 +156,6 @@ vm.dirty_background_ratio = 10
 vm.vfs_cache_pressure = 10
 vm.min_free_kbytes = 65536
 vm.overcommit_memory = 1
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_available_congestion_control = bbr cubic reno
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_max_syn_backlog = 65535
@@ -172,9 +170,8 @@ net.ipv4.tcp_orphan_retries = 1
 net.ipv4.tcp_retries2 = 8
 kernel.pid_max = 4194304
 EOF
-modprobe nf_conntrack tcp_bbr 2>/dev/null
+modprobe nf_conntrack 2>/dev/null
 sysctl -e -p /etc/sysctl.d/99-ipes.conf
-sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$nic" ]; then
   ncpu=$(nproc); mask=$(printf '%x' $(( (1<<ncpu)-1 )))

@@ -243,7 +243,7 @@ for u in "$SRC1" "$SRC2" "$SRC3"; do
      && [ "$(wc -c </root/ipes_full.sh 2>/dev/null | tr -d ' ')" -gt 100000 ] \
      && grep -q singleIpRadio /root/ipes_full.sh \
      && grep -q -- '--finish-only' /root/ipes_full.sh; then
-    if grep -q 'harden_yum_conf' /root/ipes_full.sh && grep -q 'lite_fused_tune' /root/ipes_full.sh; then
+    if grep -q 'harden_yum_conf' /root/ipes_full.sh && grep -q 'lite_fused_tune' /root/ipes_full.sh && grep -q 'r20f 根治瞬态值' /root/ipes_full.sh; then
       FULL_OK=1; FULL_SRC="$u"; break
     else
       echo "[WARN] $u 返回的 full 脚本缺 harden_yum_conf 标记（旧版/CDN 缓存），换源重试"

@@ -60,7 +60,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-25-r20c"   # +r20-diskguard 磁盘守护 & +r20-hostname 对齐（自 0914 移植，与 0914 分支功能对齐）
+SCRIPT_VERSION="v2026-09-25-r20d"   # -r20-nobbr: 移除 BBR 内核安装/自动重启 & 移除 noatime/commit=60 挂载调优（保留块层+VM 调优）
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -183,7 +183,7 @@ show_help() {
   --target-happ <N>       happy 进程数 (默认: 12)
   --skip-onekey           跳过 ipes_onekey 预热对齐
   --skip-olmt             跳过 olmt.sh 限速（希望节点跑满不封顶时加）
-  --no-reboot             不在收尾自动重启（默认：本次新装了内核才自动重启，让 BBR 生效）
+  --no-reboot             (已废弃，无效果：BBR 内核安装与自动重启逻辑已移除)
   --node-token <token>    节点激活 token（待配置→服务中）
   --resource-type <1|2>   节点资源类型：1=汇聚 2=专线 (默认: 2 专线)
   --dial-type <type>      上网方式 (默认: staticNetSingle 固定公网单 IP)
@@ -2035,22 +2035,7 @@ for d in /sys/block/vd* /sys/block/sd* /sys/block/xvd* /sys/block/nvme*; do
   [ -e "$d/queue/wbt_lat_usec" ] && echo 0 > "$d/queue/wbt_lat_usec" 2>/dev/null
   echo "  [$b] sched=$(cat $d/queue/scheduler 2>/dev/null|tr -d '[]') ra=256K nr=$(cat $d/queue/nr_requests 2>/dev/null) nomerges=$(cat $d/queue/nomerges 2>/dev/null) wbt=off"
 done
-# --- 2. 文件系统挂载（ext4 减日志开销；xfs 提速日志） ---
-FSTYPE=$(findmnt -no FSTYPE / 2>/dev/null); CUR=$(findmnt -no OPTIONS / 2>/dev/null)
-if [ "$FSTYPE" = "ext4" ]; then ADD="noatime,nodiratime,commit=60,barrier=0"
-elif [ "$FSTYPE" = "xfs" ]; then ADD="logbsize=256k"
-else ADD=""; fi
-if [ -n "$ADD" ]; then
-  # 仅以 fstab 根行第4列(挂载选项)判定是否已配置；避免 barrier=0 被错写到第6列时误判"已配置"而跳过修复
-  ROOT_OPTS=$(awk '$2=="/"&&($3=="ext4"||$3=="xfs"){print $4}' /etc/fstab 2>/dev/null)
-  case "$ROOT_OPTS" in
-    *commit=60*|*logbsize=256k*) echo "  [fstab] already active";;
-    *)
-      [ -f /etc/fstab ] && { cp -a /etc/fstab /etc/fstab.pcdn.bak; awk 'BEGIN{OFS="\t"} {if($2=="/"&&$3=="ext4"){$4="defaults,noatime,nodiratime,commit=60,barrier=0";$5="1";$6="1"} if($2=="/"&&$3=="xfs"){$4="defaults,logbsize=256k";$5="1";$6="1"} print}' /etc/fstab >/etc/fstab.new && mv /etc/fstab.new /etc/fstab; }
-      mount -o "remount,$ADD" / 2>/dev/null && echo "  [remount] OK" || echo "  [remount] 下次重启由 fstab 生效";;
-  esac
-fi
-# --- 3. 内核 VM：脏页放大 + vfs 缓存保活 + 页缓存预读（纯 PCDN 写缓存关键） ---
+# --- 2. 内核 VM：脏页放大 + vfs 缓存保活 + 页缓存预读（纯 PCDN 写缓存关键） ---
 cat > /etc/sysctl.d/99-pcdn-disk.conf <<'SYSCTL_EOF'
 # OWNER: pcdn_disk_tune —— PCDN 磁盘强化（脏页/缓存）
 vm.swappiness = 0
@@ -2094,79 +2079,6 @@ UNIT_EOF
     log_message "${GREEN}[磁盘强化]${NC} PCDN 磁盘调优已应用（wbt=off, dirty 放大, vfs_cache=50, page-cluster=8）"
 }
 
-enable_bbr_kernel() {
-    print_step "BBR 内核保障（无 BBR 内核时自动装 kernel-lt 5.4，下次重启生效）"
-    # 已支持 BBR：直接启用
-    if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
-        modprobe tcp_bbr 2>/dev/null
-        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
-        log_message "${GREEN}[BBR]${NC} 当前内核 $(uname -r) 已支持并启用 BBR"
-        return 0
-    fi
-    log_message "[BBR] 当前内核 $(uname -r) 无 BBR，安装 kernel-lt 5.4.278（el7 最后 LTS）"
-    local F="kernel-lt-5.4.278-1.el7.elrepo.x86_64.rpm"
-    local OK=0
-    # elrepo 官方已下架 el7 内核，走历史归档镜像（coreix 主 / viethosting 备）
-    for u in "https://mirrors.coreix.net/elrepo-archive-archive/kernel/el7/x86_64/RPMS/$F" \
-             "https://mirrors.viethosting.com/centos/kernel-lt/$F"; do
-        curl -fsSL --connect-timeout 15 -m 420 -o /tmp/$F "$u" && [ -s /tmp/$F ] && OK=1 && break
-        rm -f /tmp/$F
-    done
-    if [ $OK -eq 0 ]; then
-        log_message "${YELLOW}[BBR]${NC} 内核包下载失败，跳过 BBR（不影响本次部署）"
-        return 0
-    fi
-    # 【r20-fix8】记录"本次是否新装内核"：装之前 /boot 里没有它 → 说明这是台新机，
-    #   收尾时才可以安全地自动重启（已装过但没重启的存量机不自动重启，交人工判断）。
-    local fresh_install=0
-    [ -f /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 ] || fresh_install=1
-    rpm -ivh /tmp/$F >/dev/null 2>&1
-    rm -f /tmp/$F
-    if [ -f /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 ]; then
-        [ "$fresh_install" -eq 1 ] && touch /var/run/ipes_kernel_installed_this_run
-        grubby --set-default /boot/vmlinuz-5.4.278-1.el7.elrepo.x86_64 2>/dev/null
-        # 开机自动：加载 BBR + 确保 docker/ipes 容器起来（SWAS 的 /etc/sysctl.d、/etc/systemd/system 为只读，走 crontab @reboot）
-        cat > /usr/local/bin/bbr_boot.sh <<'BBRBOOT'
-#!/bin/bash
-# BBR 开机自启 + docker/容器恢复（部署脚本固化）
-# 【r20-fix8】必须自带 PATH：cron 作业的 PATH 只有 /usr/bin:/bin，
-#   modprobe(/sbin)、sysctl(/usr/sbin) 均不在其中 → command not found 被静默吞掉。
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-(
-  sleep 20
-  # ① 业务优先：先把 docker 与 ipes 容器拉起来
-  for i in 1 2 3 4 5 6; do
-    systemctl is-active docker >/dev/null 2>&1 && break
-    systemctl start docker >/dev/null 2>&1; sleep 10
-  done
-  docker inspect ipes >/dev/null 2>&1 && docker start ipes >/dev/null 2>&1
-  echo "[$(date '+%F %T')] docker=$(systemctl is-active docker 2>/dev/null) container=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)"
-  # ② BBR：带重试。开机早期模块树/proc 未必就绪，单次尝试会失败（2026-09-17 实测踩过）
-  ok=0
-  for i in $(seq 1 18); do
-    if modprobe tcp_bbr 2>/dev/null \
-       && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 \
-       && sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 \
-       && [ "$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
-      ok=1; break
-    fi
-    sleep 10
-  done
-  echo "[$(date '+%F %T')] kernel=$(uname -r) bbr_ok=$ok cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
-) >> /var/log/ipes_bbr_boot.log 2>&1 &
-BBRBOOT
-        chmod +x /usr/local/bin/bbr_boot.sh
-        ( crontab -l 2>/dev/null | grep -v bbr_boot; echo "@reboot /usr/local/bin/bbr_boot.sh" ) | crontab -
-        systemctl enable crond >/dev/null 2>&1 || true
-        log_message "${GREEN}[BBR]${NC} kernel-lt 5.4.278 已安装并设为默认启动内核"
-        log_message "[BBR] 本次部署在当前内核继续（cubic），下次重启自动进入 5.4 并启用 BBR"
-    else
-        log_message "${YELLOW}[BBR]${NC} 内核安装异常，跳过 BBR"
-    fi
-}
-
 check_ipes_containers() {
     local count
     count=$(docker ps 2>/dev/null | grep -c ipes || true)
@@ -2195,128 +2107,6 @@ ensure_cron_path() {
     else
         log_message "${YELLOW}[警告]${NC} crontab PATH 头写入失败，cron 里 sbin 命令仍会找不到"
     fi
-}
-
-# =============================================================================
-# 收尾二：[r20-fix8] 本次装了新内核则自动重启，让 BBR 当场生效
-# -----------------------------------------------------------------------------
-# 背景：enable_bbr_kernel 装好 kernel-lt 且用 grubby 把默认启动项写盘，但脚本不重启
-#       → 节点继续跑 3.10 + cubic，"重启才生效"全靠人记得，容易无限期漏掉。
-#       新机刚部署完：缓存冷、流量未起，此时重启代价≈0；重启后 @reboot 链
-#       （bbr_boot + ipes_ddos_guard）会自动拉起 docker/ipes 并启用 BBR。
-#
-# 只对「本次新装内核」的机器生效（/var/run/ipes_kernel_installed_this_run 由
-# enable_bbr_kernel 在确认是新机后才写）；存量机重跑部署不会被动重启。
-#
-# 重启前三项安全门（任一不过 → 放弃自动重启 + 告警，交人工）：
-#   ① 默认内核文件与模块目录都在
-#   ② /etc/fstab 不含 data=writeback（ext4 禁止 remount 改 data mode → 根 fs 会卡只读）
-#   ③ daemon.json 与 sysconfig 未同时声明 storage-driver/log-driver（docker 会拒启）
-# 可用 --no-reboot 关闭本步骤；延时可用 REBOOT_DELAY 环境变量调整（默认 60 秒）。
-# =============================================================================
-schedule_reboot_if_kernel_changed() {
-    if [ "${SKIP_REBOOT:-0}" -eq 1 ]; then
-        print_step "[收尾] 重启收尾已按 --no-reboot 跳过"
-        return 0
-    fi
-    print_step "[收尾] 重启收尾检查（新内核需重启才生效）"
-
-    # 等后台内核安装落定（最多 180 秒），否则无法判断本次是否真装了新内核
-    if [ -n "${BBR_PID:-}" ] && kill -0 "$BBR_PID" 2>/dev/null; then
-        log_message "[收尾] 等待后台内核安装完成（最多 180 秒）..."
-        local waited=0
-        while kill -0 "$BBR_PID" 2>/dev/null && [ "$waited" -lt 180 ]; do
-            sleep 5; waited=$((waited + 5))
-        done
-    fi
-
-    if [ ! -f /var/run/ipes_kernel_installed_this_run ]; then
-        log_message "[收尾] 本次未新装内核 → 不做自动重启"
-        if [ "$(basename "$(grubby --default-kernel 2>/dev/null || echo none)")" != "vmlinuz-$(uname -r)" ]; then
-            log_message "${YELLOW}[收尾]${NC} 注意：默认内核 $(basename "$(grubby --default-kernel 2>/dev/null)") ≠ 当前 $(uname -r)，建议人工择机重启"
-        fi
-        return 0
-    fi
-
-    local cur_kernel def_path def_ver blocker=""
-    cur_kernel="$(uname -r)"
-    def_path="$(grubby --default-kernel 2>/dev/null)"
-    def_ver="$(basename "${def_path:-none}" | sed 's/^vmlinuz-//')"
-
-    if [ -z "$def_path" ] || [ ! -f "$def_path" ]; then
-        log_message "${YELLOW}[收尾]${NC} grub 默认内核不可读，跳过自动重启（请人工确认）"
-        return 0
-    fi
-    if [ "$def_ver" = "$cur_kernel" ]; then
-        log_message "${GREEN}[收尾]${NC} 已在默认内核 $cur_kernel，无需重启"
-        return 0
-    fi
-
-    # 安全门 ①
-    [ -d "/lib/modules/$def_ver" ] || blocker="新内核模块目录 /lib/modules/$def_ver 缺失"
-    # 安全门 ②
-    if [ -z "$blocker" ] && grep -q 'data=writeback' /etc/fstab 2>/dev/null; then
-        blocker="fstab 仍含 data=writeback（重启后根 fs 有卡只读风险）"
-    fi
-    # 安全门 ③
-    if [ -z "$blocker" ] && [ -f /etc/docker/daemon.json ] \
-       && grep -qE '"log-driver"|"storage-driver"' /etc/docker/daemon.json 2>/dev/null \
-       && grep -qE -e '--(log|storage)-driver' /etc/sysconfig/docker /etc/sysconfig/docker-storage 2>/dev/null; then
-        blocker="docker 配置冲突（sysconfig flag 与 daemon.json 同时声明 storage/log-driver）"
-    fi
-    if [ -n "$blocker" ]; then
-        log_message "${RED}[收尾]${NC} 预检未通过，已放弃自动重启：$blocker"
-        log_message "${YELLOW}[收尾]${NC} 排查后手动重启：setsid bash -c 'sleep 5; reboot' &"
-        return 0
-    fi
-
-    # 重启后自检脚本（开机 25 秒跑一次，结果写 /var/log/ipes_post_reboot.log）
-    cat > /usr/local/bin/ipes_post_reboot_check.sh <<'POSTBOOT'
-#!/bin/bash
-# 【r20-fix8】重启后自检：确认内核切换、BBR、docker/容器、happ、绑定身份
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-{
-  echo "[$(date '+%F %T')] === 重启后自检 ==="
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    systemctl is-active docker >/dev/null 2>&1 && break
-    systemctl start docker >/dev/null 2>&1; sleep 5
-  done
-  docker inspect ipes >/dev/null 2>&1 && docker start ipes >/dev/null 2>&1
-  sleep 10
-  CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
-  echo "kernel=$(uname -r) cc=$CC qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
-  echo "docker=$(systemctl is-active docker 2>/dev/null) container=$(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null)"
-  echo "happ=$(pgrep -c -f 'happ:vod' 2>/dev/null) node_id=$(cat /usr/local/edge_zycloud/device_code 2>/dev/null)"
-  # 【r20-fix13】guard 链由 `@reboot sleep 90 && ipes_ddos_guard.sh` 恢复，
-  #   而本自检是 `@reboot sleep 25` 触发 —— 检查时机**必然早于**加固恢复，
-  #   直接判定会恒定误报 missing（2026-09-17 f05cf248 实测：自检说 missing，
-  #   等到 uptime 161s 时链已有 11 条规则）。改为等待式判定，最多等 140 秒。
-  GC=missing
-  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-    iptables -nL IPES_GUARD >/dev/null 2>&1 && { GC=ok; break; }
-    sleep 10
-  done
-  echo "guard_chain=$GC$([ "$GC" = missing ] && echo '（超 140 秒未恢复，检查 ipes_ddos_guard.sh / crond）' || echo '')"
-  if [ "$CC" = "bbr" ]; then
-    echo "RESULT=OK 内核与 BBR 均已生效"
-  else
-    echo "RESULT=WARN 内核已切换但 BBR 未启用，检查 /var/log/ipes_bbr_boot.log"
-  fi
-} >> /var/log/ipes_post_reboot.log 2>&1
-find /var/log/ipes_post_reboot.log -size +1M -exec truncate -s 100K {} \; 2>/dev/null
-exit 0
-POSTBOOT
-    chmod +x /usr/local/bin/ipes_post_reboot_check.sh
-    ( crontab -l 2>/dev/null | grep -v ipes_post_reboot_check; \
-      echo '@reboot sleep 25 && /usr/local/bin/ipes_post_reboot_check.sh' ) | crontab -
-    ensure_cron_path
-
-    log_message "${GREEN}[收尾]${NC} 三项预检通过，${REBOOT_DELAY} 秒后自动重启（$cur_kernel → $def_ver）"
-    log_message "[收尾] 重启后 25 秒自动自检，结果见 /var/log/ipes_post_reboot.log"
-    log_message "${YELLOW}[收尾]${NC} 部署会话即将断开，属正常现象"
-    setsid bash -c "sleep ${REBOOT_DELAY}; sync; /sbin/reboot" >/dev/null 2>&1 </dev/null &
-    log_message "[收尾] 已排程 reboot（PID=$!），本次部署到此结束"
 }
 
 # 【r20-hostname】宿主机 hostname 对齐平台官方渠道风格（21 位随机小写字母数字）。
@@ -2433,11 +2223,6 @@ main() {
         fi
     else
 
-    # [0.9] BBR 内核保障（r20-fix5：改为后台安装，不阻塞部署 —— 内核包走海外源最慢 7 分钟，
-    #       同步等待会让「重置→注册→绑定」整体拖到 10 分钟。后台装完自动设默认启动项，下次重启生效。）
-    enable_bbr_kernel &
-    BBR_PID=$!
-    log_message "[BBR] 内核安装已转入后台 (PID=$BBR_PID)，部署继续不等待"
 
     # [1] zycloud agent
     print_step "检测服务器环境并部署 zycloud agent"
@@ -2809,8 +2594,6 @@ GUARD_EOF
 
     # [13][r20-fix8] 收尾一：给 crontab 补 PATH 头（否则 cron 里 sbin 命令全部找不到）
     ensure_cron_path
-    # [13][r20-fix8] 收尾二：本次新装内核 → 自动重启，让 5.4 + BBR 当场生效
-    schedule_reboot_if_kernel_changed
 }
 
 main "$@"

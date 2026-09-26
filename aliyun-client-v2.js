@@ -1061,24 +1061,26 @@
     /**
      * 创建配额提升申请（Quota Center）
      * 轻量应用服务器实例数量上限配额 ID: q_z3sbl5
+     * 【2026-09-26 修复】改为浏览器直连 quotas.aliyuncs.com（旧代理端点拼写错误已绕开）
      */
     async createQuotaApplication(regionId, desireValue, reason) {
-      return this.callCentralApi('CreateQuotaApplication', {
+      return callQuotaApi('CreateQuotaApplication', {
         ProductCode: 'swas',
         QuotaActionCode: 'q_z3sbl5',
         DesireValue: desireValue,
         Reason: reason || '业务扩展，需批量创建轻量应用服务器实例',
         QuotaCategory: 'CommonQuota',
         NoticeType: 0,
-        Dimensions: [{ Key: 'regionId', Value: regionId }],
+        'Dimensions.1.Key': 'regionId',
+        'Dimensions.1.Value': regionId,
       });
     },
 
     /**
-     * 查询配额提升申请列表（Quota Center）
+     * 查询配额提升申请列表（Quota Center）—— 直连 quotas.aliyuncs.com
      */
     async listQuotaApplications(productCode, quotaActionCode) {
-      return this.callCentralApi('ListQuotaApplications', {
+      return callQuotaApi('ListQuotaApplications', {
         ProductCode: productCode || 'swas',
         QuotaActionCode: quotaActionCode || 'q_z3sbl5',
       });
@@ -1137,6 +1139,66 @@
       throw e;
     }
     return { success: true, code: data.Code, message: data.Message, data: data };
+  }
+
+  // ====== 配额中心 API 浏览器端直连（2026-09-26 修复） ======
+  // 背景：旧版 createQuotaApplication 走 Edge Function 代理，但代理里 QUOTA_ENDPOINT
+  //   拼写成 quotacenter.aliyuncs.com（域名不存在，DNS NXDOMAIN），批量提额全地区失败。
+  // 实测 quotas.aliyuncs.com 允许 CORS（Access-Control-Allow-Origin: *），改为浏览器直连，
+  //   签名方式与 callBssApi 相同（POP RPC HMAC-SHA1），Version=2020-05-10。
+  async function callQuotaApi(action, params) {
+    var ak = getAccessKeyId(), sk = getAccessKeySecret();
+    if (!ak || !sk) throw new Error('请先设置阿里云 AK/SK 凭证');
+
+    var commonParams = {
+      AccessKeyId: ak,
+      Action: action,
+      Format: 'JSON',
+      SignatureMethod: 'HMAC-SHA1',
+      SignatureNonce: uuid4(),
+      SignatureVersion: '1.0',
+      Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      Version: '2020-05-10',
+    };
+
+    var allParams = {};
+    Object.keys(commonParams).forEach(function(k) { allParams[k] = commonParams[k]; });
+    Object.keys(params).forEach(function(k) {
+      var v = params[k];
+      if (v === undefined || v === null) return;
+      allParams[k] = String(v);
+    });
+
+    var sortedKeys = Object.keys(allParams).sort();
+    var canonicalParts = [];
+    for (var i = 0; i < sortedKeys.length; i++) {
+      var key = sortedKeys[i];
+      var value = allParams[key];
+      if (value === undefined || value === null) continue;
+      canonicalParts.push(percentEncode(key) + '=' + percentEncode(String(value)));
+    }
+    var canonicalQuery = canonicalParts.join('&');
+    var stringToSign = 'POST&' + percentEncode('/') + '&' + percentEncode(canonicalQuery);
+
+    var signKey = sk + '&';
+    var signatureBytes = await hmacSha1(signKey, stringToSign);
+    var signature = base64Encode(signatureBytes);
+    var finalQuery = canonicalQuery + '&' + percentEncode('Signature') + '=' + percentEncode(signature);
+
+    var response = await fetch('https://quotas.aliyuncs.com/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: finalQuery,
+    });
+
+    var data = await response.json();
+    if (!response.ok && (data.Code || data.Message)) {
+      var e = new Error(data.Message || data.Code || (action + ' 失败'));
+      e.code = data.Code;
+      e.response = data;
+      throw e;
+    }
+    return data;
   }
 
   function generateClientToken() {

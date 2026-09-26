@@ -697,7 +697,7 @@ Deno.serve(async (req:Request)=>{
           }
         }
 
-        const QUOTA_ENDPOINT = "https://quotacenter.aliyuncs.com/";
+        const QUOTA_ENDPOINT = "https://quotas.aliyuncs.com/"; // 2026-09-26 修复：原 quotacenter.aliyuncs.com 为拼写错误（NXDOMAIN），致提额全失败
         const QUOTA_VERSION = "2020-05-10";
         const data = await callAliyun(QUOTA_ENDPOINT, "CreateQuotaApplication", qParams, ak_id, ak_secret, QUOTA_VERSION);
         return json({success: true, data});

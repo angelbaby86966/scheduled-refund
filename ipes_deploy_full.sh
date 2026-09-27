@@ -29,6 +29,7 @@
 #   --target-happ <N>       happy 进程数，默认 12
 #   --skip-onekey           跳过 ipes_onekey 预热对齐
 #   --skip-olmt             跳过 olmt.sh 限速（节点跑满不封顶时加）
+#   --no-tune               跳过全部性能调优（[5.5]磁盘内核/[5.55]网卡CPU/[5.6]峰值/[5.8]网络小项；保留防火墙放行+扩盘+日清）
 #   --help                  显示帮助
 #
 # 后台认证（两种，Bearer 优先；均已在脚本内配置 test.sh 的真实凭证，可用环境变量覆盖）：
@@ -60,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-26-r20f"   # +[r20f] get_ipes_sn 双读落定（根治 SN 瞬态值回填漂移）; +[5.55] lite_fused_tune; -r20-nobbr
+SCRIPT_VERSION="v2026-09-27-r20g"   # +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -145,6 +146,7 @@ BUSINESS_ID="41"
 TARGET_HAPP="9"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
+NO_TUNE=0
 SKIP_REBOOT=0
 REBOOT_DELAY=60
 # 【r20-fix10】--finish-only 收尾补齐开关。必须在全局默认区初始化！
@@ -244,6 +246,7 @@ parse_arguments() {
             --target-happ) TARGET_HAPP="$2"; shift 2 ;;
             --skip-onekey) SKIP_ONEKEY=1; shift ;;
             --skip-olmt)   SKIP_OLMT=1; shift ;;
+            --no-tune)     NO_TUNE=1; shift ;;
             --no-reboot)   SKIP_REBOOT=1; shift ;;
             --finish-only) FINISH_ONLY=1; shift ;;
             --node-token)  NODE_ACTIVATE_TOKEN="$2"; shift 2 ;;
@@ -2313,7 +2316,12 @@ main() {
     # [5.5] PCDN 专用优化前置：先拉满磁盘/内核吞吐，再部署业务
     # 关键顺序：让 ipes 容器在「已调优的内核」上启动，使首启预热、任何初始探测、业务提交
     # 都跑在 wbt=off / 脏页放大 / vfs 缓存保活 / 页缓存预读放大的环境里，给后台更干净的优质初评。
-    pcdn_disk_tune
+    if [ "${NO_TUNE:-0}" = "1" ]; then
+        log_message "[no-tune] 跳过 [5.5] 磁盘/内核调优（写入 /etc/ipes-notune 标记）"
+        touch /etc/ipes-notune 2>/dev/null
+    else
+        pcdn_disk_tune
+    fi
 
     fi   # 【r20-finish】完整链路分支结束。以下 [5.6]~[13] 在两种模式下都会执行（补齐模式的全部内容）
 
@@ -2322,6 +2330,9 @@ main() {
     #   不重建容器；幂等可重复执行。
     lite_fused_tune() {
         log_message "执行 [5.55] 精简融合调优（网卡/CPU/防火墙/扩盘）"
+        if [ "${NO_TUNE:-0}" = "1" ]; then
+            log_message "[no-tune] 跳过 [A] 网卡 / [B] CPU 性能调优（保留防火墙放行与扩盘）"
+        else
         # ---- [A] 网卡：RPS 全核 + fq 队列 + ring 4096 + txqueuelen 10000 ----
         local nic
         nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
@@ -2364,6 +2375,7 @@ GOV_EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable ipes-gov-tuned.service >/dev/null 2>&1
         log_message "${GREEN}[成功]${NC} CPU：governor=performance（${gn} 核热写）+ THP=never + 开机重放"
+        fi   # no-tune 分支结束
         # ---- [C] 防火墙：入向 TCP/UDP 全放行（不动 Docker 链，rc.local 持久化）----
         for s in firewalld iptables ip6tables; do
             systemctl disable --now "$s" >/dev/null 2>&1 || true
@@ -2506,7 +2518,11 @@ PEAK_TXLOG_EOF
          echo '* * * * * /usr/local/bin/ipes_txlog.sh >/dev/null 2>&1') | crontab -
         log_message "${GREEN}[成功]${NC} [5.6] 峰值上行强化完成"
     }
-    peak_uplink_tune
+    if [ "${NO_TUNE:-0}" = "1" ]; then
+        log_message "[no-tune] 跳过 [5.6] 峰值上行强化（dirty/fd/保留块/峰前自检/tx采样）"
+    else
+        peak_uplink_tune
+    fi
 
     # [5.7] 日清与资源瘦身：匹配上机窗口 17:00 上机→23:30 下机（幂等；r20-live）
     daily_clean_setup() {
@@ -2554,12 +2570,15 @@ CLEAN_EOF
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 {
+DEV=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}'); DEV=${DEV:-eth0}
+# [r20g] no-tune：存在 /etc/ipes-notune 标记时跳过内核/网卡小项（iptables 加固保留）
+if [ ! -f /etc/ipes-notune ]; then
 sysctl -w net.ipv4.tcp_max_syn_backlog=65535 net.core.somaxconn=65535 \
   net.ipv4.icmp_echo_ignore_broadcasts=1 net.ipv4.icmp_ratelimit=1000 \
   net.netfilter.nf_conntrack_udp_timeout=15 net.netfilter.nf_conntrack_udp_timeout_stream=60 >/dev/null 2>&1
-DEV=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}'); DEV=${DEV:-eth0}
 ip link set $DEV txqueuelen 10000 2>/dev/null
 ethtool -K $DEV gro on gso on tso on 2>/dev/null
+fi
 iptables -N IPES_GUARD 2>/dev/null
 iptables -F IPES_GUARD
 iptables -A IPES_GUARD -m state --state ESTABLISHED,RELATED -j RETURN

@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v112 已加载 - 下单链路抗中断：Edge Function 预热 + 地域错峰200ms发起 + AbortError 快速重试(0.3s起) + 尝试耗时诊断（保留：全功能9地域 + 批量凭证多选下拉 + 多账号串行 + 批量重启真实总台数）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v112 已加载 - 下单链路抗中断：Edge Function 预热 + 地域错峰200ms发起 + AbortError 快速重试(0.3s起) + 尝试耗时诊断（保留：全功能12地域 + 批量凭证多选下拉 + 多账号串行 + 批量重启真实总台数）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -289,6 +289,9 @@ var REGION_INFO_DEFAULT = {
   'cn-heyuan':    '河源',
   'cn-wuhan-lr':  '武汉',
   'cn-wulanchabu': '乌兰察布',
+  'cn-qingdao':   '青岛',
+  'cn-zhangjiakou': '张家口',
+  'cn-huhehaote': '呼和浩特',
 };
 
 var REGION_COLORS_DEFAULT = {
@@ -301,6 +304,9 @@ var REGION_COLORS_DEFAULT = {
   'cn-heyuan':    '#06b6d4',
   'cn-wuhan-lr':  '#ec4899',
   'cn-wulanchabu': '#14b8a6',
+  'cn-qingdao':   '#6366f1',
+  'cn-zhangjiakou': '#84cc16',
+  'cn-huhehaote': '#d946ef',
 };
 
 // 内置地区的默认可用区（仅地区管理页展示用，下游逻辑不依赖）
@@ -314,6 +320,9 @@ var REGION_ZONE_DEFAULT = {
   'cn-heyuan':    '华南2',
   'cn-wuhan-lr':  '华中1',
   'cn-wulanchabu': '华北6',
+  'cn-qingdao':   '华北1',
+  'cn-zhangjiakou': '华北3',
+  'cn-huhehaote': '华北5',
 };
 
 // 【2026-09-19 页面式地区管理】运行时合并注册表（内置默认 + 自定义 + 改名覆盖）。

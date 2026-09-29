@@ -55,7 +55,7 @@
           <div class="section-actions" data-page-node-id="q0gsPmzQmRXjDafiisrruV">
             <button class="btn btn-sm" id="regionSelectAllBtn" onclick="selectAllRegions()" data-page-node-id="NArJOcI2MJngLFNjS1gslP">全选地域</button>
             <button class="btn btn-sm" onclick="deselectAllRegions()" data-page-node-id="p7EI4V4evYYZEIcum5MA9B">取消全选</button>
-            <button class="btn btn-sm" id="regionManageBtn" onclick="openRegionManageModal()" title="启用 / 禁用地区（代码保留，随时勾回来）">⚙️ 地区管理</button>
+            <button class="btn btn-sm" id="regionManageBtn" onclick="switchTab('regionmgmt')" title="打开地区管理页：增删改查、启用 / 禁用地区">⚙️ 地区管理</button>
             <div class="cred-multi-wrap">
               <button type="button" id="batchCredBtn" class="cred-multi-btn" onclick="toggleBatchCredDropdown()" title="选择本次批量操作使用的阿里云凭证（多账号场景，可多选并发执行）" data-page-node-id="X3aLScaGRrDGS0imSg3Fm3">— 选择凭证（多选）—</button>
               <div id="batchCredDropdown" class="cred-multi-dropdown" style="display:none;" data-page-node-id="hbcdropdown0"></div>
@@ -116,6 +116,7 @@
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')" data-page-node-id="tV1TI0PxMSN0V4R78MP8qP">⏰ 定时退订</button>
             <button class="tab" data-tab="order" onclick="switchTab('order')" data-page-node-id="Mfp4skgCjFpMZzWcj7ttAB">🛒 批量下单</button>
             <button class="tab" data-tab="quota" onclick="switchTab('quota')" data-page-node-id="CEHLxcRUbGGoskF7UbjE5T">📈 批量提额</button>
+            <button class="tab" data-tab="regionmgmt" onclick="switchTab('regionmgmt')" data-page-node-id="qR8mT2vXkLwBnD7sJhCe4f">🗺️ 地区管理</button>
             <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')" data-page-node-id="YUlHHsVe7zq1spcDSbZBpl">🖼️ 镜像克隆</button>
           </div>
 
@@ -447,6 +448,36 @@
                   </button>
                 </div>
                 <small style="color:#888; display:block; text-align:center; margin-top:8px;" data-page-node-id="g3PtZHoqN4hs7a2OX9uHcO">目标上限已固定为 <b>500 台</b>。若某地区当前配额已是 500（或更高），阿里云会返回 <code>The applied quota value is invalid.</code> 并跳过该地区，属正常现象。配额申请通常约 5 分钟审批，提交后可在阿里云控制台「申请历史」查看结果。</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- 地区管理面板 -->
+          <div class="tab-content" id="tab-regionmgmt" data-page-node-id="kW3nR9pQxVbLmT8sYhDg2e">
+            <div class="card" data-page-node-id="mJ5cH2wFqNzRvXbK8tLpUe6">
+              <div class="card-header" data-page-node-id="nB7dG4yTrWqXmZcJ6vHsA1f">
+                <h3 data-page-node-id="oK9fL3xVnCwRbTqM5jYe8d">🗺️ 地区管理</h3>
+                <p class="card-desc" data-page-node-id="pL0aS8gHkFvDxZnQ2rWtB7c">管理可用地域列表，禁用后该地域将从分配池中移除。</p>
+              </div>
+              <div class="card-body" data-page-node-id="qM1eT6zJpXvKcNbR9wFsD4g">
+                <div style="display:flex; gap:10px; margin-bottom:14px; align-items:center;" data-page-node-id="rN8kU2yHwBqXcTdV5mJe7a">
+                  <button class="btn btn-primary" onclick="openRegionAddModal()" data-page-node-id="sV3jP7kLmQwXnZrB8tCdF2g">➕ 添加地域</button>
+                  <button class="btn" onclick="resetRegionRegistry()" title="清除所有自定义地区与改名，重新启用全部内置地区" data-page-node-id="tW6bR1nCxKvQzMpL4jHsE9d">↩️ 恢复默认</button>
+                </div>
+                <div class="region-table-wrap" data-page-node-id="uX2aE5fVgJnHwKqR7tYbM3z">
+                  <table class="region-table" data-page-node-id="vC9dF6xWlKmRnQpS5uHjB8a">
+                    <thead data-page-node-id="wD1bG7yXmLnSsQrT6vIkC9f">
+                      <tr data-page-node-id="xE0cH8zYnMoTtRsU7wJlD1g">
+                        <th data-page-node-id="yF1dI9aZoNpUuStV8xKmE2h">REGION_ID</th>
+                        <th data-page-node-id="zG2eJ0bApOqVvTwW9yLnF3i">名称</th>
+                        <th data-page-node-id="aH3fK1cBqRwWwUxX0zMoG4j">区域</th>
+                        <th data-page-node-id="bI4gL2dCrSxXxVyY1AnpH5k">状态</th>
+                        <th data-page-node-id="cJ5hM3eDsTyYyWzZ2BoqI6l">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="regionMgmtTableBody" data-page-node-id="dK6iN4fEtUzZzXaA3CprJ7m"></tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </div>

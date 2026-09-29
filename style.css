@@ -1824,3 +1824,85 @@ body {
   font-size: 12px;
   margin-top: 4px;
 }
+
+/* ===== 地区管理页（2026-09-19） ===== */
+.mono {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+}
+
+.region-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.region-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.region-table th,
+.region-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.region-table thead th {
+  background: #f9fafb;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.region-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.region-table tbody tr:hover {
+  background: #f8faff;
+}
+
+.region-actions {
+  white-space: nowrap;
+}
+
+.region-actions .btn + .btn {
+  margin-left: 6px;
+}
+
+.region-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.region-badge-on {
+  background: #e6f7ee;
+  color: #0f9d58;
+  border: 1px solid #b7eb8f;
+}
+
+.region-badge-off {
+  background: #feecec;
+  color: #e74c3c;
+  border: 1px solid #ffa39e;
+}
+
+.region-custom-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #e7f3ff;
+  color: #1677ff;
+  vertical-align: 1px;
+}

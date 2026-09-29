@@ -278,7 +278,8 @@ var state = {
   scheduleTimerId: null,     // 前端定时退订 setTimeout ID
 };
 
-var REGION_INFO = {
+// 内置地区「默认注册表」：代码里的初始值，页面上的增删改都发生在运行时合并层
+var REGION_INFO_DEFAULT = {
   'cn-hangzhou':  '杭州',
   'cn-beijing':   '北京',
   'cn-shanghai':  '上海',
@@ -290,7 +291,7 @@ var REGION_INFO = {
   'cn-wulanchabu': '乌兰察布',
 };
 
-var REGION_COLORS = {
+var REGION_COLORS_DEFAULT = {
   'cn-hangzhou':  '#1677ff',
   'cn-beijing':   '#ef4444',
   'cn-shanghai':  '#f59e0b',
@@ -301,6 +302,39 @@ var REGION_COLORS = {
   'cn-wuhan-lr':  '#ec4899',
   'cn-wulanchabu': '#14b8a6',
 };
+
+// 内置地区的默认可用区（仅地区管理页展示用，下游逻辑不依赖）
+var REGION_ZONE_DEFAULT = {
+  'cn-hangzhou':  '华东1',
+  'cn-beijing':   '华北2',
+  'cn-shanghai':  '华东2',
+  'cn-shenzhen':  '华南1',
+  'cn-chengdu':   '西南1',
+  'cn-guangzhou': '华南3',
+  'cn-heyuan':    '华南2',
+  'cn-wuhan-lr':  '华中1',
+  'cn-wulanchabu': '华北6',
+};
+
+// 【2026-09-19 页面式地区管理】运行时合并注册表（内置默认 + 自定义 + 改名覆盖）。
+// 注意：保持这三个对象「引用不变、只改内容」—— 下游 31 处遍历点与大量
+// 名称/颜色映射代码直接引用它们，合并后零下游改动。
+var REGION_INFO = {};
+var REGION_COLORS = {};
+var REGION_ZONE_INFO = {};
+
+// 自定义地区注册表持久化 key，结构：
+// {"custom":[{"id","name","zone","color"}...],"overrides":{"cn-hangzhou":{"name","zone"}},"removed":["cn-xx"]}
+//   - custom    自定义地区（完整定义，含颜色）
+//   - overrides 内置地区的改名/改区（REGION_ID 不可改，只覆盖展示字段）
+//   - removed   被删除的内置地区（默认注册表仍在代码里，「恢复默认」可一键找回）
+var REGION_REGISTRY_KEY = 'wb_region_registry_v1';
+
+// 自定义地区分配颜色的色板（优先取未占用的颜色；全占用则随机生成）
+var REGION_COLOR_PALETTE = [
+  '#f43f5e', '#d946ef', '#6366f1', '#0ea5e9', '#22c55e', '#eab308',
+  '#fb923c', '#a855f7', '#2dd4bf', '#84cc16', '#f472b6', '#60a5fa',
+];
 
 // ====== 地区启用 / 禁用开关（2026-09-19 新增）======
 // 需求：保留全量 9 个地区在页面与所有功能中可用；若后续需要临时摘掉某些地区，
@@ -371,77 +405,305 @@ function disabledRegionNames() {
   return REGION_DISABLED_DEFAULT.map(function (r) { return REGION_INFO[r]; }).join(' / ');
 }
 
-// ====== 「⚙️ 地区管理」弹窗：勾选启用/禁用，随时加减地区 ======
-function openRegionManageModal() {
-  var disabled = getDisabledRegions();
-  var rows = Object.keys(REGION_INFO).map(function (rid) {
-    var on = disabled.indexOf(rid) === -1;
-    return '<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:6px;cursor:pointer;">' +
-      '<input type="checkbox" class="region-mgr-cb" value="' + rid + '"' + (on ? ' checked' : '') + '>' +
-      '<span style="font-size:13px;font-weight:500;">' + REGION_INFO[rid] + '</span>' +
-      '<span style="font-size:11px;color:#9ca3af;margin-left:auto;">' + rid + '</span>' +
-      '</label>';
-  }).join('');
+// ====== 页面式地区管理：注册表读取 / 合并（内置 + 自定义 + 覆盖 − 已删除）======
 
-  var defKeep = Object.keys(REGION_INFO).length - REGION_DISABLED_DEFAULT.length;
-  var html =
-    '<div class="modal-mask" id="regionManageMask" onclick="if(event.target===this)closeRegionManageModal()">' +
-      '<div class="modal-dialog" style="max-width:520px;">' +
-        '<div class="modal-header"><h3>⚙️ 地区管理</h3>' +
-          '<button class="modal-close" onclick="closeRegionManageModal()">×</button></div>' +
-        '<div class="modal-body" style="max-height:60vh;overflow-y:auto;">' +
-          '<div style="background:#e7f3ff;border-left:4px solid #1677ff;padding:10px 14px;margin-bottom:14px;border-radius:4px;font-size:13px;color:#0b4a9e;">' +
-            '勾选 = 启用，取消勾选 = 从页面和所有功能中暂时摘掉。<br>' +
-            '<strong>地区代码不会删除</strong>，随时勾回来即可恢复，无需改代码。' +
-          '</div>' +
-          '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">' + rows + '</div>' +
-          '<div style="margin-top:14px;font-size:12px;color:#6b7280;" id="regionManageHint"></div>' +
-        '</div>' +
-        '<div class="modal-footer">' +
-          '<button class="btn btn-sm" onclick="resetRegionManageModal()">恢复默认（只留 ' + defKeep + ' 个地区）</button>' +
-          '<button class="btn btn-sm btn-primary" id="regionManageSaveBtn" onclick="confirmRegionManage()">保存</button>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-  document.body.insertAdjacentHTML('beforeend', html);
+// 读 localStorage 注册表；数据缺失或损坏时退回空注册表（= 内置 9 地区全启用）
+function loadRegionRegistry() {
+  var reg = { custom: [], overrides: {}, removed: [] };
+  try {
+    var raw = localStorage.getItem(REGION_REGISTRY_KEY);
+    if (raw) {
+      var obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object') {
+        if (Object.prototype.toString.call(obj.custom) === '[object Array]') {
+          reg.custom = obj.custom.filter(function (c) {
+            return c && c.id && /^[a-z0-9-]+$/.test(c.id);
+          });
+        }
+        if (obj.overrides && typeof obj.overrides === 'object' && obj.overrides !== null) {
+          reg.overrides = obj.overrides;
+        }
+        if (Object.prototype.toString.call(obj.removed) === '[object Array]') {
+          reg.removed = obj.removed.filter(function (r) { return !!REGION_INFO_DEFAULT[r]; });
+        }
+      }
+    }
+  } catch (e) { /* 隐私模式或 JSON 损坏时退回默认 */ }
+  return reg;
 }
 
-function closeRegionManageModal() {
-  var m = document.getElementById('regionManageMask');
-  if (m) m.remove();
+function saveRegionRegistry(reg) {
+  try { localStorage.setItem(REGION_REGISTRY_KEY, JSON.stringify(reg)); } catch (e) {}
+  return reg;
 }
 
-function resetRegionManageModal() {
-  var disabled = REGION_DISABLED_DEFAULT;
-  var cbs = document.querySelectorAll('.region-mgr-cb');
-  for (var i = 0; i < cbs.length; i++) {
-    cbs[i].checked = disabled.indexOf(cbs[i].value) === -1;
+// 把「默认注册表 + 改名覆盖 + 自定义 − 已删除内置」合并进运行时对象。
+// 只清空并重写对象内容、不改对象引用 —— 下游所有直接引用
+// REGION_INFO / REGION_COLORS 的代码无需任何改动。
+function applyRegionRegistry() {
+  var reg = loadRegionRegistry();
+  Object.keys(REGION_INFO).forEach(function (k) { delete REGION_INFO[k]; });
+  Object.keys(REGION_COLORS).forEach(function (k) { delete REGION_COLORS[k]; });
+  Object.keys(REGION_ZONE_INFO).forEach(function (k) { delete REGION_ZONE_INFO[k]; });
+
+  // 1) 内置地区（跳过已被删除的）
+  Object.keys(REGION_INFO_DEFAULT).forEach(function (key) {
+    if (reg.removed.indexOf(key) !== -1) return;
+    REGION_INFO[key] = REGION_INFO_DEFAULT[key];
+    REGION_COLORS[key] = REGION_COLORS_DEFAULT[key];
+    REGION_ZONE_INFO[key] = REGION_ZONE_DEFAULT[key] || '-';
+  });
+
+  // 2) 内置地区改名/改区覆盖
+  Object.keys(reg.overrides).forEach(function (key) {
+    if (!REGION_INFO[key]) return; // 只对仍然存在的地区生效
+    var o = reg.overrides[key] || {};
+    if (o.name) REGION_INFO[key] = o.name;
+    if (o.zone) REGION_ZONE_INFO[key] = o.zone;
+  });
+
+  // 3) 自定义地区
+  reg.custom.forEach(function (c) {
+    if (!c || !c.id) return;
+    REGION_INFO[c.id] = c.name || c.id;
+    REGION_COLORS[c.id] = c.color || pickRegionColor();
+    REGION_ZONE_INFO[c.id] = c.zone || '-';
+  });
+}
+
+// 初始化入口：必须在任何下游渲染前完成合并（幂等，可安全重复调用）。
+// ① 脚本加载时立即执行一次（早于 DOMContentLoaded 的所有渲染逻辑）；
+// ② init() 最顶部再兜底调用一次。
+function initRegionRegistry() {
+  applyRegionRegistry();
+}
+initRegionRegistry();
+
+// 给自定义地区挑一个未被占用的颜色；色板用尽则随机生成一个 hex
+function pickRegionColor() {
+  var used = {};
+  Object.keys(REGION_COLORS).forEach(function (k) { used[REGION_COLORS[k]] = true; });
+  for (var i = 0; i < REGION_COLOR_PALETTE.length; i++) {
+    if (!used[REGION_COLOR_PALETTE[i]]) return REGION_COLOR_PALETTE[i];
   }
-  var hint = document.getElementById('regionManageHint');
-  if (hint) hint.textContent = '已重置为默认（' + disabledRegionNames() + ' 禁用），点「保存」生效。';
+  var hex = ('000000' + Math.floor(Math.random() * 0xffffff).toString(16)).slice(-6);
+  return '#' + hex;
 }
 
-function confirmRegionManage() {
-  var cbs = document.querySelectorAll('.region-mgr-cb');
-  var disabled = [];
-  var enabled = [];
-  for (var i = 0; i < cbs.length; i++) {
-    if (cbs[i].checked) enabled.push(cbs[i].value); else disabled.push(cbs[i].value);
-  }
-  if (enabled.length === 0) { alert('至少要启用一个地区'); return; }
-  saveDisabledRegions(disabled);
-  closeRegionManageModal();
-  log('⚙️ 地区设置已更新：启用 ' + enabled.length + ' 个（' +
-      enabled.map(function (r) { return REGION_INFO[r]; }).join('、') + '）' +
-      (disabled.length ? '；已禁用 ' + disabled.map(function (r) { return REGION_INFO[r]; }).join('、') : ''), 'info');
-  // 立刻按新名单重绘：地域卡片、实例列表、已选清单、全选按钮、下单网格
+// 任何地区变更（添加/编辑/删除/启停/恢复默认）后统一调它：
+// 刷新计数文案 + 地区管理表格 + 全部下游列表（地域卡片、实例、命令、模板、下单网格）
+function refreshAllRegionUI() {
+  refreshRegionCountTexts();
+  renderRegionMgmtTable();
   if (typeof renderRegionCards === 'function') renderRegionCards();
   if (typeof updateSelectAllBtn === 'function') updateSelectAllBtn();
   if (typeof renderInstances === 'function') renderInstances();
   if (typeof updateSelectedList === 'function') updateSelectedList();
   if (typeof updateBatchUnsubBtn === 'function') updateBatchUnsubBtn();
   if (typeof initOrderGrid === 'function') initOrderGrid();
-  refreshRegionCountTexts();
+  if (typeof updateCmdRegionGrid === 'function') updateCmdRegionGrid();
+  if (typeof updateStep2TemplateName === 'function') updateStep2TemplateName();
+}
+
+// ====== 「🗺️ 地区管理」页面（2026-09-19 由勾选弹窗升级为独立 tab 页）======
+// 表格 + 启停 + 增删改 + 恢复默认；所有变更走 refreshAllRegionUI() 免刷新联动下游。
+
+// HTML 属性转义（用户输入的名称/区域要写进 input value / innerHTML）
+function escAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// 渲染地区管理表格：REGION_ID | 名称 | 区域 | 状态 | 操作
+function renderRegionMgmtTable() {
+  var tbody = document.getElementById('regionMgmtTableBody');
+  if (!tbody) return;
+  var rids = Object.keys(REGION_INFO);
+  if (rids.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">暂无地区，点击「➕ 添加地域」新增，或「↩️ 恢复默认」找回内置地区</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = rids.map(function (rid) {
+    var enabled = isRegionEnabled(rid);
+    var isBuiltin = !!REGION_INFO_DEFAULT[rid];
+    var tag = isBuiltin ? '' : '<span class="region-custom-tag">自定义</span>';
+    var badge = enabled
+      ? '<span class="region-badge region-badge-on">启用</span>'
+      : '<span class="region-badge region-badge-off">禁用</span>';
+    // 操作列：编辑（蓝）+ 启用/禁用（按当前状态二选一）+ 删除（红）
+    var toggleBtn = enabled
+      ? '<button class="btn btn-xs" style="background:#ff9800;color:#fff;border:none;" onclick="toggleRegionEnabled(\'' + rid + '\')">禁用</button>'
+      : '<button class="btn btn-xs" style="background:#10b981;color:#fff;border:none;" onclick="toggleRegionEnabled(\'' + rid + '\')">启用</button>';
+    return '<tr>' +
+      '<td class="mono">' + escHtml(rid) + '</td>' +
+      '<td>' + escHtml(REGION_INFO[rid] || rid) + tag + '</td>' +
+      '<td>' + escHtml(REGION_ZONE_INFO[rid] || '-') + '</td>' +
+      '<td>' + badge + '</td>' +
+      '<td class="region-actions">' +
+        '<button class="btn btn-xs" style="background:#1677ff;color:#fff;border:none;" onclick="openRegionEditModal(\'' + rid + '\')">编辑</button>' +
+        toggleBtn +
+        '<button class="btn btn-xs" style="background:#e74c3c;color:#fff;border:none;" onclick="deleteRegion(\'' + rid + '\')">删除</button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+// 添加 / 编辑共用的弹窗构建器
+// opts: { title, id, idReadonly, name, zone, submitFn, submitLabel }
+function buildRegionFormModal(opts) {
+  var idField = opts.idReadonly
+    ? '<input class="input" id="rgFormId" value="' + escAttr(opts.id) + '" disabled style="background:#f3f4f6;color:#6b7280;" title="REGION_ID 是下游 API 的 key，不可修改">'
+    : '<input class="input" id="rgFormId" placeholder="如 cn-fujian" maxlength="64" autofocus>';
+  var html =
+    '<div class="modal-mask" id="regionFormMask" onclick="if(event.target===this)closeRegionFormModal()">' +
+      '<div class="modal-dialog" style="max-width:440px;">' +
+        '<div class="modal-header"><h3>' + opts.title + '</h3>' +
+          '<button class="modal-close" onclick="closeRegionFormModal()">×</button></div>' +
+        '<div class="modal-body">' +
+          '<div class="form-group"><label>REGION_ID</label>' + idField + '</div>' +
+          '<div class="form-group"><label>名称</label>' +
+            '<input class="input" id="rgFormName" placeholder="如 福建" maxlength="32" value="' + escAttr(opts.name) + '"></div>' +
+          '<div class="form-group"><label>区域（可留空，默认 -）</label>' +
+            '<input class="input" id="rgFormZone" placeholder="如 华东1" maxlength="32" value="' + escAttr(opts.zone) + '"></div>' +
+          '<div id="rgFormError" style="color:#e74c3c;font-size:12px;min-height:16px;"></div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-sm" onclick="closeRegionFormModal()">取消</button>' +
+          '<button class="btn btn-sm btn-primary" onclick="' + opts.submitFn + '">' + opts.submitLabel + '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+  var idInput = document.getElementById('rgFormId');
+  if (idInput && !idInput.disabled) {
+    idInput.focus();
+  } else {
+    var nameInput = document.getElementById('rgFormName');
+    if (nameInput) nameInput.focus();
+  }
+}
+
+function closeRegionFormModal() {
+  var m = document.getElementById('regionFormMask');
+  if (m) m.remove();
+}
+
+function openRegionAddModal() {
+  buildRegionFormModal({
+    title: '➕ 添加地域',
+    id: '', idReadonly: false, name: '', zone: '',
+    submitFn: 'submitRegionAdd()', submitLabel: '确认添加',
+  });
+}
+
+// 添加自定义地区：格式校验 + 查重 + 自动分配颜色，默认启用，写入注册表
+function submitRegionAdd() {
+  var errEl = document.getElementById('rgFormError');
+  function fail(msg) { if (errEl) errEl.textContent = msg; }
+  var id = (document.getElementById('rgFormId').value || '').trim();
+  var name = (document.getElementById('rgFormName').value || '').trim();
+  var zone = (document.getElementById('rgFormZone').value || '').trim();
+  if (!/^[a-z0-9-]+$/.test(id)) { fail('REGION_ID 仅允许小写字母、数字和连字符（如 cn-fujian）'); return; }
+  if (REGION_INFO[id]) { fail('REGION_ID「' + escHtml(id) + '」已存在，不能重复'); return; }
+  if (!name) name = id;
+  var reg = loadRegionRegistry();
+  reg.custom.push({ id: id, name: name, zone: zone || '-', color: pickRegionColor() });
+  saveRegionRegistry(reg);
+  applyRegionRegistry();
+  closeRegionFormModal();
+  refreshAllRegionUI();
+  log('➕ 已添加自定义地区：' + name + '（' + id + '），默认启用', 'info');
+}
+
+function openRegionEditModal(rid) {
+  if (!REGION_INFO[rid]) return;
+  buildRegionFormModal({
+    title: '✏️ 编辑地区',
+    id: rid, idReadonly: true,
+    name: REGION_INFO[rid] || '', zone: REGION_ZONE_INFO[rid] || '',
+    submitFn: "submitRegionEdit('" + rid + "')", submitLabel: '保存',
+  });
+}
+
+// 编辑名称/区域：内置地区写 overrides，自定义地区直接改 custom 条目（REGION_ID 不可改）
+function submitRegionEdit(rid) {
+  var errEl = document.getElementById('rgFormError');
+  function fail(msg) { if (errEl) errEl.textContent = msg; }
+  if (!REGION_INFO[rid]) { fail('该地区已不存在，请刷新页面'); return; }
+  var name = (document.getElementById('rgFormName').value || '').trim();
+  var zone = (document.getElementById('rgFormZone').value || '').trim();
+  if (!name) { fail('名称不能为空'); return; }
+  var reg = loadRegionRegistry();
+  if (REGION_INFO_DEFAULT[rid]) {
+    reg.overrides[rid] = { name: name, zone: zone || '-' };
+  } else {
+    var found = false;
+    reg.custom.forEach(function (c) {
+      if (c.id === rid) { c.name = name; c.zone = zone || '-'; found = true; }
+    });
+    if (!found) reg.custom.push({ id: rid, name: name, zone: zone || '-', color: REGION_COLORS[rid] || pickRegionColor() });
+  }
+  saveRegionRegistry(reg);
+  applyRegionRegistry();
+  closeRegionFormModal();
+  refreshAllRegionUI();
+  log('✏️ 已更新地区：' + name + '（' + rid + '）', 'info');
+}
+
+// 启用 / 禁用切换：写现有 wb_region_disabled_v1 名单，下游立即少/多该地区
+function toggleRegionEnabled(rid) {
+  if (!REGION_INFO[rid]) return;
+  var disabled = getDisabledRegions();
+  var idx = disabled.indexOf(rid);
+  if (idx === -1) {
+    if (activeRegionIds().length <= 1) { alert('至少要保留一个启用地区'); return; }
+    disabled.push(rid);
+    saveDisabledRegions(disabled);
+    log('⛔ 已禁用地区「' + REGION_INFO[rid] + '」，已从分配池移除', 'info');
+  } else {
+    disabled.splice(idx, 1);
+    saveDisabledRegions(disabled);
+    log('✅ 已启用地区「' + REGION_INFO[rid] + '」', 'info');
+  }
+  refreshAllRegionUI();
+}
+
+// 删除：自定义真删；内置摘出注册表（「恢复默认」可一键找回），confirm 二次确认
+function deleteRegion(rid) {
+  if (!REGION_INFO[rid]) return;
+  var isBuiltin = !!REGION_INFO_DEFAULT[rid];
+  var nameBefore = REGION_INFO[rid] || rid;
+  if (isBuiltin) {
+    if (!confirm('确定删除内置地区「' + nameBefore + '」（' + rid + '）？\n\n可通过「恢复默认」按钮一键找回。')) return;
+  } else {
+    if (!confirm('确定删除自定义地区「' + nameBefore + '」（' + rid + '）？此操作不可恢复。')) return;
+  }
+  var reg = loadRegionRegistry();
+  if (isBuiltin) {
+    if (reg.removed.indexOf(rid) === -1) reg.removed.push(rid);
+    delete reg.overrides[rid];
+  } else {
+    reg.custom = reg.custom.filter(function (c) { return c.id !== rid; });
+  }
+  saveRegionRegistry(reg);
+  applyRegionRegistry();
+  // 同步清出禁用名单，避免残留脏数据
+  saveDisabledRegions(getDisabledRegions().filter(function (r) { return r !== rid; }));
+  refreshAllRegionUI();
+  log('🗑️ 已删除地区「' + nameBefore + '」（' + rid + '）', 'info');
+}
+
+// 恢复默认：清空自定义注册表 + 清空禁用名单，回到内置 9 地区全启用
+function resetRegionRegistry() {
+  var total = Object.keys(REGION_INFO_DEFAULT).length;
+  if (!confirm('确定恢复默认？\n\n将清除所有自定义地区与改名，并重新启用全部内置地区（' + total + ' 个）。')) return;
+  try { localStorage.removeItem(REGION_REGISTRY_KEY); } catch (e) {}
+  applyRegionRegistry();
+  try { localStorage.removeItem(REGION_DISABLED_KEY); } catch (e) {}
+  if (typeof state !== 'undefined' && state && state.selectedRegions) state.selectedRegions.clear();
+  refreshAllRegionUI();
+  log('↩️ 已恢复默认：' + Object.keys(REGION_INFO).length + ' 个内置地区，全部启用', 'info');
 }
 
 // 超时设置的 fetch 封装（用于直接调用阿里云 API 的防超时）
@@ -1265,6 +1527,7 @@ function switchTab(tabName) {
   document.querySelector('.tab[data-tab="' + tabName + '"]').classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
   if (tabName === 'firewall') renderCredMultiFor(fwApplyCredMulti);  // 进入防火墙面板渲染凭证多选
+  if (tabName === 'regionmgmt') renderRegionMgmtTable();  // 进入地区管理页重绘表格（页面加载时不渲染，避免空白）
 }
 
 // ====== 防火墙 ======
@@ -3093,6 +3356,9 @@ function escHtml(s) {
 
 // ====== 初始化 ======
 async function init() {
+  // 地区注册表合并必须最早执行（脚本加载时已跑过一次，这里兜底；幂等）
+  initRegionRegistry();
+
   // 显示用户角色
   updateUserBadge();
   updateAdminUI();

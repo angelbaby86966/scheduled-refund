@@ -20,6 +20,7 @@ BIZ=26            # 业务整型ID：26 = d1（vendor_suggest_customers 是整�
 FORCE_BIND=0      # --force-bind 时强制重跑 [1]（仅控制台已重置后使用）
 
 # ---------- 参数解析 ----------
+ORIG_ARGS=("$@")   # 原样保留（转后台时要传给子进程，shift 会消耗 $@）
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --jwt) JWT="$2"; shift 2 ;;
@@ -49,7 +50,7 @@ if [ -z "$__R5_DETACHED__" ] && [ "$(readlink -f "$0" 2>/dev/null)" != "$SELF_PA
   # 不是从标准路径跑的（典型：curl|bash 管道）：重新拉取落盘 + nohup 后台执行，立即返回
   if curl -fsSL --retry 3 --max-time 60 "$R5_SRC" -o "$SELF_PATH" && chmod +x "$SELF_PATH" \
      && grep -q "v2026-09-30-r5" "$SELF_PATH"; then
-    __R5_DETACHED__=1 nohup bash "$SELF_PATH" "$@" > "$RUN_LOG" 2>&1 &
+    __R5_DETACHED__=1 nohup bash "$SELF_PATH" "${ORIG_ARGS[@]}" > "$RUN_LOG" 2>&1 &
     echo "[r5] 已自动转后台执行（会话断开不影响）。"
     echo "[r5] 查看进度:  tail -f $RUN_LOG"
     exit 0

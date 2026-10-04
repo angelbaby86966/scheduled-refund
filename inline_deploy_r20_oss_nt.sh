@@ -9,8 +9,11 @@
 # 未传 --province/--city 时，自动按本机公网 IP 识别；识别失败兜底为 浙江/杭州。
 set +e
 # [REV] wrapper-notune9-20260927（裸版：无任何系统调优，happy=9）
+# [REV] wrapper-notune9-limit1-20261004（部署完成后自动融合限速 run_limit.sh，默认 23:59→18:45）
 
 AK=""; SK=""; JWT=""; ISP="联通"; PROVINCE=""; CITY=""; NUM_DIRS=9; USBW=200; BW_NUM=1
+# 【limit1】部署完成后自动执行限速脚本：窗口内限速 4Mbps、窗口外全速冲刺（跨天窗口自动处理）
+LIMIT_START="23:59"; LIMIT_END="18:45"; LIMIT_ENABLE=1
 NODE_NAT_TYPE="public"; NODE_RESOURCE_TYPE=2; NODE_DIAL_TYPE="staticNetSingle"; NODE_SINGLE_IP_RADIO=0
 ADMIN_API_HOST="https://admin.zhouyi.top"; BUSINESS_ID=41
 # 【r20-finish】--finish-only：存量机「原地补齐」模式（透传给 full 脚本）
@@ -31,6 +34,9 @@ while [[ $# -gt 0 ]]; do
     --business-id) BUSINESS_ID="$2"; shift 2 ;;
     --admin-host) ADMIN_API_HOST="$2"; shift 2 ;;
     --finish-only) FINISH_ONLY=1; shift ;;
+    --limit-start) LIMIT_START="$2"; shift 2 ;;
+    --limit-end) LIMIT_END="$2"; shift 2 ;;
+    --no-limit) LIMIT_ENABLE=0; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done
@@ -134,6 +140,27 @@ fi
 ) 9>"$LOCK_FILE" &
 DEPLOY_PID=$!
 echo "已后台启动部署 PID=$DEPLOY_PID（已持锁 $LOCK_FILE，互斥生效）"
+
+# ============ B3) 部署完成后自动限速（limit1：融合 run_limit.sh） ============
+# 跟随器：阻塞等待 $LOCK_FILE 锁释放（= ipes_full.sh 整体跑完）→ 等 120s 让容器/watchdog 稳定
+#   → 执行 run_limit.sh 装限速（幂等，自装 cron：窗口内每10min补挂 + 结束清除 + @reboot 180s 自恢复）
+# 日志：/var/log/ipes_limit_bg.log；--no-limit 可跳过；--limit-start/--limit-end 自定义窗口
+if [ "$LIMIT_ENABLE" = "1" ]; then
+  cat > /root/ipes_limit_after_deploy.sh <<LIM
+#!/bin/bash
+# 由 inline_deploy wrapper 生成：部署结束后自动限速
+sleep 120
+echo "[\$(date +'%F %T')] deploy finished, applying limit ($LIMIT_START -> $LIMIT_END) ..." >> /var/log/ipes_limit_bg.log
+curl -fsSL -m 90 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/limit/run_limit.sh | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END" >> /var/log/ipes_limit_bg.log 2>&1
+echo "[\$(date +'%F %T')] limit done, exit=\$?" >> /var/log/ipes_limit_bg.log
+LIM
+  chmod +x /root/ipes_limit_after_deploy.sh
+  ( flock "$LOCK_FILE" /root/ipes_limit_after_deploy.sh ) &
+  LIMIT_PID=$!
+  echo "已挂限速跟随器 PID=$LIMIT_PID：部署结束后自动执行 run_limit.sh（$LIMIT_START → $LIMIT_END），日志 /var/log/ipes_limit_bg.log"
+else
+  echo "[INFO] --no-limit：本次跳过自动限速"
+fi
 
 # ============ C) 业务绑定自修复（r20-fix4 根治版） ============
 # 三大修复：

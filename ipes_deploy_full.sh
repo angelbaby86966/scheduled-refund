@@ -61,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-09-27-r20g"   # +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
+SCRIPT_VERSION="v2026-10-05-r20h"   # +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -966,8 +966,10 @@ submit_business() {
     # ⚠️ 必须带上 isp / natType / resourceType / dialType / province / city ——
     #    平台的 nodeInfo（后台列表「业务线运营商 / 资源-上网方式」两列）就是靠这些字段生成的；
     #    只传 usbw/bwNum 会让那两列空白（显示「其他」）。
-    #    vendorSuggestCustomers=41 即业务 41（q2）；transMode=0（与镜像克隆模块对齐）。
-    local request_body="{\"nodeId\":\"$node\",\"province\":\"$province\",\"city\":\"$city\",\"isp\":\"$ISP\",\"natType\":\"$NODE_NAT_TYPE\",\"resourceType\":\"$NODE_RESOURCE_TYPE\",\"dialType\":\"$NODE_DIAL_TYPE\",\"singleIpRadio\":$NODE_SINGLE_IP_RADIO,\"usbw\":$NODE_USBW,\"bwNum\":$NODE_BW_NUM,\"transMode\":0,\"transModeStr\":\"cm:0,ct:0,cu:0\",\"transProvRate\":0,\"isTransProv\":true,\"isIPv6Schedule\":false,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"vendorSuggestCustomers\":$BUSINESS_ID}"
+    #    vendorSuggestCustomers=41 即业务 41（q2）。
+    #    【r20h 跑量对齐 20261005】transMode=1 + 跨省100%（昨天 q2 对比确认：transMode=0+跨省0%
+    #    三口子全焊死=调度不派量；对齐跑得好的机器后起量。与 init_full r7 保持一致）。
+    local request_body="{\"nodeId\":\"$node\",\"province\":\"$province\",\"city\":\"$city\",\"isp\":\"$ISP\",\"natType\":\"$NODE_NAT_TYPE\",\"resourceType\":\"$NODE_RESOURCE_TYPE\",\"dialType\":\"$NODE_DIAL_TYPE\",\"singleIpRadio\":$NODE_SINGLE_IP_RADIO,\"usbw\":$NODE_USBW,\"bwNum\":$NODE_BW_NUM,\"transMode\":1,\"transModeStr\":\"\",\"transProvRate\":100,\"isTransProv\":true,\"isIPv6Schedule\":false,\"isCrossNetwork\":false,\"crossNetworkIsp\":null,\"vendorSuggestCustomers\":$BUSINESS_ID}"
 
     local response=$(admin_api_request POST "$ADMIN_NOMINAL_API" "$request_body")
     local http_code=$(echo "$response" | tail -n1)

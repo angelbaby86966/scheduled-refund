@@ -61,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-10-05-r20i"   # +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
+SCRIPT_VERSION="v2026-10-05-r20j"   # +[r20j] conntrack 上限守护无条件执行（默认30120打满=内核丢包跑量崩，26万+hashsize65536+持久化，不受no-tune影响）; +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -2417,6 +2417,21 @@ GOV_EOF
         systemctl enable ipes-gov-tuned.service >/dev/null 2>&1
         log_message "${GREEN}[成功]${NC} CPU：governor=performance（${gn} 核热写）+ THP=never + 开机重放"
         fi   # no-tune 分支结束
+        # ---- [B2] conntrack 上限守护（r20j）：无条件执行，不受 no-tune 影响 ----
+        # 背景：CentOS7 默认 nf_conntrack_max=30120，晚高峰连接数一超就 table full 丢包（2026-10-05 d1b2ae5e 实锤）；
+        #       bridge 网络双容器下 NAT 记账翻倍，3 万上限几分钟即满。这是「能跑量」的底线配置，等同防火墙放行级别。
+        modprobe nf_conntrack 2>/dev/null
+        local ct_max
+        ct_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
+        if [ "${ct_max:-0}" -lt 262144 ]; then
+            sysctl -w net.netfilter.nf_conntrack_max=262144 >/dev/null 2>&1
+            [ -w /sys/module/nf_conntrack/parameters/hashsize ] && echo 65536 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+            if ! grep -q "nf_conntrack_max" /etc/sysctl.conf 2>/dev/null; then
+                printf '\n# pcdn conntrack tuning (r20j)\nnet.netfilter.nf_conntrack_max = 262144\nnet.netfilter.nf_conntrack_tcp_timeout_established = 1200\nnet.netfilter.nf_conntrack_tcp_timeout_time_wait = 30\nnet.netfilter.nf_conntrack_tcp_timeout_close_wait = 30\nnet.netfilter.nf_conntrack_udp_timeout = 30\nnet.netfilter.nf_conntrack_udp_timeout_stream = 60\n' >> /etc/sysctl.conf
+                sysctl -p /etc/sysctl.conf >/dev/null 2>&1
+            fi
+            log_message "${GREEN}[成功]${NC} conntrack: ${ct_max} → 262144（hashsize 65536，sysctl.conf 持久化）"
+        fi
         # ---- [C] 防火墙：入向 TCP/UDP 全放行（不动 Docker 链，rc.local 持久化）----
         for s in firewalld iptables ip6tables; do
             systemctl disable --now "$s" >/dev/null 2>&1 || true

@@ -61,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-10-05-r20h"   # +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
+SCRIPT_VERSION="v2026-10-05-r20i"   # +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -143,7 +143,7 @@ ISP=""
 NUM_DIRS=""
 REMARK=""
 BUSINESS_ID="41"
-TARGET_HAPP="9"
+TARGET_HAPP="12"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
 NO_TUNE=0
@@ -1774,17 +1774,34 @@ if ! docker exec ipes sh -c 'ps -ef | grep -q "[i]pes start"' 2>/dev/null; then
   docker exec ipes /app/ipes/bin/ipes start >/dev/null 2>&1
   logger -t ipes_watchdog "ipes master was down -> restarted"
 fi
-# 2) happ 路数守护（r20-happ-floor：2026-09-25 改为「下限守护」）
-#    新规则：>= TARGET_HAPP 一律不管（平台推到 12 路就让它跑 12 路，绝不裁剪）；
-#            < TARGET_HAPP（默认 9）自动补回 9 —— 配置被裁则扩回 9 路，进程挂则重启容器拉起。
+# 2) happ 路数守护（r20-happ-floor：2026-10-05 r20i 升级为「12 路双向守护」）
+#    新规则：下限=上限=TARGET_HAPP（默认 12）——
+#            配置 < 12：自动补齐缺失 happ.N 并重启拉起（下限守护）；
+#            配置 > 12：自动裁剪回 12 并重启（上限封顶，杜绝超配）；
+#            配置 = 12：只查运行进程数，进程不足（如挂掉）则重启容器拉起。
 #    带 10 分钟冷却：防止「补回重启->再被改->再重启」形成重启风暴
-WANT="${TARGET_HAPP:-9}"
+WANT="${TARGET_HAPP:-12}"
 CFG="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
 [ -f "$CFG" ] || exit 0
 CUR=$(grep -oE 'happ[.][0-9]+' "$CFG" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ -n "$CUR" ] || exit 0
 if [ "$CUR" -ge "$WANT" ]; then
-  # 配置 >= 下限：只查运行进程数，进程不足（如挂掉）则重启容器按配置拉起
+  # r20i 上限封顶：配置超过 TARGET_HAPP 时裁剪回 WANT（删 happ.N 条目，N>=WANT），重启生效
+  if [ "$CUR" -gt "$WANT" ]; then
+    NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_floor.last 2>/dev/null || echo 0)
+    if [ $((NOW - LAST)) -ge 600 ]; then
+      awk -v w="$WANT" 'match($0,/happ[.][0-9]+/){n=substr($0,RSTART+5,RLENGTH-5)+0; if(n>=w && ($0 ~ /happ[.][0-9]+:/ || $0 ~ /^[[:space:]]*-/)) next} {print}' "$CFG" > /tmp/_w_cap.new
+      if [ -s /tmp/_w_cap.new ]; then
+        cat /tmp/_w_cap.new > "$CFG"
+        docker restart ipes >/dev/null 2>&1
+        echo "$NOW" > /var/run/ipes_happ_floor.last 2>/dev/null
+        logger -t ipes_watchdog "happ cap guard: cfg ${CUR}->${WANT}, trimmed & restarted"
+      fi
+      rm -f /tmp/_w_cap.new
+    fi
+    exit 0
+  fi
+  # 配置 == 下限：只查运行进程数，进程不足（如挂掉）则重启容器按配置拉起
   RUN=$(pgrep -c -f 'happ' 2>/dev/null || echo 0)
   if [ "${RUN:-0}" -ge "$WANT" ]; then exit 0; fi
   NOW=$(date +%s); LAST=$(cat /var/run/ipes_happ_floor.last 2>/dev/null || echo 0)
@@ -1970,15 +1987,15 @@ run_ipes_onekey() {
     return $?
 }
 
-# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（2026-09-25 起默认 9：初始 9 路，平台推到 12 不干预，低于 9 看门狗自动补回）
+# 【r20-fix】对齐 happ worker 数到 $TARGET_HAPP（2026-10-05 r20i 起默认 12：初始 12 路，<12 自动补齐，>12 自动裁回）
 # 背景：后台默认下发的 custom.yml 多为 12 路（通用大内存模板），
-#       初始按 TARGET_HAPP=9 落地；调度推高到 12 时顺其自然，掉到 9 以下自动补回。
-#       这里在部署完成后把配置裁剪到 TARGET_HAPP 路并重启容器，使「刷出来就是 TARGET_HAPP」。
+#       初始按 TARGET_HAPP=12 落地；掉到 12 以下看门狗自动补回，超过 12 看门狗自动裁回（cap）。
+#       这里在部署完成后把配置双向对齐到 TARGET_HAPP 路并重启容器，使「刷出来就是 TARGET_HAPP」。
 # r20-fix3【关键修复】custom.yml 是【宿主单文件 bind-mount】的源（/opt/ipes/... 挂到容器 /app/ipes/...）。
 #       对 bind-mount 的单文件用 docker cp 写回【不会落盘】（只在容器 overlay 生效，重启即失效）→ 裁剪空转。
 #       正确做法：直接原地改宿主文件（保 inode），再 docker restart ipes。老镜像无宿主文件时回退 docker cp。
 align_happ_count() {
-    local want="${TARGET_HAPP:-9}"
+    local want="${TARGET_HAPP:-12}"
     if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
         return 0
@@ -1998,8 +2015,30 @@ align_happ_count() {
     # 兼容两种格式 —— 老格式行首 "happ.0: xxx" / 新镜像列表格式 "  - /data/happ/happ.0"
     cur=$(grep -oE 'happ\.[0-9]+' "$host_cfg" 2>/dev/null | sort -u | wc -l | tr -d ' ')
     log_message "[对齐] 当前 happ 条目数=$cur，目标=$want（模式=$mode）"
-    if [ "$cur" -le "$want" ]; then
-        log_message "${GREEN}[对齐]${NC} 当前($cur) <= 目标($want)，无需裁剪"
+    if [ "$cur" -eq "$want" ]; then
+        log_message "${GREEN}[对齐]${NC} 当前($cur) == 目标($want)，无需调整"
+        return 0
+    fi
+    if [ "$cur" -lt "$want" ]; then
+        # r20i 下限扩展：条目不足目标时补齐缺失的 happ.N 并重启
+        awk -v w="$want" '
+          { lines[NR]=$0 }
+          match($0, /happ[.][0-9]+/) { last=NR }
+          END{
+            if (last==0) exit 1
+            for(i=1;i<=NR;i++){ if(match(lines[i],/happ[.][0-9]+/)){ num=substr(lines[i],RSTART+5,RLENGTH-5)+0; have[num]=1 } }
+            for(i=1;i<=NR;i++){ print lines[i]; if(i==last){ for(k=0;k<w;k++){ if(!(k in have)) print "  - /data/happ/happ." k } } }
+          }' "$host_cfg" > /tmp/_happ_custom.new
+        if [ "$mode" = "host" ]; then
+            cat /tmp/_happ_custom.new > "$host_cfg"
+        else
+            docker cp /tmp/_happ_custom.new "ipes:/app/ipes/var/db/ipes/happ-conf/custom.yml" >/dev/null 2>&1 || {
+                log_message "${YELLOW}[对齐]${NC} 写回失败，跳过"; rm -f /tmp/_happ_custom.new; return 0; }
+        fi
+        log_message "${GREEN}[对齐]${NC} 已从 $cur 路扩展到 $want 路，重启 ipes 容器使配置生效"
+        docker restart ipes >/dev/null 2>&1
+        sleep 20
+        rm -f /tmp/_happ_custom.new
         return 0
     fi
     # 条目行判定：含 "happ.N:"（老格式）或以 "-" 开头的列表项（新格式）且编号 >= want 则删除

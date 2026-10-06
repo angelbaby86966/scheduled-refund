@@ -2127,7 +2127,7 @@ async function batchExecuteAllCommands() {
       return;
     }
 
-    var ROUNDS = 3;
+    var ROUNDS = 1;            // v113：默认只执行 1 遍（原 3 遍；防火墙批量仍保留 3 遍）
     var ROUND_DELAY_MS = 2000;
     var BATCH_SIZE = 100;      // 阿里云 InvokeCommand 硬上限：单次 ≤100 台
     var BATCH_DELAY = 400;     // 批间间隔 ms（每批之间的串行等待，避免触发 QPS 限流）

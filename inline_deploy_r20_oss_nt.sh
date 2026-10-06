@@ -10,6 +10,7 @@
 set +e
 # [REV] wrapper-notune9-20260927（裸版：无任何系统调优，happy=9）
 # [REV] wrapper-notune9-limit1-20261004（部署完成后自动融合限速 run_limit.sh，默认 23:59→18:45）
+# [REV] wrapper-notune9-ct262144-20261006（新增 conntrack 262144 调优段 B1.5，部署即带；--no-ct 可跳过）
 
 AK=""; SK=""; JWT=""; ISP="联通"; PROVINCE=""; CITY=""; NUM_DIRS=9; USBW=200; BW_NUM=1
 # 【limit1】部署完成后自动执行限速脚本：窗口内限速 4Mbps、窗口外全速冲刺（跨天窗口自动处理）
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --limit-start) LIMIT_START="$2"; shift 2 ;;
     --limit-end) LIMIT_END="$2"; shift 2 ;;
     --no-limit) LIMIT_ENABLE=0; shift ;;
+    --no-ct) SKIP_CT=1; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done
@@ -118,6 +120,27 @@ fi
 echo "[INFO] ipes_deploy_full.sh 就绪：$(wc -c </root/ipes_full.sh | tr -d ' ') 字节 / sha256:$(sha256sum /root/ipes_full.sh 2>/dev/null | cut -c1-12) / $(grep -m1 '^SCRIPT_VERSION=' /root/ipes_full.sh | cut -d\" -f2) / 通道 ${FULL_SRC%%/https*}"
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
 export NODE_ACTIVATE_TOKEN="$JWT"
+
+# ============ B1.5) conntrack 表容量调优（ct262144-20261006） ============
+# 背景：2026-10-06 三账号 500 台实测，252 台 conntrack_max 仅默认 30120 —— 新机跑量时表满丢连接、
+#   上行骤降，每批都要事后手动补修。这里部署时直接带上（幂等，已达标则跳过）：
+#   运行时立即生效 + /etc/sysctl.conf 持久化 + modprobe.d hashsize（重启不丢）。
+# --no-ct 可跳过（保持纯净机）。
+if [ "$SKIP_CT" != "1" ]; then
+  CT_MAX=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
+  if [ "$CT_MAX" -lt 262144 ] 2>/dev/null; then
+    sysctl -w net.netfilter.nf_conntrack_max=262144 >/dev/null 2>&1
+    grep -q 'nf_conntrack_max' /etc/sysctl.conf 2>/dev/null || cat >> /etc/sysctl.conf <<CTEOF
+
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_buckets = 65536
+CTEOF
+    echo "options nf_conntrack hashsize=65536" > /etc/modprobe.d/nf_conntrack.conf 2>/dev/null
+    echo "[INFO] conntrack 已调优: $CT_MAX -> 262144（含持久化，重启不丢）"
+  else
+    echo "[INFO] conntrack 已达标（$CT_MAX），跳过"
+  fi
+fi
 
 # ============ B2) 单机互斥锁（r20-fix7） ============
 # 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑（一份来自控制台、一份来自本次派发），

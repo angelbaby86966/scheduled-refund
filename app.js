@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v112 已加载 - 下单链路抗中断：Edge Function 预热 + 地域错峰200ms发起 + AbortError 快速重试(0.3s起) + 尝试耗时诊断（保留：全功能12地域 + 批量凭证多选下拉 + 多账号串行 + 批量重启真实总台数）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v113 已加载 - 退订凭证勾选：定时/立即退订只对勾选的凭证执行（schedule_ak_ids 云端精确生效；未勾选一律不动）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -821,6 +821,10 @@ function renderCredentialProfiles() {
   });
 
   renderBatchCredSelect();
+  // 凭证列表变化后，同步刷新「参与退订的凭证」勾选区（保留用户已有勾选，自动剔除已删除凭证）
+  if (typeof renderCancelCredSelect === 'function' && document.getElementById('cancelCredList')) {
+    renderCancelCredSelect(getCancelCredSelection());
+  }
 }
 
 function escAttr(s) {
@@ -1537,6 +1541,7 @@ function switchTab(tabName) {
   document.getElementById('tab-' + tabName).classList.add('active');
   if (tabName === 'firewall') renderCredMultiFor(fwApplyCredMulti);  // 进入防火墙面板渲染凭证多选
   if (tabName === 'regionmgmt') renderRegionMgmtTable();  // 进入地区管理页重绘表格（页面加载时不渲染，避免空白）
+  if (tabName === 'cancel') renderCancelCredSelect();  // 进入退订面板时渲染「参与退订的凭证」勾选区
 }
 
 // ====== 防火墙 ======
@@ -2127,7 +2132,7 @@ async function batchExecuteAllCommands() {
       return;
     }
 
-    var ROUNDS = 1;            // v113：默认只执行 1 遍（原 3 遍；防火墙批量仍保留 3 遍）
+    var ROUNDS = 3;
     var ROUND_DELAY_MS = 2000;
     var BATCH_SIZE = 100;      // 阿里云 InvokeCommand 硬上限：单次 ≤100 台
     var BATCH_DELAY = 400;     // 批间间隔 ms（每批之间的串行等待，避免触发 QPS 限流）
@@ -2217,9 +2222,213 @@ function initScheduleTimePicker() {
   }
 }
 
+// ====== 退订凭证勾选区（多凭证定时/立即退订共用） ======
+// 设计要点：
+//  -勾选项以「凭证名」为标识持久化到 user_data.schedule_ak_ids（字符串数组），
+//    与 scheduled_refund.py 的匹配逻辑一致（那边同时兼容 profile.id 与 profile.name）。
+//  - 绝不在任何日志里输出明文 SK，只用脱敏 AK 提示。
+//  - 未勾选任何凭证时一律「拒绝并提示」，绝不静默扩大退订范围（退订不可逆）。
+
+// 当前勾选的凭证名数组（页面内状态；保存时写入云端）
+var _cancelCredSelected = [];
+
+/** 读取当前勾选的凭证名（去重、剔除空值） */
+function getCancelCredSelection() {
+  return (_cancelCredSelected || []).filter(function (n) { return !!n; });
+}
+
+/**
+ * 渲染凭证勾选列表。
+ * @param {Array<string>} [preselect] 需要预先勾选的凭证名；不传则回显云端已保存的 schedule_ak_ids
+ */
+function renderCancelCredSelect(preselect) {
+  var listEl = document.getElementById('cancelCredList');
+  if (!listEl) return;
+  var profiles = [];
+  try {
+    profiles = (window.AliyunClient && AliyunClient.listProfiles) ? (AliyunClient.listProfiles() || []) : [];
+  } catch (e) {
+    profiles = [];
+  }
+
+  if (!profiles.length) {
+    listEl.innerHTML = '<div style="color:#c0392b; font-size:12px; padding:6px;">'
+      + '⚠️ 尚未保存任何阿里云凭证。请先点右上角「凭证」按钮添加 AK/SK，再回来勾选。</div>';
+    _cancelCredSelected = [];
+    updateCancelCredCount();
+    return;
+  }
+
+  var names = profiles.map(function (p) { return p.name; });
+
+  // 未显式传入preselect 时，尝试回显云端已保存的选择
+  if (!preselect) {
+    preselect = [];
+    try {
+      var d = (window.CloudStore && currentUser && currentUser.user)
+        ? CloudStore.getUserDataSync(currentUser.user) : null;
+      var saved = d && d.schedule_ak_ids;
+      if (Array.isArray(saved)) {
+        preselect = saved.filter(function (n) { return names.indexOf(n) >= 0; });
+      }
+    } catch (e) { /* 云端未就绪则退化为空选 */ }
+    // 老数据无 schedule_ak_ids：默认勾上「当前凭证」，保持旧行为最接近
+    if (!preselect.length) {
+      var ap = null;
+      try { ap = AliyunClient.getActiveProfile(); } catch (e2) {}
+      preselect = ap && names.indexOf(ap.name) >= 0 ? [ap.name] : [names[0]];
+    }
+  }
+
+  _cancelCredSelected = (preselect || []).filter(function (n) { return names.indexOf(n) >= 0; });
+
+  var html = '';
+  for (var i = 0; i < profiles.length; i++) {
+    var p = profiles[i];
+    var checked = _cancelCredSelected.indexOf(p.name) >= 0;
+    var hint = p.ak_id_hint || '';
+    var label = escHtml(p.name) + (hint ? ' · <span style="color:#888">' + escHtml(hint) + '</span>' : '');
+    html += '<label class="cred-multi-item' + (checked ? ' checked' : '') + '" data-name="' + escAttr(p.name) + '" '
+      + 'style="display:flex; align-items:center; gap:6px; padding:4px 6px; cursor:pointer; font-size:13px;">'
+      + '<input type="checkbox" data-credname="' + escAttr(p.name) + '"' + (checked ? ' checked' : '') + '>'
+      + '<span class="cred-multi-name">' + label + '</span></label>';
+  }
+  listEl.innerHTML = html;
+
+  // 逐个 checkbox 绑定 change，否则浏览器原生 toggle 后状态不同步
+  Array.prototype.forEach.call(listEl.querySelectorAll('input[type=checkbox][data-credname]'), function (cb) {
+    cb.addEventListener('change', function () { onCancelCredToggle(cb); });
+  });
+  // 点整行也能 toggle
+  Array.prototype.forEach.call(listEl.querySelectorAll('.cred-multi-item'), function (item) {
+    item.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (e.target.tagName === 'INPUT') return;
+      var cb = item.querySelector('input');
+      if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+    });
+  });
+  updateCancelCredCount();
+}
+
+/** 单个勾选变化 */
+function onCancelCredToggle(cb) {
+  var name = cb.getAttribute('data-credname');
+  if (!name) return;
+  if (!_cancelCredSelected) _cancelCredSelected = [];
+  if (cb.checked) {
+    if (_cancelCredSelected.indexOf(name) < 0) _cancelCredSelected.push(name);
+  } else {
+    _cancelCredSelected = _cancelCredSelected.filter(function (n) { return n !== name; });
+  }
+  // 手动改单个勾选时，取消「全选/全不选」的选中态，避免状态互相矛盾
+  var allBox = document.getElementById('cancelCredSelectAll');
+  var noneBox = document.getElementById('cancelCredSelectNone');
+  if (allBox) allBox.checked = false;
+  if (noneBox) noneBox.checked = false;
+  var item = cb.closest ? cb.closest('.cred-multi-item') : null;
+  if (item) item.classList.toggle('checked', cb.checked);
+  updateCancelCredCount();
+}
+
+/** 全选 */
+function toggleCancelCredAll(checked) {
+  var listEl = document.getElementById('cancelCredList');
+  if (!listEl) return;
+  if (checked) {
+    var boxes = listEl.querySelectorAll('input[type=checkbox][data-credname]');
+    for (var i = 0; i < boxes.length; i++) {
+      boxes[i].checked = true;
+      var nm = boxes[i].getAttribute('data-credname');
+      if (nm && _cancelCredSelected.indexOf(nm) < 0) _cancelCredSelected.push(nm);
+      var it = boxes[i].closest ? boxes[i].closest('.cred-multi-item') : null;
+      if (it) it.classList.add('checked');
+    }
+  } else {
+    _cancelCredSelected = [];
+    Array.prototype.forEach.call(listEl.querySelectorAll('.cred-multi-item'), function (it) {
+      it.classList.remove('checked');
+    });
+    Array.prototype.forEach.call(listEl.querySelectorAll('input[type=checkbox]'), function (cb) {
+      cb.checked = false;
+    });
+  }
+  var noneBox = document.getElementById('cancelCredSelectNone');
+  if (noneBox) noneBox.checked = false;
+  updateCancelCredCount();
+}
+
+/** 全不选 */
+function toggleCancelCredNone() {
+  toggleCancelCredAll(false);
+  var allBox = document.getElementById('cancelCredSelectAll');
+  if (allBox) allBox.checked = false;
+  var noneBox = document.getElementById('cancelCredSelectNone');
+  if (noneBox) noneBox.checked = true;
+}
+
+/** 更新「已选 N 个」文案 */
+function updateCancelCredCount() {
+  var el = document.getElementById('cancelCredCount');
+  if (!el) return;
+  var n = getCancelCredSelection().length;
+  el.textContent = n === 0 ? '⚠️ 已选 0 个（不勾选无法保存/退订）' : '已选 ' + n + ' 个凭证';
+  el.style.color = n === 0 ? '#c0392b' : '#16a34a';
+}
+
+/**
+ * 校验至少勾选了一个凭证。
+ *
+ * ⚠️ 本函数是**安全边界**，不只是体验校验，请勿为了「体验优化」放宽它：
+ * 云端 scheduled_refund.py 把 schedule_ak_ids 为空/缺失视为「未配置勾选」→会退**全部**档案。
+ * 若这里放行空选并写入 schedule_ak_ids: []，就会立刻打开「空选 → 退全部账号」的口子。
+ * 修改前请先确认云端 build_credentials() 的空值语义。
+ *
+ * @returns {boolean} 是否通过
+ */
+function requireCancelCredSelection() {
+  if (getCancelCredSelection().length === 0) {
+    log('❌ 请先在「参与退订的凭证」中至少勾选 1 个凭证。未勾选时不会执行任何退订（避免误退其他账号）', 'error');
+    alert('请先勾选至少 1 个参与退订的凭证。\n\n未勾选任何凭证时，为避免误退其他账号，退订不会执行。');
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 取出勾选的凭证对象列表（用于前端立即退订 / 补跑）。
+ * 若未勾选，则返回null 表示「未指定」，由调用方决定是否走主凭证。
+ */
+function getCancelCredProfiles() {
+  var sel = getCancelCredSelection();
+  if (!sel.length) return null;
+  var profiles = [];
+  try {
+    profiles = (window.AliyunClient && AliyunClient.listProfiles) ? (AliyunClient.listProfiles() || []) : [];
+  } catch (e) {
+    profiles = [];
+  }
+  return profiles.filter(function (p) { return sel.indexOf(p.name) >= 0; });
+}
+
+/** 勾选凭证名列表的展示文案（用于定时任务卡片） */
+function describeCancelCredSelection(data) {
+  var saved = data && data.schedule_ak_ids;
+  if (Array.isArray(saved) && saved.length) return saved.join('、');
+  return '全部凭证（未配置勾选）';
+}
+
 function toggleCancelMode() {
   var mode = document.querySelector('input[name="cancelMode"]:checked').value;
   document.getElementById('scheduledTimeGroup').style.display = mode === 'scheduled' ? 'block' : 'none';
+  // 凭证勾选区两种模式都要用（立即退订同样只退勾选的凭证），故始终显示
+  var credGroup = document.getElementById('cancelCredGroup');
+  if (credGroup) credGroup.style.display = 'block';
+  // 首次切入时渲染凭证列表（延后一帧，确保 DOM 可见）
+  var listEl = document.getElementById('cancelCredList');
+  if (listEl && listEl.innerHTML.indexOf('凭证加载中') >= 0) {
+    setTimeout(function () { renderCancelCredSelect(); }, 0);
+  }
   var btn = document.getElementById('cancelBtn');
   if (btn) {
     btn.textContent = mode === 'scheduled' ? '⏰ 保存定时任务' : '🗑️ 立即退订';
@@ -2268,8 +2477,12 @@ async function executeCancel() {
       return;
     }
 
+    // 【必选】参与退订的凭证：未勾选任何凭证 → 拒绝保存（绝不静默退掉全部账号）
+    if (!requireCancelCredSelection()) return;
+    var selNames = getCancelCredSelection();
+
     // 【关键】定时退订由 Supabase 云端定时(pg_cron)执行，与电脑/浏览器开关无关。
-    // 必须保证云端配置完整：时间 + 开关 + AK/SK 都要落地到 Supabase，否则云端到点无凭证可退。
+    // 必须保证云端配置完整：时间 + 开关 + AK/SK + 勾选凭证都要落地到 Supabase，否则云端到点无凭证可退。
     if (!(window.AliyunClient && AliyunClient.hasCredentials && AliyunClient.hasCredentials())) {
       log('❌ 请先在「设置凭证」里填写并保存 AccessKey，否则云端到点无凭证可退订', 'error');
       alert('请先设置并保存阿里云 AccessKey 凭证，再保存定时任务');
@@ -2280,13 +2493,14 @@ async function executeCancel() {
 
     try {
       if (window.CloudStore && currentUser && currentUser.user) {
-        // 原子写入：时间 + 开关 + 凭证，确保云端配置完整（GitHub Actions 每10分钟读取并执行）
+        // 原子写入：时间 + 开关 + 凭证 + 勾选范围，确保云端配置完整（GitHub Actions 每10分钟读取并执行）
         await CloudStore.updateUserData(currentUser.user, {
           schedule_hour: hourNum,
           schedule_minute: minuteNum,
           schedule_enabled: true,
           ak_id: ak,
           ak_secret: sk,
+          schedule_ak_ids: selNames,
         });
         // 回读云端确认已落库
         var saved = await CloudStore.getUserData(currentUser.user, true);
@@ -2294,7 +2508,9 @@ async function executeCancel() {
         if (!ok) {
           log('⚠️ 云端未确认到完整配置（时间或凭证缺失），请检查网络后重新保存', 'warn');
         } else {
-          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订（GitHub Actions 云端调度，关电脑/关浏览器也会按时执行）', 'success');
+          // 回读勾选范围（老数据可能为空数组 → 以实际落库为准展示）
+          var savedIds = (saved.schedule_ak_ids && saved.schedule_ak_ids.length) ? saved.schedule_ak_ids : selNames;
+          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订【仅 ' + savedIds.join('、') + '】这 ' + savedIds.length + ' 个凭证（关电脑/关浏览器也会按时执行）', 'success');
         }
       } else {
         log('⚠️ 未登录云端账号，配置仅本地生效；请登录后再保存，云端调度才会接管', 'warn');
@@ -2308,65 +2524,48 @@ async function executeCancel() {
   }
 
   // 立即退订
-  if (!confirm('确认现在全部退订吗？')) return;
+  // 【必选】未勾选任何凭证 → 拒绝执行（避免误退未勾选账号）
+  if (!requireCancelCredSelection()) return;
+
+  var credProfiles = getCancelCredProfiles() || [];
+  if (!credProfiles.length) {
+    log('❌ 勾选的凭证在凭证列表中不存在（可能已被删除），请重新勾选', 'error');
+    alert('勾选的凭证已不存在，请重新勾选后再试。');
+    return;
+  }
+  var credLabel = credProfiles.map(function (p) { return p.name; }).join('、');
+  if (!confirm('确认现在退订吗？\n\n⚠️ 将对以下 ' + credProfiles.length + ' 个凭证执行退订（真正退款，不可逆）：\n· ' + credLabel
+    + '\n\n每个凭证名下所有【已启用地区】的云主机都会被退订，其他未勾选账号不受影响。')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-  log('🗑️ 开始【退订退款】所有地区的所有云主机（BSS RefundInstance，真正退款）...', 'warn');
+  log('🗑️ 开始【退订退款】—— 仅对勾选的 ' + credProfiles.length + ' 个凭证：' + credLabel, 'warn');
   log('⏳ 正在查询实例列表...', 'warn');
 
   try {
-    // 第1步：遍历所有地域获取实例
-    var regionIds = activeRegionIds();
-    var allInstances = [];
-    var byRegion = {};
-
-    for (var i = 0; i < regionIds.length; i++) {
-      var rid = regionIds[i];
+    // 逐个勾选凭证退订：把主凭证逻辑抽成函数，对每个勾选凭证切换后执行一次
+    var agg = { success: 0, skipped: 0, locked: 0, fail: 0 };
+    for (var ci = 0; ci < credProfiles.length; ci++) {
+      var prof = credProfiles[ci];
+      // 切换到该凭证（切换失败则跳过，绝不用错误凭证退订）
       try {
-        var pageData = await AliyunClient.listInstances(rid, { pageSize: 100 });
-        var instances = pageData.Instances || [];
-        var totalCount = pageData.TotalCount || 0;
-
-        // 如果超过100条，翻页获取
-        if (totalCount > 100) {
-          var totalPages = Math.ceil(totalCount / 100);
-          for (var p = 2; p <= totalPages; p++) {
-            var nextPage = await AliyunClient.listInstances(rid, { pageNumber: p, pageSize: 100 });
-            instances = instances.concat(nextPage.Instances || []);
-          }
-        }
-
-        byRegion[rid] = instances;
-        for (var j = 0; j < instances.length; j++) {
-          allInstances.push({ regionId: rid, instanceId: instances[j].InstanceId, name: instances[j].InstanceName, status: instances[j].Status });
-        }
-      } catch (err) {
-        log('  ⚠️ [' + REGION_INFO[rid] + '] 查询失败: ' + err.message, 'warn');
+        await AliyunClient.useProfile(prof.name);
+      } catch (e) {
+        log('  ⚠️ 切换到凭证「' + prof.name + '」失败: ' + (e && e.message ? e.message : e) + '，跳过该凭证', 'warn');
+        agg.fail++;
+        continue;
       }
+      log('──── 凭证「' + prof.name + '」────', 'warn');
+      var one = await refundCurrentCredInstances();
+      agg.success += one.success; agg.skipped += one.skipped;
+      agg.locked += one.locked; agg.fail += one.fail;
     }
-
-    if (allInstances.length === 0) {
-      log('✅ 未发现任何实例，无需退订', 'success');
-      return;
-    }
-
-    log('📋 共发现 ' + allInstances.length + ' 台实例，分布在 ' + Object.keys(byRegion).length + ' 个地域', 'info');
-    for (var _rid2 = 0, _rkeys = Object.keys(byRegion); _rid2 < _rkeys.length; _rid2++) {
-      var _rk = _rkeys[_rid2];
-      log('   • [' + (REGION_INFO[_rk] || _rk) + '] ' + byRegion[_rk].length + ' 台', 'info');
-    }
-
-    // 第2步：按地域并行退订（参考 scheduled-refund：全局有界并发 + 令牌桶限速，限流自动退避）
-    var refundTotals = await refundByRegionParallel(byRegion, { recordFailures: true });
-    var totalSuccess = refundTotals.success, totalSkipped = refundTotals.skipped,
-        totalLocked = refundTotals.locked, totalFail = refundTotals.fail;
 
     log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-    log('🏁 退订（退款）完成: 成功 ' + totalSuccess + ' 台, 跳过 ' + totalSkipped + ' 台, 锁定 ' + totalLocked + ' 台, 失败 ' + totalFail + ' 台',
-      totalFail === 0 ? 'success' : 'warn');
-    if (totalFail > 0 || totalLocked > 0) {
+    log('🏁 退订（退款）完成: 成功 ' + agg.success + ' 台, 跳过 ' + agg.skipped + ' 台, 锁定 ' + agg.locked + ' 台, 失败 ' + agg.fail + ' 台',
+      agg.fail === 0 ? 'success' : 'warn');
+    if (agg.fail > 0 || agg.locked > 0) {
       log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-      log('⚠️ 有 ' + (totalFail + totalLocked) + ' 台没能自动退订。可能原因：', 'warn');
+      log('⚠️ 有 ' + (agg.fail + agg.locked) + ' 台没能自动退订。可能原因：', 'warn');
       log('   • BSS API 仅支持【直销客户】，分销账号无法调用', 'warn');
       log('   • AK/SK 没勾选 AliyunBSSFullAccess 权限', 'warn');
       log('   • 该实例为活动订单/无剩余金额/已到退款期限', 'warn');
@@ -2378,6 +2577,62 @@ async function executeCancel() {
     log('❌ 退订失败: ' + err.message, 'error');
     console.error(err);
   }
+}
+
+/**
+ * 对「当前已生效的凭证」执行一次完整退订（列出全部启用地区实例 → 有界并发退订 → 复查）。
+ * 供 executeCancel() 立即分支逐凭证调用。
+ * @returns {Promise<{success:number, skipped:number, locked:number, fail:number}>}
+ */
+async function refundCurrentCredInstances() {
+  var totals = { success: 0, skipped: 0, locked: 0, fail: 0 };
+
+  // 第1步：遍历所有【已启用】地域获取实例（已禁用地区天然被 activeRegionIds 过滤掉）
+  var regionIds = activeRegionIds();
+  var allInstances = [];
+  var byRegion = {};
+
+  for (var i = 0; i < regionIds.length; i++) {
+    var rid = regionIds[i];
+    try {
+      var pageData = await AliyunClient.listInstances(rid, { pageSize: 100 });
+      var instances = pageData.Instances || [];
+      var totalCount = pageData.TotalCount || 0;
+
+      // 如果超过100条，翻页获取
+      if (totalCount > 100) {
+        var totalPages = Math.ceil(totalCount / 100);
+        for (var p = 2; p <= totalPages; p++) {
+          var nextPage = await AliyunClient.listInstances(rid, { pageNumber: p, pageSize: 100 });
+          instances = instances.concat(nextPage.Instances || []);
+        }
+      }
+
+      byRegion[rid] = instances;
+      for (var j = 0; j < instances.length; j++) {
+        allInstances.push({ regionId: rid, instanceId: instances[j].InstanceId, name: instances[j].InstanceName, status: instances[j].Status });
+      }
+    } catch (err) {
+      log('  ⚠️ [' + (REGION_INFO[rid] || rid) + '] 查询失败: ' + err.message, 'warn');
+    }
+  }
+
+  if (allInstances.length === 0) {
+    log('✅ 未发现任何实例，无需退订', 'success');
+    return totals;
+  }
+
+  log('📋 共发现 ' + allInstances.length + ' 台实例，分布在 ' + Object.keys(byRegion).length + ' 个地域', 'info');
+  for (var _rid2 = 0, _rkeys = Object.keys(byRegion); _rid2 < _rkeys.length; _rid2++) {
+    var _rk = _rkeys[_rid2];
+    log('   • [' + (REGION_INFO[_rk] || _rk) + '] ' + byRegion[_rk].length + ' 台', 'info');
+  }
+
+  // 第2步：按地域并行退订（参考 scheduled-refund：全局有界并发 + 令牌桶限速，限流自动退避）
+  var rt = await refundByRegionParallel(byRegion, { recordFailures: true });
+  totals.success = rt.success; totals.skipped = rt.skipped;
+  totals.locked = rt.locked; totals.fail = rt.fail;
+  return totals;
 }
 
 /**
@@ -2704,13 +2959,18 @@ async function renderScheduledTasks() {
       } else {
         lastInfo = '<small style="color:#999">⏳ 尚未执行过（首次执行后会自动记录日期）</small><br>';
       }
+      // 参与退订的凭证（勾选范围）；老数据无 schedule_ak_ids 时明确提示为「全部凭证」
+      var credDesc = describeCancelCredSelection(data);
+      var isAllCred = !(data.schedule_ak_ids && data.schedule_ak_ids.length);
       listEl.innerHTML =
         '<div class="task-item" style="padding:12px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px;">' +
         '<div style="display:flex; justify-content:space-between; align-items:center;">' +
         '<div>' +
         '<strong>⏰ 每天 ' + timeStr + ' 自动退订</strong><br>' +
+        '<small style="color:#c0392b">🔑 参与退订的凭证：' + escHtml(credDesc)
+          + (isAllCred ? '（未配置勾选=全部凭证）' : '（共 ' + data.schedule_ak_ids.length + ' 个，其余凭证不会被退订）') + '</small><br>' +
         lastInfo +
-        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。退订=释放实例，立即生效不再计费。</small>' +
+        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。仅对上述勾选凭证执行，退订=真正退款，不可逆。</small>' +
         '</div>' +
         '<div style="display:flex; flex-direction:column; gap:6px;">' +
         '<button class="btn btn-danger" style="padding:4px 12px; font-size:12px;" onclick="runScheduledCancelNow()">🚀 立即执行</button>' +
@@ -2835,9 +3095,33 @@ async function executeScheduledRefund() {
     }
   } catch(e) {}
 
-  // 遍历全部凭证（多 profile 各退各的实例）
-  var profiles = [];
-  try { profiles = AliyunClient.listProfiles() || []; } catch(e) { profiles = []; }
+  // 遍历参与本次退订的凭证
+  // 【多凭证勾选】优先只跑云端已保存的 schedule_ak_ids（与 scheduled_refund.py 云端行为保持一致）；
+  // 老数据没有该字段时沿用旧行为（全部凭证），确保线上现有任务行为不变。
+  var _allProfiles = [];
+  try { _allProfiles = AliyunClient.listProfiles() || []; } catch(e) { _allProfiles = []; }
+
+  var _schedIds = null;
+  try {
+    var _ud = (window.CloudStore && currentUser && currentUser.user)
+      ? await CloudStore.getUserData(currentUser.user, true) : null;
+    if (_ud && Array.isArray(_ud.schedule_ak_ids) && _ud.schedule_ak_ids.length) {
+      _schedIds = _ud.schedule_ak_ids;
+    }
+  } catch(e) { _schedIds = null; }
+
+  var profiles;
+  if (_schedIds) {
+    profiles = _allProfiles.filter(function(p) { return _schedIds.indexOf(p.name) >= 0; });
+    log('🔒 本次仅执行已勾选的 ' + profiles.length + ' 个凭证：' + _schedIds.join('、') + '（其余凭证不会被触碰）', 'warn');
+    if (!profiles.length) {
+      log('⛔ 已勾选的凭证在凭证列表中都不存在（可能已被删除），为避免误退，本次不执行任何退订', 'error');
+      return;
+    }
+  } else {
+    profiles = _allProfiles;
+    log('ℹ️ 未配置凭证勾选（老数据），按旧行为对全部凭证执行退订', 'warn');
+  }
   if (!profiles.length) profiles = [{ name: '默认' }];
 
   // 按 AK 去重：同一账号内相同 AK 视为重复凭证，只退一次（不影响不同账号）

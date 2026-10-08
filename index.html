@@ -5,14 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="JDjDV7mqFHPbM2L1HSQx5I">
   <title>阿里云云主机批量管理工作台</title>
   <link rel="stylesheet" href="style.css?v=3" data-page-node-id="irv6NEyZgVl3PhvrxQYTuc">
-<link rel="preload" as="script" href="cloud-store.js?v=3">
-<link rel="preload" as="script" href="aliyun-client-v2.js?v=18">
-<link rel="preload" as="script" href="ai-client.js?v=3">
-<link rel="preload" as="script" href="app.js?v=113">
-<link rel="preload" as="script" href="node-extract.js?v=15">
-<link rel="preload" as="script" href="one-click-deploy.js?v=17">
-<link rel="preload" as="script" href="image-clone.js?v=19&amp;r=33">
-</head>
+<script src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
+<script>
+(function(){
+  try{
+    var beacon=new BeaconAction({
+      appkey:'0WEB06U85YBSLJNL',
+      versionCode:'1.0.0',
+      channelID:'share',
+      delay:1000,
+      sessionDuration:30*60*1000,
+      isOversea:false,
+      needReportRqdEvent:false
+    });
+    beacon.onDirectUserAction('preview_page_view',{
+      'url':location.href,
+      'referrer':document.referrer,
+      'title':document.title,
+      'sandbox_id':'8f89eb5801b140d0a389cec0ac8bdd12'
+    });
+  }catch(e){}
+})();
+</script></head>
 <body data-page-node-id="dYoQZmfRBlOEpsBLEMv6BQ">
   <div class="app" data-page-node-id="Fnqzr4Cj5JZi04NnpPEfi8">
     <!-- 顶部栏 -->
@@ -281,7 +295,7 @@
             <div class="card" data-page-node-id="YqnjJzqrPy8YqJtT508EV7">
               <div class="card-header" data-page-node-id="2KcJHLWYe92cPgKNxMnNH2">
                 <h3 data-page-node-id="MAVFDyoE9vv9G05Aoa7mgV">定时退订轻量云主机</h3>
-                <p class="card-desc" data-page-node-id="3RDRviFS4mZv3HWtK4qEL4">⚠️ 危险操作！退订所有地区的所有云主机实例。</p>
+                <p class="card-desc" data-page-node-id="3RDRviFS4mZv3HWtK4qEL4">⚠️ 危险操作！退订＝调用 BSS RefundInstance 真正退款到原账户，仅对下方<strong data-page-node-id="o3Fj7Rw2TbKn9Xm4QaZ1s">勾选的凭证</strong>执行（默认全部启用地区的云主机）。</p>
               </div>
               <div class="card-body" data-page-node-id="p6ipRTsWr3kHhW90lCmD8E">
                 <div class="warning-box" data-page-node-id="BTYRfk1VH0v2yqHseRNCUI">
@@ -309,7 +323,25 @@
                       <option value="" data-page-node-id="tiJ8IhyQ1t6SlDUcxKu2ER">分</option>
                     </select>
                   </div>
-                  <small style="color:#888" data-page-node-id="7aqMc7HzEYSYcCSwQH0VQ5">定时退订时间限定在每晚 23:35–23:59，到点自动退订所有地区云主机（关浏览器由服务端执行）</small>
+                  <small style="color:#888" data-page-node-id="7aqMc7HzEYSYcCSwQH0VQ5">定时退订时间限定在每晚 23:35–23:59，到点自动退订所选凭证名下所有启用地区的云主机（关浏览器由服务端执行）</small>
+                </div>
+
+                <!-- 🔑 参与退订的凭证（多选）：定时/立即退订都只对勾选的凭证执行，未勾选的账号一律不动 -->
+                <div class="form-group" id="cancelCredGroup" data-page-node-id="n7Kp2Vx9QbLm4Rt8ZsYd1">
+                  <label data-page-node-id="w3Fj8Hn5KsQa1Zp7UcVe9X">参与退订的凭证<span style="color:#c0392b;font-weight:700;" data-page-node-id="b6Ty4Rg1WqXe9Pi3OuZ8M">（必选，至少勾选 1 个）</span></label>
+                  <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px;" data-page-node-id="k5Mn9Jq2XbFv7Rt1WyE4U">
+                    <label style="display:flex; align-items:center; gap:5px; cursor:pointer; font-size:13px;" data-page-node-id="q8Zr4Tw6YhBn3Kf9XaM1P">
+                      <input type="checkbox" id="cancelCredSelectAll" onchange="toggleCancelCredAll(this.checked)" data-page-node-id="c2Vn7Bq5XjRt9Km4WpZ8H"> 全选
+                    </label>
+                    <label style="display:flex; align-items:center; gap:5px; cursor:pointer; font-size:13px;" data-page-node-id="y9Ws3Df6GkMn2Qj7XtB4R">
+                      <input type="checkbox" id="cancelCredSelectNone" onchange="toggleCancelCredNone()" data-page-node-id="a4Up8Kc1ZrWn6Yb3TqM9X"> 全不选
+                    </label>
+                    <span id="cancelCredCount" style="font-size:12px; color:#888;" data-page-node-id="f7Jq2Nw9XbTk4Rm6VpZ1C">已选 0 个</span>
+                  </div>
+                  <div id="cancelCredList" style="max-height:220px; overflow:auto; border:1px solid #e1e4e8; border-radius:6px; padding:8px; background:#fafbfc;" data-page-node-id="d5Hg1Mk8ZwQa3Xt7BnR2V">
+                    <div style="color:#999; font-size:12px; padding:6px;" data-page-node-id="m3Tf6Bq9XwZr2Kn7YdV5J">凭证加载中…</div>
+                  </div>
+                  <small style="color:#888" data-page-node-id="p8Ln4Wq2XbJm6Rt1ZcK9T">⚠️ 定时退订到点后，<strong data-page-node-id="s5Dv9Xq1WmT3Rb7KnJ4P">仅对上面勾选的凭证</strong>执行退订，其余账号不会被触碰；此操作不可逆。</small>
                 </div>
                 <div class="action-bar" data-page-node-id="JuNMhwL5C5CfNPYAzYJsvu">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" data-page-node-id="D1iCPfSCuWsJOICISfgjBK">🗑️ 立即退订</button>
@@ -1113,27 +1145,5 @@
       </div>
     </div>
   </div>
-<script src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
-<script>
-(function(){
-  try{
-    var beacon=new BeaconAction({
-      appkey:'0WEB06U85YBSLJNL',
-      versionCode:'1.0.0',
-      channelID:'share',
-      delay:1000,
-      sessionDuration:30*60*1000,
-      isOversea:false,
-      needReportRqdEvent:false
-    });
-    beacon.onDirectUserAction('preview_page_view',{
-      'url':location.href,
-      'referrer':document.referrer,
-      'title':document.title,
-      'sandbox_id':'8f89eb5801b140d0a389cec0ac8bdd12'
-    });
-  }catch(e){}
-})();
-</script>
 </body>
 </html>

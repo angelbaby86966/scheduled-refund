@@ -505,15 +505,91 @@ def resolve_ak_sk(data):
     return data.get("ak_id", ""), data.get("ak_secret", "")
 
 
+# ===================== 定时退订凭证范围（多凭证勾选） =====================
+def _match_schedule_profile(profile, wanted):
+    """判断某个档案是否被 schedule_ak_ids 勾选。
+
+    兼容两种标识：档案的 `id`（新版）或 `name`（现有面板以「凭证名」为唯一键）。
+    这样即使将来给档案补上 id，老数据（只存name）依然能正确命中。
+    """
+    pid = str(profile.get("id") or "").strip()
+    pname = str(profile.get("name") or "").strip()
+    return (pid and pid in wanted) or (pname and pname in wanted)
+
+
+def _as_id_set(raw):
+    """把 schedule_ak_ids 规整成 {str} 集合；非数组/全空→ 返回空集合（视为「未配置」）。
+
+    ⚠️ 只接受**字符串**元素：null / 数字 / 布尔一律忽略。
+    绝不能用 str() 隐式转换—— str(None) == 'None'、str(0) == '0'、str(False) == 'False'，
+    会被当成合法凭证名塞进 wanted，导致：
+      ① 永不命中的假凭证名 → 撞上「一个都没命中」安全阀 → 整个用户定时退订静默全停（继续计费）；
+      ② 若恰好存在名为 'None' 的档案，则会退订一个用户根本没勾选的账号（误退真金白银）。
+    user_data.data 在 Supabase 上可被任意客户端写入，故此处必须做严格类型校验。
+    """
+    if not isinstance(raw, list):
+        return set()
+    return {x.strip() for x in raw if isinstance(x, str) and x.strip()}
+
+
 # ===================== 主流程 =====================
 def build_credentials(data):
-    """返回 [(label, ak, sk), ...]：遍历 ak_profiles 全部凭证并按 AK 去重（重复凭证只退一次），否则退回 legacy 单凭证。"""
+    """返回 [(label, ak, sk, source), ...]：决定本次要退订哪些凭证。
+
+    分支（按优先级）：
+      1. schedule_ak_ids 非空 → **只**使用被勾选的 ak_profiles 档案（其余凭证一律不动）
+      2. schedule_ak_ids 缺失/为空（老数据）→ 沿用既有行为：遍历全部 ak_profiles
+      3. 没有任何档案 → 回退到旧的单组 ak_id / ak_secret
+
+    ⚠️ 向后兼容说明：第 2 条刻意**保持线上现有行为不变**（而不是收窄成单凭证）——
+    历史上只要ak_profiles 非空，定时任务就会退所有档案；若此处收窄成「只退主凭证」，
+    那些依赖「多账号全退」的用户会突然有一批实例不再被退订（继续计费），
+    属于静默改变线上语义。故仅当用户在新版面板里显式勾选后才收窄范围。
+    """
     creds = []
     seen_ak = set()
     dup = 0
     profiles = data.get("ak_profiles")
-    if isinstance(profiles, list):
+    if not isinstance(profiles, list):
+        profiles = []
+
+    raw_sel = data.get("schedule_ak_ids")
+    # ⚠️ 安全守卫：数组里混入了非字符串脏数据（null/数字/布尔），且**一个合法凭证名都没有**。
+    # 此时绝不能退化成「未配置 → 退全部档案」（那会一次性误退所有账号，方向比单个错退更危险），
+    # 也不能像早期版本那样把 str(None)=='None' 当合法凭证名去匹配（会误退恰好叫 'None' 的档案）。
+    # 判据刻意很窄，保证老数据语义零回归：
+    #   ·仅当「非空数组 + 含非字符串元素 + 无任何合法名」才拦；
+    #   ·字段缺失 / None / [] / ['', '  '] / 非list → 一律放行，退全部档案（与基线逐项一致）。
+    if (isinstance(raw_sel, list) and raw_sel
+            and any(not isinstance(x, str) for x in raw_sel)
+            and not _as_id_set(raw_sel)):
+        log("  ⛔ schedule_ak_ids 含非字符串脏数据（null/数字/布尔）且无任何合法凭证名，"
+            "为避免误退全部账号，本次不执行任何退订（不回退全档案）", "ERROR")
+        return []
+
+    wanted = _as_id_set(raw_sel)
+    if wanted:
+        selected = [p for p in profiles if isinstance(p, dict) and _match_schedule_profile(p, wanted)]
+        skipped = len(profiles) - len(selected)
+        log(f"  🎯 定时退订凭证范围：按勾选执行，共 {len(selected)} 个档案"
+            + (f"（另有 {skipped} 个未勾选档案保持不动）" if skipped > 0 else ""), "INFO")
+        source = "勾选档案"
+        for p in selected:
+            ak = (p.get("ak_id") or "").strip()
+            sk = (p.get("ak_secret") or "").strip()
+            if not ak or not sk:
+                continue
+            if ak in seen_ak:
+                dup += 1
+                continue
+            seen_ak.add(ak)
+            creds.append((p.get("name") or "?", ak, sk, source))
+    else:
+        # 老数据/未配置勾选：完全沿用原有行为
+        source = "全部档案（未配置勾选）"
         for p in profiles:
+            if not isinstance(p, dict):
+                continue
             ak = (p.get("ak_id") or "").strip()
             sk = (p.get("ak_secret") or "").strip()
             if ak and sk:
@@ -521,12 +597,21 @@ def build_credentials(data):
                     dup += 1
                     continue
                 seen_ak.add(ak)
-                creds.append((p.get("name") or "?", ak, sk))
+                creds.append((p.get("name") or "?", ak, sk, source))
+
+    if not creds and wanted:
+        #⚠️ 已明确表达「只退这些凭证」，却一个都没命中 → 绝不回退到旧单凭证，
+        #    否则会退掉用户根本没勾选的账号（静默扩大范围 = 误退真金白银）。
+        log(f"  ⛔ 已勾选 {len(wanted)} 个凭证，但在 ak_profiles 里都没找到可用的 AK/SK；"
+            f"为避免误退未勾选账号，本次不执行任何退订（不回退旧单凭证）", "ERROR")
+        return []
+
     if not creds:
         ak = (data.get("ak_id") or "").strip()
         sk = (data.get("ak_secret") or "").strip()
         if ak and sk:
-            creds.append(("legacy", ak, sk))
+            creds.append(("legacy", ak, sk, "旧单凭证 ak_id/ak_secret"))
+
     if dup:
         log(f"  ⚠️ 该账号存在 {dup} 个重复凭证（相同 AK），已去重，仅退一次", "WARN")
     return creds
@@ -650,10 +735,12 @@ def process_user(row):
         return
 
     log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {int(hour):02d}:{int(minute):02d}），共 {len(creds)} 个凭证", "WARN")
+    for (label, _ak, _sk, source) in creds:
+        log(f"  🔑 凭证「{label}」来源：{source}", "INFO")
 
     grand = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
     executed_any = False
-    for (label, ak, sk) in creds:
+    for (label, ak, sk, _source) in creds:
         try:
             # 逐个凭证「退干净再退下一个」：drain_credential 内部会复查直到该凭证无实例
             t = drain_credential(username, label, ak, sk)

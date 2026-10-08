@@ -39,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --limit-end) LIMIT_END="$2"; shift 2 ;;
     --no-limit) LIMIT_ENABLE=0; shift ;;
     --no-ct) SKIP_CT=1; shift ;;
+    --no-atune) SKIP_ATUNE=1; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done
@@ -140,6 +141,73 @@ CTEOF
   else
     echo "[INFO] conntrack 已达标（$CT_MAX），跳过"
   fi
+fi
+
+# ============ B1.6) A 级系统调优（atune-20261008） ============
+# 来源：ops/pcdn_tune.sh（r19 A 段，已实战验证）+ 参考上海电信节点 1318183d… 的现网痕迹。
+# 内容：conntrack 超时/桶、socket 缓冲、somaxconn/backlog、tcp_tw/fastopen/ecn、BBR + fq、
+#       RPS 软中断摊核、文件句柄/inotify、vm 脏页与 swap。
+# 与本脚本已有段的边界：
+#   - nf_conntrack_max / buckets / hashsize 归 B1.5（262144），本段只补 timeout 类，不重复写；
+#   - **不加 NOTRACK**（r20-fix6 已实证：raw NOTRACK 会让回包脱离 conntrack 导致断网）；
+#   - 全部幂等、sysctl -e 容错，任一项不支持不影响部署。
+# --no-atune 可跳过（保持纯净机）。
+if [ "${SKIP_ATUNE:-0}" != "1" ]; then
+  echo "===== [B1.6] A 级系统调优 ====="
+  mkdir -p /etc/sysctl.d
+  cat > /etc/sysctl.d/99-ipes.conf <<'ATEOF'
+net.netfilter.nf_conntrack_tcp_timeout_established = 600
+net.netfilter.nf_conntrack_tcp_timeout_wait = 30
+net.ipv4.ip_local_port_range = 1024 65535
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_ecn = 0
+fs.file-max = 2097152
+fs.inotify.max_user_watches = 524288
+vm.swappiness = 0
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+vm.overcommit_memory = 1
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_fin_timeout = 15
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 4000
+net.core.rps_sock_flow_entries = 32768
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_window_scaling = 1
+net.core.default_qdisc = fq
+ATEOF
+  modprobe nf_conntrack 2>/dev/null
+  modprobe tcp_bbr 2>/dev/null
+  sysctl -e -p /etc/sysctl.d/99-ipes.conf >/dev/null 2>&1
+  # 兜底：内核不支持 bbr 时退回 cubic，绝不留在 reno
+  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || \
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+  # RPS 软中断摊核（2C 机型收益明显）
+  ATUNENIC=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  if [ -n "$ATUNENIC" ]; then
+    ATUNEMASK=$(printf '%x' $(( (1 << $(nproc)) - 1 )))
+    for q in /sys/class/net/$ATUNENIC/queues/rx-*; do
+      echo "$ATUNEMASK" > "$q/rps_cpus" 2>/dev/null
+      echo 4096 > "$q/rps_flow_cnt" 2>/dev/null
+    done
+    echo "[INFO] RPS 已应用: $ATUNENIC mask=$ATUNEMASK cpus=$(nproc)"
+  fi
+  echo "[INFO] A 级调优完成: CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control) qdisc=$(cat /proc/sys/net/core/default_qdisc) somaxconn=$(cat /proc/sys/net/core/somaxconn) rmem_max=$(cat /proc/sys/net/core/rmem_max)"
+else
+  echo "[INFO] --no-atune 指定，跳过 A 级调优"
 fi
 
 # ============ B2) 单机互斥锁（r20-fix7） ============

@@ -61,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-10-05-r20j"   # +[r20j] conntrack 上限守护无条件执行（默认30120打满=内核丢包跑量崩，26万+hashsize65536+持久化，不受no-tune影响）; +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
+SCRIPT_VERSION="v2026-10-09-r20k"   # +[r20k] 移除 drop_caches 与 17:10 日清 cron（改04:10低峰），默认路数 12→9；   # +[r20j] conntrack 上限守护无条件执行（默认30120打满=内核丢包跑量崩，26万+hashsize65536+持久化，不受no-tune影响）; +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -143,7 +143,7 @@ ISP=""
 NUM_DIRS=""
 REMARK=""
 BUSINESS_ID="41"
-TARGET_HAPP="12"
+TARGET_HAPP="9"
 SKIP_ONEKEY=0
 SKIP_OLMT=0
 NO_TUNE=0
@@ -287,7 +287,7 @@ parse_arguments() {
     if [ -z "$NUM_DIRS" ]; then
         # 【r20-finish】补齐模式不部署容器，缓存目录数无意义，缺失时给默认值即可
         if [ "$FINISH_ONLY" -eq 1 ]; then
-            NUM_DIRS=12
+            NUM_DIRS=9
         else
             echo -e "${RED}[错误]${NC} 缺少参数: --num-dirs"; missing=1
         fi
@@ -1581,7 +1581,7 @@ ensure_happ_base_info_files() {
     local ref="/data/happ/happ.0/xycould_base_info"
     [ -s "$ref" ] || return 0
     local n p fixed=0
-    for n in $(seq 0 $(( ${NUM_DIRS:-12} - 1 ))); do
+    for n in $(seq 0 $(( ${NUM_DIRS:-9} - 1 ))); do
         p="/data/happ/happ.$n/xycould_base_info"
         if [ -d "$p" ]; then
             rmdir "$p" 2>/dev/null && cp "$ref" "$p" 2>/dev/null && fixed=$((fixed+1))
@@ -1780,7 +1780,7 @@ fi
 #            配置 > 12：自动裁剪回 12 并重启（上限封顶，杜绝超配）；
 #            配置 = 12：只查运行进程数，进程不足（如挂掉）则重启容器拉起。
 #    带 10 分钟冷却：防止「补回重启->再被改->再重启」形成重启风暴
-WANT="${TARGET_HAPP:-12}"
+WANT="${TARGET_HAPP:-9}"
 CFG="/opt/ipes/var/db/ipes/happ-conf/custom.yml"
 [ -f "$CFG" ] || exit 0
 CUR=$(grep -oE 'happ[.][0-9]+' "$CFG" 2>/dev/null | sort -u | wc -l | tr -d ' ')
@@ -1995,7 +1995,7 @@ run_ipes_onekey() {
 #       对 bind-mount 的单文件用 docker cp 写回【不会落盘】（只在容器 overlay 生效，重启即失效）→ 裁剪空转。
 #       正确做法：直接原地改宿主文件（保 inode），再 docker restart ipes。老镜像无宿主文件时回退 docker cp。
 align_happ_count() {
-    local want="${TARGET_HAPP:-12}"
+    local want="${TARGET_HAPP:-9}"
     if ! docker inspect -f '{{.State.Running}}' ipes >/dev/null 2>&1; then
         log_message "${YELLOW}[对齐]${NC} ipes 容器未运行，跳过 happ 对齐"
         return 0
@@ -2597,7 +2597,9 @@ rm -f /var/log/*.gz /var/log/*.1 /var/log/*.old /var/log/audit/audit.log.* /var/
 find /var/log -maxdepth 1 -name '*.log' -size +50M ! -name 'ipes_*' -exec truncate -s 10M {} \; 2>/dev/null
 rm -rf /var/tmp/* /tmp/yum* /tmp/tmp.* 2>/dev/null
 dmesg -c >/dev/null 2>&1
-sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+# 【r20k-1】不再执行 drop_caches：PCDN 靠页缓存命中吃流量，
+#   实测（2026-10-09 a33 上海 3d721cc9 vs 杭州 7631c9eb）每天 17:10 清页缓存会让
+#   磁盘写放大到 3924KB/s、await 3.39ms、上行崩塌。磁盘紧张请清 /data/happ 缓存，勿清页缓存。
 after=$(df -P / | tail -1 | awk '{print $3}')
 echo "disk freed KB: $((before - after)); free mem: $(free -m | awk 'NR==2{print $4"MB"}')"
 } >> /var/log/ipes_clean.log 2>&1
@@ -2606,8 +2608,10 @@ exit 0
 CLEAN_EOF
         chmod +x /usr/local/bin/ipes_daily_clean.sh
         # cron 重排：txlog 只在跑量窗口(18:30-23:59)采样；日清 17:10；清掉全时段 txlog 旧条目
+        # 【r20k-1】移除 17:10 的 daily_clean cron：日清（含 drop_caches）会打散刚热的页缓存。
+        #   磁盘/日志瘦身改为低峰期 04:10 执行，不影响 17:00 起的跑量窗口。
         (crontab -l 2>/dev/null | grep -vE 'ipes_daily_clean|ipes_txlog'; \
-         echo '10 17 * * * /usr/local/bin/ipes_daily_clean.sh >/dev/null 2>&1'; \
+         echo '10 4 * * * /usr/local/bin/ipes_daily_clean.sh >/dev/null 2>&1'; \
          echo '30-59 18-23 * * * /usr/local/bin/ipes_txlog.sh >/dev/null 2>&1') | crontab -
         log_message "${GREEN}[成功]${NC} [5.7] 日清与资源瘦身完成"
     }

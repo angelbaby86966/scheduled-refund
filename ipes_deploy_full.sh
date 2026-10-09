@@ -61,7 +61,7 @@ NC='\033[0m'
 LOG_FILE="/var/log/ipes_full_deploy.log"
 FRPC_CONFIG="/usr/local/frpc_zycloud/frpc.json"
 INSTALLER_DIR="/opt/zyy_install"
-SCRIPT_VERSION="v2026-10-09-r20k"   # +[r20k] 移除 drop_caches 与 17:10 日清 cron（改04:10低峰），默认路数 12→9；   # +[r20j] conntrack 上限守护无条件执行（默认30120打满=内核丢包跑量崩，26万+hashsize65536+持久化，不受no-tune影响）; +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
+SCRIPT_VERSION="v2026-10-09-r20k2"  # +[r20k-2] 新增 [5.9] 磁盘缓存守护（/data/happ 超阈值按最旧优先清理+空闲跳过，不清页缓存）——治30G 盘被缓存吃满导致写放大掉跑量; +[r20k] 移除 drop_caches 与 17:10 日清 cron（改04:10低峰），默认路数 12→9；   # +[r20j] conntrack 上限守护无条件执行（默认30120打满=内核丢包跑量崩，26万+hashsize65536+持久化，不受no-tune影响）; +[r20i] happ 双向守护：默认12路，<12自动补齐、>12自动裁回（watchdog cap 分支 + align 扩展分支）; +[r20g] --no-tune 支持（跳过全部性能调优，保留防火墙放行/扩盘/日清）; +[r20f] get_ipes_sn 双读落定; -r20-nobbr
 
 # CDN/OSS 下载配置
 CDN_DOMAIN="file.zhouyi.top"
@@ -2616,6 +2616,69 @@ CLEAN_EOF
         log_message "${GREEN}[成功]${NC} [5.7] 日清与资源瘦身完成"
     }
     daily_clean_setup
+
+    # [5.9] 磁盘缓存守护（r20k-2）：/data/happ 缓存上限护栏 + 页缓存保护
+    # 根因（2026-10-09 a33 实测）：3d721cc9 磁盘 94%（/data/happ 22G）→ 磁盘写放大
+    #   3924KB/s、await 3.39ms → 上行崩塌；同批 7631c9eb（磁盘 31%、缓存 4.2G）跑量正常。
+    #   缓存无上限 = 必然写满磁盘，这是 PCDN 节点跑量衰减的头号杀手。
+    # 做法：定时（低峰+每小时）按「最旧优先」把缓存压到阈值内，**绝不 drop_caches**
+    #   （清页缓存会让刚热的缓存失效，17:00 高峰期清=自毁跑量）。
+    disk_cache_guard_setup() {
+        log_message "执行 [5.9] 磁盘缓存守护（阈值 ${DISK_CACHE_KEEP_PCT:-75}%）"
+        cat > /usr/local/bin/ipes_disk_cache_guard.sh <<'GUARD2_EOF'
+#!/bin/bash
+# r20k-2 磁盘缓存守护：/data/happ 超过阈值按最旧优先清理（不清页缓存、不动业务）
+# 自带 PATH：cron 环境只有 /usr/bin:/bin
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HAPP_ROOT=/data/happ
+KEEP_PCT="${DISK_CACHE_KEEP_PCT:-75}"     # 根分区使用率阈值
+LOG=/var/log/ipes_disk_guard.log
+MAXIDLE=1800# 空闲才清，避免和跑量抢IO
+
+[ -d "$HAPP_ROOT" ] || exit 0
+used_pct=$(df -P / | tail -1 | awk '{gsub(/%/,"",$5); print $5}')
+[ -n "$used_pct" ] || exit 0
+# 未超阈值直接退出（绝大多数时候走这里，零开销）
+[ "$used_pct" -le "$KEEP_PCT" ] && exit 0
+
+# 有跑量活动就跳过（磁盘写正忙 = 正在服务用户，别动缓存）
+busy=$(cat /proc/net/dev | awk -F'[: ]+' '/eth0/{print $11; exit}')
+sleep 3
+busy2=$(cat /proc/net/dev | awk -F'[: ]+' '/eth0/{print $11; exit}')
+delta=$(( busy2 - busy ))
+[ "$delta" -gt $((MAXIDLE * 1024)) ] && { echo "$(date '+%F %T') 上行忙(${delta}B/3s)，跳过" >> "$LOG"; exit 0; }
+
+echo "$(date '+%F %T') 磁盘 ${used_pct}% > ${KEEP_PCT}%，开始清缓存" >> "$LOG"
+# 三级递进：2 天前 → 1 天前 → 每片保留最新 2000 个
+find "$HAPP_ROOT" -type f -mtime +2 -print0 2>/dev/null | xargs -0 -r rm -f
+sync
+used_pct=$(df -P / | tail -1 | awk '{gsub(/%/,"",$5); print $5}')
+if [ "$used_pct" -gt "$KEEP_PCT" ]; then
+  find "$HAPP_ROOT" -type f -mtime +1 -print0 2>/dev/null | xargs -0 -r rm -f
+  sync
+  used_pct=$(df -P / | tail -1 | awk '{gsub(/%/,"",$5); print $5}')
+fi
+if [ "$used_pct" -gt "$KEEP_PCT" ]; then
+  for d in "$HAPP_ROOT"/happ.*; do
+    [ -d "$d" ] || continue
+    find "$d" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -n -2000 | cut -d' ' -f2- | tr '\n' '\0' | xargs -0 -r rm -f
+  done
+  sync
+  used_pct=$(df -P / | tail -1 | awk '{gsub(/%/,"",$5); print $5}')
+fi
+echo "$(date '+%F %T') 清理完成，当前 ${used_pct}%" >> "$LOG"
+exit 0
+GUARD2_EOF
+        chmod +x /usr/local/bin/ipes_disk_cache_guard.sh
+        # cron：低峰 04:20 全量清 + 每小时半点体检（超阈值且空闲才清）
+        (crontab -l 2>/dev/null | grep -v 'ipes_disk_cache_guard'; \
+         echo '20 4 * * * /usr/local/bin/ipes_disk_cache_guard.sh >/dev/null 2>&1'; \
+         echo '30 * * * * /usr/local/bin/ipes_disk_cache_guard.sh >/dev/null 2>&1') | crontab -
+        # 立即跑一次（部署完就有护栏，避免"跑一天才满盘"）
+        /usr/local/bin/ipes_disk_cache_guard.sh >/dev/null 2>&1 || true
+        log_message "${GREEN}[成功]${NC} [5.9] 磁盘缓存守护已安装（阈值 ${DISK_CACHE_KEEP_PCT:-75}%，每小时体检 + 04:20 全量清，不清页缓存）"
+    }
+    disk_cache_guard_setup
 
     # [5.8] DDoS 主机层加固 + 网络小项：防中小型攻击，业务 UDP 零影响（幂等；r20-live）
     ddos_guard_setup() {

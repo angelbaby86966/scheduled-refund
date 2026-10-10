@@ -102,6 +102,63 @@ echo "[INFO] Q2 部署脚本执行完毕"
 export NODE_ACTIVATE_TOKEN="$JWT"
 sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
 
+# ============ B1.8) 设备注册到渠道云端（reg-20261010） ============
+# 【为什么必须补这一段】Q2_test 官方链路（install_docker-ce_v2.sh +
+#   ecache_auto_disk_install.sh → uninstall_ecache / umount_disk / auto_mount_disk /
+#   ecache_docker_install(_ali_ten) / install_ipes_health_check）全链路实测**不含设备注册**
+#   （4 个脚本里 batch/create2 与 channel API 均为0 处；ecache_docker_install_ali_ten.sh 里
+#   API_BASE_URL/USERNAME/PASSWORD 是死代码，定义了从未使用）。
+#   注册原本由旧 ipes_deploy_full.sh 负责，换链路后若不补，C 段按 device_code
+#   在后台匹配不到节点 → 绑定与stateflow 全部失败（节点不会流转到 inService）。
+# 逻辑与旧 full 脚本一致：取 32hex device_code + myip.ipip.net 定位 + ZYY+md5(ak+ts+sk) 签名。
+CH_API_URL="http://api.zhouyiy.com/qudao/device/v1/batch/create2"
+_ch_register() {
+  local device_id="$1" province="$2" city="$3" isp="$4"
+  local remark="${isp}-${device_id:0:8}"
+  local ts sign body rc try
+  for try in 1 2 3; do
+    ts=$(date +%s)
+    sign="ZYY$(echo -n "${AK}${ts}${SK}" | md5sum | cut -d' ' -f1)"
+    body='{"devices":[{"device_id":"'"$device_id"'","remark":"'"$remark"'"}],"province":"'"$province"'","city":"'"$city"'","isp":"'"$isp"'"}'
+    rc=$(curl -s -w '\n%{http_code}' --location --request POST "$CH_API_URL" \
+      --header "sign: $sign" --header "verison: V1.0.0" \
+      --header "appKey: $AK" --header "timestamp: $ts" \
+      --header 'Content-Type: application/json' --data "$body" \
+      --connect-timeout 10 --max-time 30 2>/dev/null)
+    local code=$(printf '%s' "$rc" | tail -n1)
+    local resp=$(printf '%s' "$rc" | sed '$d')
+    if [ "$code" = "200" ] && printf '%s' "$resp" | grep -q '全部绑定成功\|全部已存在'; then
+      echo "[INFO] 设备注册成功（尝试 $try）: $resp" | head -c 300; echo
+      { echo "注册时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "设备SN: $device_id"; echo "省份: $province"; echo "城市: $city"
+        echo "运营商: $isp"; echo "备注: $remark"; echo "API响应: $resp"; } \
+        > /usr/local/edge/registration_info 2>/dev/null
+      chmod 644 /usr/local/edge/registration_info 2>/dev/null
+      return 0
+    fi
+    echo "[WARN] 注册返回异常（HTTP $code, 尝试 $try）: $(printf '%s' "$resp" | head -c 200)"
+    sleep 2
+  done
+  echo "[ERROR] 设备注册失败（3 次重试耗尽）——C 段绑定可能失败，但不影响容器已起来"
+  return 1
+}
+
+DC=""
+for _f in /usr/local/edge_zycloud/device_code /usr/local/edge/device_code /etc/.mac; do
+  if [ -s "$_f" ]; then DC=$(tr -d ' \r\n' < "$_f"); break; fi
+done
+if [ -n "$DC" ]; then
+  _loc=$(curl -s --retry 2 --retry-delay 1 --connect-timeout 5 --max-time 10 myip.ipip.net 2>/dev/null)
+  _prov=$(printf '%s' "$_loc" | awk -F' ' '{print $4}' | tr -d ',')
+  _city=$(printf '%s' "$_loc" | awk -F' ' '{print $5}' | tr -d ',')
+  [ -z "$_prov" ] && _prov="$PROVINCE"
+  [ -z "$_city" ] && _city="$CITY"
+  echo "===== [B1.8] 设备注册（device=$DC / ${_prov:-?}${_city:-?} / $ISP） ====="
+  _ch_register "$DC" "$_prov" "$_city" "$ISP" || true
+else
+  echo "[WARN] 未找到 device_code（32hex），跳过设备注册（后台绑定可能失败）"
+fi
+
 # ============ B1.9) happ 路数对齐到 9 路（happy9-20261010） ============
 # 背景：新部署链路不接路数参数（实测 ecache_docker_install_ali_ten.sh 只认 -t/-i，
 #   传 -n 会「未知选项」直接退出），且内部对云环境固定 1 个目录 → 与期望的 9 路不符。

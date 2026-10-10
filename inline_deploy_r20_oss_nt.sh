@@ -10,7 +10,8 @@
 set +e
 # [REV] wrapper-notune9-20260927（裸版：无任何系统调优，happy=9）
 # [REV] wrapper-notune9-limit1-20261004（部署完成后自动融合限速 run_limit.sh，默认 23:59→18:45）
-# [REV] wrapper-notune9-ct262144-20261006（新增 conntrack 262144 调优段 B1.5，部署即带；--no-ct 可跳过）
+# [REV] q2-new-20261010（改用 Q2_test 官方脚本部署：install_docker-ce_v2.sh + ecache_auto_disk_install.sh -i 2 -t 2；
+#        移除旧 full 脚本体系与 B1.5conntrack / B1.6 A级调优两段（纯净版）；新增 B1.9 对齐 happ 9 路）
 
 AK=""; SK=""; JWT=""; ISP="联通"; PROVINCE=""; CITY=""; NUM_DIRS=9; USBW=200; BW_NUM=1
 # 【limit1】部署完成后自动执行限速脚本：窗口内限速 4Mbps、窗口外全速冲刺（跨天窗口自动处理）
@@ -38,8 +39,6 @@ while [[ $# -gt 0 ]]; do
     --limit-start) LIMIT_START="$2"; shift 2 ;;
     --limit-end) LIMIT_END="$2"; shift 2 ;;
     --no-limit) LIMIT_ENABLE=0; shift ;;
-    --no-ct) SKIP_CT=1; shift ;;
-    --no-atune) SKIP_ATUNE=1; shift ;;
     *) echo "[WARN] 未知参数: $1"; shift ;;
   esac
 done
@@ -72,165 +71,104 @@ fi
 # 【r20-fix6】移除 NOTRACK：iptables raw NOTRACK 会让回包脱离 conntrack，与 firewalld(nftables/iptables) 共存时
 # 导致已建立连接回包被 INPUT 丢弃 → 云助手/SSH 断连（即此前"一跑脚本就断网"根因）。全脚本统一不再使用 NOTRACK。
 
-# ============ B) 完整部署（r20：用真实 nodeId 绑定，根治业务没落盘） ============
-# 【r20-fix11】分发通道去缓存（2026-09-19 真机实测）：
-#   ghproxy.net 会把同一 path 的旧版本长期缓存住，`?t=<ts>` **无效**（CDN 忽略 query），
-#   而它原本排在 SRC1 且循环「首个 curl 成功即 break」⇒ 旧版永远胜出 ⇒「改好了 full 也不生效」。
-#   实测（乌兰察布 1f9921de…）：raw 直连 / gh-proxy.com / jsDelivr 均为最新，ghproxy.net 为旧版。
-#   注：单靠体积区分不了新旧（旧版 137253 > 阈值），所以「谁不缓存」比「校验多严」更关键，
-#       权威源 raw 排第一（短超时，不通就下一条），gh-proxy.com 次之，jsDelivr 兜底。
-#   三条全失败 → 显式报错退出，绝不静默退回旧版。
-SRC1="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
-SRC2="https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/r20-live/ipes_deploy_full.sh"
-SRC3="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@r20-live/ipes_deploy_full.sh"
-# 【r20-fix18 排雷】除体积/singleIpRadius/--finish-only 校验外，强制校验 docker 安装硬化标记
-#   harden_yum_conf（仅 fix18 加固版具备）。缺此标记即旧版（yum install 无超时/重试，会 CLOSE-WAIT 卡死），
-#   宁可换源/报错也绝不用旧版去部署。
-FULL_OK=0; FULL_SRC=""
-# 【OSS/分块投递版 2026-09-26】机器国际出口不通时，full 脚本经云助手分块预置到 /root/ipes_full.sh，
-#   这里优先校验使用预置文件（同一套硬化标记校验，不放松标准）。
-if [ -f /root/ipes_full.sh ] \
-   && [ "$(wc -c </root/ipes_full.sh 2>/dev/null | tr -d ' ')" -gt 100000 ] \
-   && grep -q singleIpRadio /root/ipes_full.sh \
-   && grep -q -- '--finish-only' /root/ipes_full.sh \
-   && grep -q 'harden_yum_conf' /root/ipes_full.sh && grep -q 'lite_fused_tune' /root/ipes_full.sh && grep -q 'r20f 根治瞬态值' /root/ipes_full.sh; then
-  FULL_OK=1; FULL_SRC="pre-staged(/root/ipes_full.sh)"
-  echo "[INFO] 使用预置 full 脚本（云助手分块投递）：$(wc -c </root/ipes_full.sh | tr -d ' ') 字节 / sha256:$(sha256sum /root/ipes_full.sh 2>/dev/null | cut -c1-12)"
-fi
-if [ "$FULL_OK" != "1" ]; then
-for u in "$SRC1" "$SRC2" "$SRC3"; do
-  if curl -fsSL -m 25 "$u" -o /root/ipes_full.sh 2>/dev/null \
-     && [ "$(wc -c </root/ipes_full.sh 2>/dev/null | tr -d ' ')" -gt 100000 ] \
-     && grep -q singleIpRadio /root/ipes_full.sh \
-     && grep -q -- '--finish-only' /root/ipes_full.sh; then
-    if grep -q 'harden_yum_conf' /root/ipes_full.sh && grep -q 'lite_fused_tune' /root/ipes_full.sh && grep -q 'r20f 根治瞬态值' /root/ipes_full.sh; then
-      FULL_OK=1; FULL_SRC="$u"; break
-    else
-      echo "[WARN] $u 返回的 full 脚本缺 harden_yum_conf 标记（旧版/CDN 缓存），换源重试"
-    fi
-  else
-    echo "[WARN] $u 未取到有效 full 脚本，换源重试"
-  fi
-done
-fi
-if [ "$FULL_OK" != "1" ]; then
-  echo "[ERROR] 三个通道都没取到「硬化版」ipes_deploy_full.sh（缺 harden_yum_conf：CDN 缓存旧版或网络不通）"
-  echo "        手动兜底： curl -fsSL -m 60 \"$SRC2\" -o /root/ipes_full.sh"
+# ============ B) 部署主体（q2-new-20261010：改用 Q2_test 脚本体系） ============
+# 【2026-10-10 用户指定】改用官方Q2_test 部署链路，去掉旧的 ipes_deploy_full.sh 体系：
+#   1) install_docker-ce_v2.sh     —— 装docker（含硬化/超时/重试）
+#   2) ecache_auto_disk_install.sh —— Q2 部署调度器（自动判断有无数据盘并选分支）
+#      它的参数只有 -t（镜像: 2=省外/ 3=省内）和 -i（reg_isp: 1电信/2联通/3移动），**没有路数参数**；
+#      路数由脚本内部按「云环境固定 1 个目录 / 非云按 可用GB÷35」自动算。
+#      因此 9 路在下面 B1.9 段单独对齐（复用 opt_align 已真机验证的逻辑）。
+# 注意：不带 -s/--skip-olmt 等旧参数，保留 set -e 语义（任一步失败即中止）。
+echo "===== [B] 安装 docker（install_docker-ce_v2.sh） ====="
+if ! curl -fsSL -m 300 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/install_docker/install_docker-ce_v2.sh | bash; then
+  echo "[ERROR] install_docker-ce_v2.sh 执行失败（网络或源问题），部署中止"
   exit 1
 fi
-echo "[INFO] ipes_deploy_full.sh 就绪：$(wc -c </root/ipes_full.sh | tr -d ' ') 字节 / sha256:$(sha256sum /root/ipes_full.sh 2>/dev/null | cut -c1-12) / $(grep -m1 '^SCRIPT_VERSION=' /root/ipes_full.sh | cut -d\" -f2) / 通道 ${FULL_SRC%%/https*}"
-sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+if ! command -v docker >/dev/null 2>&1 || ! systemctl is-active --quiet docker; then
+  echo "[WARN] docker 未就绪（可能仍在启动），等待 20s 后复查"
+  sleep 20
+  systemctl is-active docker >/dev/null 2>&1 || { echo "[ERROR] docker 服务未起来，部署中止"; exit 1; }
+fi
+echo "[INFO] docker 就绪: $(docker --version 2>/dev/null)"
+
+echo "===== [B] Q2 部署（ecache_auto_disk_install.sh -i 2 -t 2） ====="
+if ! curl -fsSL -m 1800 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/Q2_test/ecache_auto_disk_install.sh | bash -s -- -i 2 -t 2; then
+  echo "[ERROR] ecache_auto_disk_install.sh 执行失败，部署中止"
+  exit 1
+fi
+echo "[INFO] Q2 部署脚本执行完毕"
+
+# 导出 token（旧流程里ipes_client 用它做激活，新脚本体系若需要同样有效）
 export NODE_ACTIVATE_TOKEN="$JWT"
+sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
 
-# ============ B1.5) conntrack 表容量调优（ct262144-20261006） ============
-# 背景：2026-10-06 三账号 500 台实测，252 台 conntrack_max 仅默认 30120 —— 新机跑量时表满丢连接、
-#   上行骤降，每批都要事后手动补修。这里部署时直接带上（幂等，已达标则跳过）：
-#   运行时立即生效 + /etc/sysctl.conf 持久化 + modprobe.d hashsize（重启不丢）。
-# --no-ct 可跳过（保持纯净机）。
-if [ "$SKIP_CT" != "1" ]; then
-  CT_MAX=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
-  if [ "$CT_MAX" -lt 262144 ] 2>/dev/null; then
-    sysctl -w net.netfilter.nf_conntrack_max=262144 >/dev/null 2>&1
-    grep -q 'nf_conntrack_max' /etc/sysctl.conf 2>/dev/null || cat >> /etc/sysctl.conf <<CTEOF
-
-net.netfilter.nf_conntrack_max = 262144
-net.netfilter.nf_conntrack_buckets = 65536
-CTEOF
-    echo "options nf_conntrack hashsize=65536" > /etc/modprobe.d/nf_conntrack.conf 2>/dev/null
-    echo "[INFO] conntrack 已调优: $CT_MAX -> 262144（含持久化，重启不丢）"
-  else
-    echo "[INFO] conntrack 已达标（$CT_MAX），跳过"
-  fi
-fi
-
-# ============ B1.6) A 级系统调优（atune-20261008） ============
-# 来源：ops/pcdn_tune.sh（r19 A 段，已实战验证）+ 参考上海电信节点 1318183d… 的现网痕迹。
-# 内容：conntrack 超时/桶、socket 缓冲、somaxconn/backlog、tcp_tw/fastopen/ecn、BBR + fq、
-#       RPS 软中断摊核、文件句柄/inotify、vm 脏页与 swap。
-# 与本脚本已有段的边界：
-#   - nf_conntrack_max / buckets / hashsize 归 B1.5（262144），本段只补 timeout 类，不重复写；
-#   - **不加 NOTRACK**（r20-fix6 已实证：raw NOTRACK 会让回包脱离 conntrack 导致断网）；
-#   - 全部幂等、sysctl -e 容错，任一项不支持不影响部署。
-# --no-atune 可跳过（保持纯净机）。
-if [ "${SKIP_ATUNE:-0}" != "1" ]; then
-  echo "===== [B1.6] A 级系统调优 ====="
-  mkdir -p /etc/sysctl.d
-  cat > /etc/sysctl.d/99-ipes.conf <<'ATEOF'
-net.netfilter.nf_conntrack_tcp_timeout_established = 600
-net.netfilter.nf_conntrack_tcp_timeout_wait = 30
-net.ipv4.ip_local_port_range = 1024 65535
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.core.rmem_default = 16777216
-net.core.wmem_default = 16777216
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
-net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 65535
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_ecn = 0
-fs.file-max = 2097152
-fs.inotify.max_user_watches = 524288
-vm.swappiness = 0
-vm.dirty_ratio = 15
-vm.dirty_background_ratio = 5
-vm.overcommit_memory = 1
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_max_syn_backlog = 65535
-net.ipv4.tcp_fin_timeout = 15
-net.core.netdev_budget = 600
-net.core.netdev_budget_usecs = 4000
-net.core.rps_sock_flow_entries = 32768
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_window_scaling = 1
-net.core.default_qdisc = fq
-ATEOF
-  modprobe nf_conntrack 2>/dev/null
-  modprobe tcp_bbr 2>/dev/null
-  sysctl -e -p /etc/sysctl.d/99-ipes.conf >/dev/null 2>&1
-  # 兜底：内核不支持 bbr 时退回 cubic，绝不留在 reno
-  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || \
-    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
-  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-  # RPS 软中断摊核（2C 机型收益明显）
-  ATUNENIC=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-  if [ -n "$ATUNENIC" ]; then
-    ATUNEMASK=$(printf '%x' $(( (1 << $(nproc)) - 1 )))
-    for q in /sys/class/net/$ATUNENIC/queues/rx-*; do
-      echo "$ATUNEMASK" > "$q/rps_cpus" 2>/dev/null
-      echo 4096 > "$q/rps_flow_cnt" 2>/dev/null
+# ============ B1.9) happ 路数对齐到 9 路（happy9-20261010） ============
+# 背景：新部署链路不接路数参数（实测 ecache_docker_install_ali_ten.sh 只认 -t/-i，
+#   传 -n 会「未知选项」直接退出），且内部对云环境固定 1 个目录 → 与期望的 9 路不符。
+# 做法：部署完成后按 opt_align 已真机验证的形态对齐（改 custom.yml + 建分片 + 重启容器）。
+# 幂等：重复执行安全；-1 分片或配置异常时放弃替换，不破坏现场。
+HAPP_ROOT=/data/happ
+HAPP_CFG=/opt/ipes/var/db/ipes/happ-conf/custom.yml
+if docker inspect ipes >/dev/null 2>&1 && [ -f "$HAPP_CFG" ]; then
+  echo "===== [B1.9] happ 路数对齐 9 路 ====="
+  if [ -d "$HAPP_ROOT/happ.0" ]; then
+    _ref="$HAPP_ROOT/happ.0/xycould_base_info"
+    for n in $(seq 0 8); do
+      [ -d "$HAPP_ROOT/happ.$n" ] || mkdir -p "$HAPP_ROOT/happ.$n"
+      # 每片都需要 base_info，否则 happ.N 起不来
+      [ -s "$_ref" ] && [ ! -s "$HAPP_ROOT/happ.$n/xycould_base_info" ] \
+        && cp -p "$_ref" "$HAPP_ROOT/happ.$n/xycould_base_info" 2>/dev/null
     done
-    echo "[INFO] RPS 已应用: $ATUNENIC mask=$ATUNEMASK cpus=$(nproc)"
+    echo "[INFO] 9 个缓存分片就绪"
+  else
+    echo "[WARN] $HAPP_ROOT/happ.0 不存在（缓存未初始化），跳过建分片"
   fi
-  echo "[INFO] A 级调优完成: CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control) qdisc=$(cat /proc/sys/net/core/default_qdisc) somaxconn=$(cat /proc/sys/net/core/somaxconn) rmem_max=$(cat /proc/sys/net/core/rmem_max)"
+
+  # 改 custom.yml（先备份，生成后校验条数，不符则放弃）
+  _bk="$HAPP_CFG.bak.$(date +%Y%m%d%H%M%S)"
+  cp -p "$HAPP_CFG" "$_bk" 2>/dev/null
+  _tmp=$(mktemp)
+  {
+    echo "# q2 happy9 $(date '+%F %T')"
+    echo "args:"
+    for n in $(seq 0 8); do echo "  - $HAPP_ROOT/happ.$n"; done
+    grep -E '^reg_isp:' "$HAPP_CFG" 2>/dev/null
+  } > "$_tmp"
+  _cnt=$(grep -cE "^  - ${HAPP_ROOT}/happ\.[0-9]+$" "$_tmp")
+  if [ "$_cnt" = "9" ]; then
+    cp -p "$_tmp" "$HAPP_CFG" && rm -f "$_tmp"
+    echo "[INFO] custom.yml 已设为 9 路（备份 $_bk）"
+    echo "[INFO] 重启 ipes 使路数生效（约 30~60 秒断流）"
+    docker restart ipes >/dev/null 2>&1
+    sleep 25
+    echo "[INFO] 容器状态: $(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null) | happ 进程数: $(docker exec ipes sh -c 'ps -ef | grep -c "[h]app:vod"' 2>/dev/null | tr -d '\r')"
+  else
+    rm -f "$_tmp"
+    echo "[WARN] 生成配置条数异常（$_cnt != 9），放弃替换custom.yml（保留现场）"
+  fi
 else
-  echo "[INFO] --no-atune 指定，跳过 A 级调优"
+  echo "[WARN] 未检测到 ipes 容器或 custom.yml，跳过 happy9 对齐"
 fi
 
-# ============ B2) 单机互斥锁（r20-fix7） ============
-# 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑（一份来自控制台、一份来自本次派发），
-#   两者共用 /tmp/.ecache_patched.sh，补丁写到一半被另一份覆盖 → `line 582: syntax error`
-#   → 后续 docker 自愈步骤错过窗口 → dockerd 因 sysconfig flag 与 daemon.json 冲突起不来 → 容器全停。
-# 做法：flock 单机互斥。锁由后台部署进程持有，直到 full 脚本整体跑完才释放；
-#   重复调用（含控制台/他人误触）会直接退出，绝不产生第二份部署。
+# ============ B2) 单机互斥锁（q2-new-20261010） ============
+# 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑，共用中间文件互相覆盖 → 容器全停。
+# 做法：flock 单机互斥；重复调用直接退出，绝不产生第二份部署。
+#注：旧版这里会 `exec setsid bash /root/ipes_full.sh ...`（后台跑 + 靠锁释放通知 B3 限速），
+#   新部署链路里 full 脚本已不再使用，改为**前台顺序执行**（B 段已跑完），
+#   因此这里的锁只用于「防并发重入」，跑完立即释放，B3 限速跟随器随即启动。
 LOCK_FILE="/var/run/ipes_deploy.lock"
-if ! flock -n "$LOCK_FILE" true 2>/dev/null; then
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
   echo "[ERROR] 本机已有部署在运行（$LOCK_FILE 被占用），本次退出以避免两份互踩"
   echo "        确认前一份确已结束/卡死时可清理： rm -f $LOCK_FILE"
   exit 1
 fi
-( flock -n 9 || { echo "[ERROR] 抢锁失败：已有部署在运行，本次退出"; exit 1; }
-  echo "已获取部署锁 $LOCK_FILE"
-  [ "${FINISH_ONLY:-0}" = "1" ] && echo "[INFO] --finish-only 原地补齐模式（透传给 full 脚本：跳过安装/注册/容器重建）"
-  FINISH_ARG=""
-  [ "${FINISH_ONLY:-0}" = "1" ] && FINISH_ARG="--finish-only"
-  exec setsid bash /root/ipes_full.sh --ak "$AK" --sk "$SK" --isp "$ISP" --num-dirs "$NUM_DIRS" --no-tune --skip-olmt $FINISH_ARG >/var/log/ipes_nohup.log 2>&1 </dev/null
-) 9>"$LOCK_FILE" &
-DEPLOY_PID=$!
-echo "已后台启动部署 PID=$DEPLOY_PID（已持锁 $LOCK_FILE，互斥生效）"
+echo "[INFO] 已获取部署锁 $LOCK_FILE（互斥生效）"
+[ "${FINISH_ONLY:-0}" = "1" ] && echo "[INFO] --finish-only：仅做 happy9 对齐，不重装业务"
+# B 段（docker + Q2 部署）已在前台执行完毕；此处仅等待锁释放给 B3 跟随器用。
+flock -u 9
+exec 9>&-
+echo "[INFO] 部署主流程完成，释放锁（限速跟随器开始等待）"
 
 # ============ B3) 部署完成后自动限速（limit1：融合 run_limit.sh） ============
 # 跟随器：阻塞等待 $LOCK_FILE 锁释放（= ipes_full.sh 整体跑完）→ 等 120s 让容器/watchdog 稳定
@@ -277,8 +215,9 @@ NODE_SINGLE_IP_RADIO = int(os.environ.get('NODE_SINGLE_IP_RADIO','0'))
 NODE_USBW = int(os.environ.get('NODE_USBW','200'))
 NODE_BW_NUM = int(os.environ.get('NODE_BW_NUM','1'))
 DEPLOY_PID_FILE = os.environ.get('DEPLOY_PID_FILE','/var/run/ipes_deploy.pid')
-# 等 Phase B 完整部署进程结束（8~20 分钟），最长 25 分钟；避免与它抢 stateflow
-WAIT_DEPLOY_SEC = int(os.environ.get('REPAIR_WAIT_DEPLOY','1500'))
+# 【q2-new-20261010】部署改为前台顺序执行（不再后台跑 full 脚本），
+#   所以这里只需等一个短窗口让容器与注册收尾，避免白等 25 分钟。
+WAIT_DEPLOY_SEC = int(os.environ.get('REPAIR_WAIT_DEPLOY','30'))
 # 等节点注册 + 76hex 业务SN 就绪，最长 30 分钟；SN 只在容器起来后才有
 WAIT_READY_SEC = int(os.environ.get('REPAIR_WAIT_READY','1800'))
 
@@ -505,11 +444,12 @@ chmod 700 /root/ipes_repair_once.sh
 
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \
        NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO \
-       NODE_USBW NODE_BW_NUM
+       NODE_USBW NODE_BW_NUM REPAIR_WAIT_DEPLOY=30
 
 nohup setsid python3 /root/ipes_repair_binding.py >/var/log/ipes_repair.log 2>&1 </dev/null &
 REPAIR_PID=$!
 echo "已后台启动绑定自修复 PID=$REPAIR_PID"
 echo ""
-echo "部署日志：  tail -f /var/log/ipes_nohup.log"
+echo "部署日志：  见上方[B]/[B1.9] 段落输出"
+echo "docker 日志： docker logs -f ipes"
 echo "修复日志：  tail -f /var/log/ipes_repair.log"

@@ -228,8 +228,9 @@ exec 9>&-
 echo "[INFO] 部署主流程完成，释放锁（限速跟随器开始等待）"
 
 # ============ B3) 部署完成后自动限速（limit1：融合 run_limit.sh） ============
-# 跟随器：阻塞等待 $LOCK_FILE 锁释放（= ipes_full.sh 整体跑完）→ 等 120s 让容器/watchdog 稳定
-#   → 执行 run_limit.sh 装限速（幂等，自装 cron：窗口内每10min补挂 + 结束清除 + @reboot 180s 自恢复）
+# 流程：等 120s 让容器/watchdog 稳定 → 执行 run_limit.sh 装限速。
+#run_limit.sh 幂等且会自装 cron：窗口内每 10min 补挂、结束清除、@reboot 180s 自恢复。
+# 默认窗口 23:59 → 18:45（限速生效区间，区间外不限制）；--no-limit 跳过。
 # 日志：/var/log/ipes_limit_bg.log；--no-limit 可跳过；--limit-start/--limit-end 自定义窗口
 if [ "$LIMIT_ENABLE" = "1" ]; then
   cat > /root/ipes_limit_after_deploy.sh <<LIM
@@ -241,9 +242,14 @@ curl -fsSL -m 90 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/limit/run_lim
 echo "[\$(date +'%F %T')] limit done, exit=\$?" >> /var/log/ipes_limit_bg.log
 LIM
   chmod +x /root/ipes_limit_after_deploy.sh
-  ( flock "$LOCK_FILE" /root/ipes_limit_after_deploy.sh ) &
-  LIMIT_PID=$!
-  echo "已挂限速跟随器 PID=$LIMIT_PID：部署结束后自动执行 run_limit.sh（$LIMIT_START → $LIMIT_END），日志 /var/log/ipes_limit_bg.log"
+  # 【q2-new-20261010 改动】旧版是 `( flock ... ) &` 后台跑 + 主脚本立刻退出，
+  #   在「前台顺序执行」的新链路下有两个隐患：
+  #     1) 云助手/调用方可能在限速装完前就判定脚本结束、拿不到结果；
+  #     2) 后台子进程随父进程退出被收走，限速静默不生效（最难排查）。
+  #   改为**前台执行**（阻塞约 120s + 装限速），确保命令返回时限速已落地。
+  echo "[INFO] 正在执行限速安装（约120s，等容器稳定）..."
+  bash /root/ipes_limit_after_deploy.sh
+  echo "[INFO] 限速安装完成（$LIMIT_START → $LIMIT_END），日志 /var/log/ipes_limit_bg.log"
 else
   echo "[INFO] --no-limit：本次跳过自动限速"
 fi

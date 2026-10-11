@@ -71,190 +71,15 @@ fi
 # 【r20-fix6】移除 NOTRACK：iptables raw NOTRACK 会让回包脱离 conntrack，与 firewalld(nftables/iptables) 共存时
 # 导致已建立连接回包被 INPUT 丢弃 → 云助手/SSH 断连（即此前"一跑脚本就断网"根因）。全脚本统一不再使用 NOTRACK。
 
-# ============ B) 部署主体（q2-new-20261010：改用 Q2_test 脚本体系） ============
-# 【2026-10-10 用户指定】改用官方Q2_test 部署链路，去掉旧的 ipes_deploy_full.sh 体系：
-#   1) install_docker-ce_v2.sh     —— 装docker（含硬化/超时/重试）
-#   2) ecache_auto_disk_install.sh —— Q2 部署调度器（自动判断有无数据盘并选分支）
-#      它的参数只有 -t（镜像: 2=省外/ 3=省内）和 -i（reg_isp: 1电信/2联通/3移动），**没有路数参数**；
-#      路数由脚本内部按「云环境固定 1 个目录 / 非云按 可用GB÷35」自动算。
-#      因此 9 路在下面 B1.9 段单独对齐（复用 opt_align 已真机验证的逻辑）。
-# 注意：不带 -s/--skip-olmt 等旧参数，保留 set -e 语义（任一步失败即中止）。
-echo "===== [B] 安装 docker（install_docker-ce_v2.sh） ====="
-if ! curl -fsSL -m 300 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/install_docker/install_docker-ce_v2.sh | bash; then
-  echo "[ERROR] install_docker-ce_v2.sh 执行失败（网络或源问题），部署中止"
-  exit 1
-fi
-if ! command -v docker >/dev/null 2>&1 || ! systemctl is-active --quiet docker; then
-  echo "[WARN] docker 未就绪（可能仍在启动），等待 20s 后复查"
-  sleep 20
-  systemctl is-active docker >/dev/null 2>&1 || { echo "[ERROR] docker 服务未起来，部署中止"; exit 1; }
-fi
-echo "[INFO] docker 就绪: $(docker --version 2>/dev/null)"
-
-echo "===== [B] Q2 部署（ecache_auto_disk_install.sh -i 2 -t 2） ====="
-if ! curl -fsSL -m 1800 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/Q2_test/ecache_auto_disk_install.sh | bash -s -- -i 2 -t 2; then
-  echo "[ERROR] ecache_auto_disk_install.sh 执行失败，部署中止"
-  exit 1
-fi
-echo "[INFO] Q2 部署脚本执行完毕"
-
-# 导出 token（旧流程里ipes_client 用它做激活，新脚本体系若需要同样有效）
-export NODE_ACTIVATE_TOKEN="$JWT"
-sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
-
-# ============ B1.8) 设备注册到渠道云端（reg-20261010） ============
-# 【为什么必须补这一段】Q2_test 官方链路（install_docker-ce_v2.sh +
-#   ecache_auto_disk_install.sh → uninstall_ecache / umount_disk / auto_mount_disk /
-#   ecache_docker_install(_ali_ten) / install_ipes_health_check）全链路实测**不含设备注册**
-#   （4 个脚本里 batch/create2 与 channel API 均为0 处；ecache_docker_install_ali_ten.sh 里
-#   API_BASE_URL/USERNAME/PASSWORD 是死代码，定义了从未使用）。
-#   注册原本由旧 ipes_deploy_full.sh 负责，换链路后若不补，C 段按 device_code
-#   在后台匹配不到节点 → 绑定与stateflow 全部失败（节点不会流转到 inService）。
-# 逻辑与旧 full 脚本一致：取 32hex device_code + myip.ipip.net 定位 + ZYY+md5(ak+ts+sk) 签名。
-CH_API_URL="http://api.zhouyiy.com/qudao/device/v1/batch/create2"
-_ch_register() {
-  local device_id="$1" province="$2" city="$3" isp="$4"
-  local remark="${isp}-${device_id:0:8}"
-  local ts sign body rc try
-  for try in 1 2 3; do
-    ts=$(date +%s)
-    sign="ZYY$(echo -n "${AK}${ts}${SK}" | md5sum | cut -d' ' -f1)"
-    body='{"devices":[{"device_id":"'"$device_id"'","remark":"'"$remark"'"}],"province":"'"$province"'","city":"'"$city"'","isp":"'"$isp"'"}'
-    rc=$(curl -s -w '\n%{http_code}' --location --request POST "$CH_API_URL" \
-      --header "sign: $sign" --header "verison: V1.0.0" \
-      --header "appKey: $AK" --header "timestamp: $ts" \
-      --header 'Content-Type: application/json' --data "$body" \
-      --connect-timeout 10 --max-time 30 2>/dev/null)
-    local code=$(printf '%s' "$rc" | tail -n1)
-    local resp=$(printf '%s' "$rc" | sed '$d')
-    if [ "$code" = "200" ] && printf '%s' "$resp" | grep -q '全部绑定成功\|全部已存在'; then
-      echo "[INFO] 设备注册成功（尝试 $try）: $resp" | head -c 300; echo
-      { echo "注册时间: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "设备SN: $device_id"; echo "省份: $province"; echo "城市: $city"
-        echo "运营商: $isp"; echo "备注: $remark"; echo "API响应: $resp"; } \
-        > /usr/local/edge/registration_info 2>/dev/null
-      chmod 644 /usr/local/edge/registration_info 2>/dev/null
-      return 0
-    fi
-    echo "[WARN] 注册返回异常（HTTP $code, 尝试 $try）: $(printf '%s' "$resp" | head -c 200)"
-    sleep 2
-  done
-  echo "[ERROR] 设备注册失败（3 次重试耗尽）——C 段绑定可能失败，但不影响容器已起来"
-  return 1
-}
-
-DC=""
-for _f in /usr/local/edge_zycloud/device_code /usr/local/edge/device_code /etc/.mac; do
-  if [ -s "$_f" ]; then DC=$(tr -d ' \r\n' < "$_f"); break; fi
-done
-if [ -n "$DC" ]; then
-  _loc=$(curl -s --retry 2 --retry-delay 1 --connect-timeout 5 --max-time 10 myip.ipip.net 2>/dev/null)
-  _prov=$(printf '%s' "$_loc" | awk -F' ' '{print $4}' | tr -d ',')
-  _city=$(printf '%s' "$_loc" | awk -F' ' '{print $5}' | tr -d ',')
-  [ -z "$_prov" ] && _prov="$PROVINCE"
-  [ -z "$_city" ] && _city="$CITY"
-  echo "===== [B1.8] 设备注册（device=$DC / ${_prov:-?}${_city:-?} / $ISP） ====="
-  _ch_register "$DC" "$_prov" "$_city" "$ISP" || true
-else
-  echo "[WARN] 未找到 device_code（32hex），跳过设备注册（后台绑定可能失败）"
-fi
-
-# ============ B1.9) happ 路数对齐到 9 路（happy9-20261010） ============
-# 背景：新部署链路不接路数参数（实测 ecache_docker_install_ali_ten.sh 只认 -t/-i，
-#   传 -n 会「未知选项」直接退出），且内部对云环境固定 1 个目录 → 与期望的 9 路不符。
-# 做法：部署完成后按 opt_align 已真机验证的形态对齐（改 custom.yml + 建分片 + 重启容器）。
-# 幂等：重复执行安全；-1 分片或配置异常时放弃替换，不破坏现场。
-HAPP_ROOT=/data/happ
-HAPP_CFG=/opt/ipes/var/db/ipes/happ-conf/custom.yml
-if docker inspect ipes >/dev/null 2>&1 && [ -f "$HAPP_CFG" ]; then
-  echo "===== [B1.9] happ 路数对齐 9 路 ====="
-  if [ -d "$HAPP_ROOT/happ.0" ]; then
-    _ref="$HAPP_ROOT/happ.0/xycould_base_info"
-    for n in $(seq 0 8); do
-      [ -d "$HAPP_ROOT/happ.$n" ] || mkdir -p "$HAPP_ROOT/happ.$n"
-      # 每片都需要 base_info，否则 happ.N 起不来
-      [ -s "$_ref" ] && [ ! -s "$HAPP_ROOT/happ.$n/xycould_base_info" ] \
-        && cp -p "$_ref" "$HAPP_ROOT/happ.$n/xycould_base_info" 2>/dev/null
-    done
-    echo "[INFO] 9 个缓存分片就绪"
-  else
-    echo "[WARN] $HAPP_ROOT/happ.0 不存在（缓存未初始化），跳过建分片"
-  fi
-
-  # 改 custom.yml（先备份，生成后校验条数，不符则放弃）
-  _bk="$HAPP_CFG.bak.$(date +%Y%m%d%H%M%S)"
-  cp -p "$HAPP_CFG" "$_bk" 2>/dev/null
-  _tmp=$(mktemp)
-  {
-    echo "# q2 happy9 $(date '+%F %T')"
-    echo "args:"
-    for n in $(seq 0 8); do echo "  - $HAPP_ROOT/happ.$n"; done
-    grep -E '^reg_isp:' "$HAPP_CFG" 2>/dev/null
-  } > "$_tmp"
-  _cnt=$(grep -cE "^  - ${HAPP_ROOT}/happ\.[0-9]+$" "$_tmp")
-  if [ "$_cnt" = "9" ]; then
-    cp -p "$_tmp" "$HAPP_CFG" && rm -f "$_tmp"
-    echo "[INFO] custom.yml 已设为 9 路（备份 $_bk）"
-    echo "[INFO] 重启 ipes 使路数生效（约 30~60 秒断流）"
-    docker restart ipes >/dev/null 2>&1
-    sleep 25
-    echo "[INFO] 容器状态: $(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null) | happ 进程数: $(docker exec ipes sh -c 'ps -ef | grep -c "[h]app:vod"' 2>/dev/null | tr -d '\r')"
-  else
-    rm -f "$_tmp"
-    echo "[WARN] 生成配置条数异常（$_cnt != 9），放弃替换custom.yml（保留现场）"
-  fi
-else
-  echo "[WARN] 未检测到 ipes 容器或 custom.yml，跳过 happy9 对齐"
-fi
-
-# ============ B2) 单机互斥锁（q2-new-20261010） ============
-# 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑，共用中间文件互相覆盖 → 容器全停。
-# 做法：flock 单机互斥；重复调用直接退出，绝不产生第二份部署。
-#注：旧版这里会 `exec setsid bash /root/ipes_full.sh ...`（后台跑 + 靠锁释放通知 B3 限速），
-#   新部署链路里 full 脚本已不再使用，改为**前台顺序执行**（B 段已跑完），
-#   因此这里的锁只用于「防并发重入」，跑完立即释放，B3 限速跟随器随即启动。
-LOCK_FILE="/var/run/ipes_deploy.lock"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "[ERROR] 本机已有部署在运行（$LOCK_FILE 被占用），本次退出以避免两份互踩"
-  echo "        确认前一份确已结束/卡死时可清理： rm -f $LOCK_FILE"
-  exit 1
-fi
-echo "[INFO] 已获取部署锁 $LOCK_FILE（互斥生效）"
-[ "${FINISH_ONLY:-0}" = "1" ] && echo "[INFO] --finish-only：仅做 happy9 对齐，不重装业务"
-# B 段（docker + Q2 部署）已在前台执行完毕；此处仅等待锁释放给 B3 跟随器用。
-flock -u 9
-exec 9>&-
-echo "[INFO] 部署主流程完成，释放锁（限速跟随器开始等待）"
-
-# ============ B3) 部署完成后自动限速（limit1：融合 run_limit.sh） ============
-# 流程：等 120s 让容器/watchdog 稳定 → 执行 run_limit.sh 装限速。
-#run_limit.sh 幂等且会自装 cron：窗口内每 10min 补挂、结束清除、@reboot 180s 自恢复。
-# 默认窗口 23:59 → 18:45（限速生效区间，区间外不限制）；--no-limit 跳过。
-# 日志：/var/log/ipes_limit_bg.log；--no-limit 可跳过；--limit-start/--limit-end 自定义窗口
-if [ "$LIMIT_ENABLE" = "1" ]; then
-  cat > /root/ipes_limit_after_deploy.sh <<LIM
-#!/bin/bash
-# 由 inline_deploy wrapper 生成：部署结束后自动限速
-sleep 120
-echo "[\$(date +'%F %T')] deploy finished, applying limit ($LIMIT_START -> $LIMIT_END) ..." >> /var/log/ipes_limit_bg.log
-curl -fsSL -m 90 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/limit/run_limit.sh | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END" >> /var/log/ipes_limit_bg.log 2>&1
-echo "[\$(date +'%F %T')] limit done, exit=\$?" >> /var/log/ipes_limit_bg.log
-LIM
-  chmod +x /root/ipes_limit_after_deploy.sh
-  # 【q2-new-20261010 改动】旧版是 `( flock ... ) &` 后台跑 + 主脚本立刻退出，
-  #   在「前台顺序执行」的新链路下有两个隐患：
-  #     1) 云助手/调用方可能在限速装完前就判定脚本结束、拿不到结果；
-  #     2) 后台子进程随父进程退出被收走，限速静默不生效（最难排查）。
-  #   改为**前台执行**（阻塞约 120s + 装限速），确保命令返回时限速已落地。
-  echo "[INFO] 正在执行限速安装（约120s，等容器稳定）..."
-  bash /root/ipes_limit_after_deploy.sh
-  echo "[INFO] 限速安装完成（$LIMIT_START → $LIMIT_END），日志 /var/log/ipes_limit_bg.log"
-else
-  echo "[INFO] --no-limit：本次跳过自动限速"
-fi
-
-# ============ C) 业务绑定自修复（r20-fix4 根治版） ============
+# ==============================================================================
+# 业务绑定自修复（C前置版 order-20261011：先启动流转，再跑部署）
+# ==============================================================================
+# 【顺序调整】用户要求「先流转，再慢慢部署」→ 本段已从脚本末尾移到部署主体之前，
+#   生成的 ipes_repair_binding.py 立即后台启动，**与部署并行轮询等待**。
+#   SN 一旦出现立刻 stateflow→ inService，不再来等 docker/Q2/注册/happy9/限速跑完。
+#   （技术约束：stateflow 的 hostname 必须用 76hex 真业务 SN，SN 只有容器起来后才有，
+#     所以真正的流转时刻必然在部署之后，但**等待窗口前置**能省掉后面所有串行耗时。）
+#
 # 三大修复：
 #   1) is_bound 读 nodeInfo（vendor/usbw 真正所在），不再读 nominalInfo（恒 0，导致永远误判未绑定→反复重绑）
 #   2) 节点匹配优先用本机 device_code（32hex nodeID）精确匹配；按 IP 兜底时排除 status=offline 的孤儿记录
@@ -278,9 +103,9 @@ NODE_SINGLE_IP_RADIO = int(os.environ.get('NODE_SINGLE_IP_RADIO','0'))
 NODE_USBW = int(os.environ.get('NODE_USBW','200'))
 NODE_BW_NUM = int(os.environ.get('NODE_BW_NUM','1'))
 DEPLOY_PID_FILE = os.environ.get('DEPLOY_PID_FILE','/var/run/ipes_deploy.pid')
-# 【q2-new-20261010】部署改为前台顺序执行（不再后台跑 full 脚本），
-#   所以这里只需等一个短窗口让容器与注册收尾，避免白等 25 分钟。
-WAIT_DEPLOY_SEC = int(os.environ.get('REPAIR_WAIT_DEPLOY','30'))
+# 【order-20261011】本段已提前到部署之前启动，与部署并行；
+#   不再等待部署进程，改为轮询等 76hex SN 就绪（SN 出现即立刻流转）。
+WAIT_DEPLOY_SEC = 0   # order-20261011：新链路部署前台执行，不再有后台部署 pid，故不等待
 # 等节点注册 + 76hex 业务SN 就绪，最长 30 分钟；SN 只在容器起来后才有
 WAIT_READY_SEC = int(os.environ.get('REPAIR_WAIT_READY','1800'))
 
@@ -507,12 +332,200 @@ chmod 700 /root/ipes_repair_once.sh
 
 export NODE_ACTIVATE_TOKEN="$JWT" ADMIN_API_HOST BUSINESS_ID ISP PROVINCE CITY \
        NODE_NAT_TYPE NODE_RESOURCE_TYPE NODE_DIAL_TYPE NODE_SINGLE_IP_RADIO \
-       NODE_USBW NODE_BW_NUM REPAIR_WAIT_DEPLOY=30
+       NODE_USBW NODE_BW_NUM REPAIR_WAIT_DEPLOY=0
 
+# ===== 立即后台启动绑定自修复（与后续部署并行）=====
+# 这一步放在部署之前是关键：程序起来后会自己轮询等76hex SN 一出现就立刻 stateflow→inService，
+# 不再等docker/Q2/注册/happy9/限速 全部跑完（省掉后面所有串行等待）。
 nohup setsid python3 /root/ipes_repair_binding.py >/var/log/ipes_repair.log 2>&1 </dev/null &
 REPAIR_PID=$!
-echo "已后台启动绑定自修复 PID=$REPAIR_PID"
+echo "[INFO] ✅ 绑定自修复已后台启动 PID=$REPAIR_PID（与部署并行，SN 就绪即自动流转 inService）"
+echo "[INFO]    流转日志： tail -f /var/log/ipes_repair.log"
+
+
+# ============ B) 部署主体（q2-new-20261010：改用 Q2_test 脚本体系） ============
+# 【2026-10-10 用户指定】改用官方Q2_test 部署链路，去掉旧的 ipes_deploy_full.sh 体系：
+#   1) install_docker-ce_v2.sh     —— 装docker（含硬化/超时/重试）
+#   2) ecache_auto_disk_install.sh —— Q2 部署调度器（自动判断有无数据盘并选分支）
+#      它的参数只有 -t（镜像: 2=省外/ 3=省内）和 -i（reg_isp: 1电信/2联通/3移动），**没有路数参数**；
+#      路数由脚本内部按「云环境固定 1 个目录 / 非云按 可用GB÷35」自动算。
+#      因此 9 路在下面 B1.9 段单独对齐（复用 opt_align 已真机验证的逻辑）。
+# 注意：不带 -s/--skip-olmt 等旧参数，保留 set -e 语义（任一步失败即中止）。
+echo "===== [B] 安装 docker（install_docker-ce_v2.sh） ====="
+if ! curl -fsSL -m 300 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/install_docker/install_docker-ce_v2.sh | bash; then
+  echo "[ERROR] install_docker-ce_v2.sh 执行失败（网络或源问题），部署中止"
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1 || ! systemctl is-active --quiet docker; then
+  echo "[WARN] docker 未就绪（可能仍在启动），等待 20s 后复查"
+  sleep 20
+  systemctl is-active docker >/dev/null 2>&1 || { echo "[ERROR] docker 服务未起来，部署中止"; exit 1; }
+fi
+echo "[INFO] docker 就绪: $(docker --version 2>/dev/null)"
+
+echo "===== [B] Q2 部署（ecache_auto_disk_install.sh -i 2 -t 2） ====="
+if ! curl -fsSL -m 1800 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/Q2_test/ecache_auto_disk_install.sh | bash -s -- -i 2 -t 2; then
+  echo "[ERROR] ecache_auto_disk_install.sh 执行失败，部署中止"
+  exit 1
+fi
+echo "[INFO] Q2 部署脚本执行完毕"
+
+# 导出 token（旧流程里ipes_client 用它做激活，新脚本体系若需要同样有效）
+export NODE_ACTIVATE_TOKEN="$JWT"
+sed -i 's|^mirrorlist=|#mirrorlist=|g;s|^#\?baseurl=http://mirror.centos.org|baseurl=http://mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+
+# ============ B1.8) 设备注册到渠道云端（reg-20261010） ============
+# 【为什么必须补这一段】Q2_test 官方链路（install_docker-ce_v2.sh +
+#   ecache_auto_disk_install.sh → uninstall_ecache / umount_disk / auto_mount_disk /
+#   ecache_docker_install(_ali_ten) / install_ipes_health_check）全链路实测**不含设备注册**
+#   （4 个脚本里 batch/create2 与 channel API 均为0 处；ecache_docker_install_ali_ten.sh 里
+#   API_BASE_URL/USERNAME/PASSWORD 是死代码，定义了从未使用）。
+#   注册原本由旧 ipes_deploy_full.sh 负责，换链路后若不补，C 段按 device_code
+#   在后台匹配不到节点 → 绑定与stateflow 全部失败（节点不会流转到 inService）。
+# 逻辑与旧 full 脚本一致：取 32hex device_code + myip.ipip.net 定位 + ZYY+md5(ak+ts+sk) 签名。
+CH_API_URL="http://api.zhouyiy.com/qudao/device/v1/batch/create2"
+_ch_register() {
+  local device_id="$1" province="$2" city="$3" isp="$4"
+  local remark="${isp}-${device_id:0:8}"
+  local ts sign body rc try
+  for try in 1 2 3; do
+    ts=$(date +%s)
+    sign="ZYY$(echo -n "${AK}${ts}${SK}" | md5sum | cut -d' ' -f1)"
+    body='{"devices":[{"device_id":"'"$device_id"'","remark":"'"$remark"'"}],"province":"'"$province"'","city":"'"$city"'","isp":"'"$isp"'"}'
+    rc=$(curl -s -w '\n%{http_code}' --location --request POST "$CH_API_URL" \
+      --header "sign: $sign" --header "verison: V1.0.0" \
+      --header "appKey: $AK" --header "timestamp: $ts" \
+      --header 'Content-Type: application/json' --data "$body" \
+      --connect-timeout 10 --max-time 30 2>/dev/null)
+    local code=$(printf '%s' "$rc" | tail -n1)
+    local resp=$(printf '%s' "$rc" | sed '$d')
+    if [ "$code" = "200" ] && printf '%s' "$resp" | grep -q '全部绑定成功\|全部已存在'; then
+      echo "[INFO] 设备注册成功（尝试 $try）: $resp" | head -c 300; echo
+      { echo "注册时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "设备SN: $device_id"; echo "省份: $province"; echo "城市: $city"
+        echo "运营商: $isp"; echo "备注: $remark"; echo "API响应: $resp"; } \
+        > /usr/local/edge/registration_info 2>/dev/null
+      chmod 644 /usr/local/edge/registration_info 2>/dev/null
+      return 0
+    fi
+    echo "[WARN] 注册返回异常（HTTP $code, 尝试 $try）: $(printf '%s' "$resp" | head -c 200)"
+    sleep 2
+  done
+  echo "[ERROR] 设备注册失败（3 次重试耗尽）——C 段绑定可能失败，但不影响容器已起来"
+  return 1
+}
+
+DC=""
+for _f in /usr/local/edge_zycloud/device_code /usr/local/edge/device_code /etc/.mac; do
+  if [ -s "$_f" ]; then DC=$(tr -d ' \r\n' < "$_f"); break; fi
+done
+if [ -n "$DC" ]; then
+  _loc=$(curl -s --retry 2 --retry-delay 1 --connect-timeout 5 --max-time 10 myip.ipip.net 2>/dev/null)
+  _prov=$(printf '%s' "$_loc" | awk -F' ' '{print $4}' | tr -d ',')
+  _city=$(printf '%s' "$_loc" | awk -F' ' '{print $5}' | tr -d ',')
+  [ -z "$_prov" ] && _prov="$PROVINCE"
+  [ -z "$_city" ] && _city="$CITY"
+  echo "===== [B1.8] 设备注册（device=$DC / ${_prov:-?}${_city:-?} / $ISP） ====="
+  _ch_register "$DC" "$_prov" "$_city" "$ISP" || true
+else
+  echo "[WARN] 未找到 device_code（32hex），跳过设备注册（后台绑定可能失败）"
+fi
+
+# ============ B1.9) happ 路数对齐到 9 路（happy9-20261010） ============
+# 背景：新部署链路不接路数参数（实测 ecache_docker_install_ali_ten.sh 只认 -t/-i，
+#   传 -n 会「未知选项」直接退出），且内部对云环境固定 1 个目录 → 与期望的 9 路不符。
+# 做法：部署完成后按 opt_align 已真机验证的形态对齐（改 custom.yml + 建分片 + 重启容器）。
+# 幂等：重复执行安全；-1 分片或配置异常时放弃替换，不破坏现场。
+HAPP_ROOT=/data/happ
+HAPP_CFG=/opt/ipes/var/db/ipes/happ-conf/custom.yml
+if docker inspect ipes >/dev/null 2>&1 && [ -f "$HAPP_CFG" ]; then
+  echo "===== [B1.9] happ 路数对齐 9 路 ====="
+  if [ -d "$HAPP_ROOT/happ.0" ]; then
+    _ref="$HAPP_ROOT/happ.0/xycould_base_info"
+    for n in $(seq 0 8); do
+      [ -d "$HAPP_ROOT/happ.$n" ] || mkdir -p "$HAPP_ROOT/happ.$n"
+      # 每片都需要 base_info，否则 happ.N 起不来
+      [ -s "$_ref" ] && [ ! -s "$HAPP_ROOT/happ.$n/xycould_base_info" ] \
+        && cp -p "$_ref" "$HAPP_ROOT/happ.$n/xycould_base_info" 2>/dev/null
+    done
+    echo "[INFO] 9 个缓存分片就绪"
+  else
+    echo "[WARN] $HAPP_ROOT/happ.0 不存在（缓存未初始化），跳过建分片"
+  fi
+
+  # 改 custom.yml（先备份，生成后校验条数，不符则放弃）
+  _bk="$HAPP_CFG.bak.$(date +%Y%m%d%H%M%S)"
+  cp -p "$HAPP_CFG" "$_bk" 2>/dev/null
+  _tmp=$(mktemp)
+  {
+    echo "# q2 happy9 $(date '+%F %T')"
+    echo "args:"
+    for n in $(seq 0 8); do echo "  - $HAPP_ROOT/happ.$n"; done
+    grep -E '^reg_isp:' "$HAPP_CFG" 2>/dev/null
+  } > "$_tmp"
+  _cnt=$(grep -cE "^  - ${HAPP_ROOT}/happ\.[0-9]+$" "$_tmp")
+  if [ "$_cnt" = "9" ]; then
+    cp -p "$_tmp" "$HAPP_CFG" && rm -f "$_tmp"
+    echo "[INFO] custom.yml 已设为 9 路（备份 $_bk）"
+    echo "[INFO] 重启 ipes 使路数生效（约 30~60 秒断流）"
+    docker restart ipes >/dev/null 2>&1
+    sleep 25
+    echo "[INFO] 容器状态: $(docker inspect -f '{{.State.Running}}' ipes 2>/dev/null) | happ 进程数: $(docker exec ipes sh -c 'ps -ef | grep -c "[h]app:vod"' 2>/dev/null | tr -d '\r')"
+  else
+    rm -f "$_tmp"
+    echo "[WARN] 生成配置条数异常（$_cnt != 9），放弃替换custom.yml（保留现场）"
+  fi
+else
+  echo "[WARN] 未检测到 ipes 容器或 custom.yml，跳过 happy9 对齐"
+fi
+
+# ============ B2) 单机互斥锁（q2-new-20261010） ============
+# 背景：2026-09-17 上海新机事故 —— 同一台机上两份部署并发在跑，共用中间文件互相覆盖 → 容器全停。
+# 做法：flock 单机互斥；重复调用直接退出，绝不产生第二份部署。
+#注：旧版这里会 `exec setsid bash /root/ipes_full.sh ...`（后台跑 + 靠锁释放通知 B3 限速），
+#   新部署链路里 full 脚本已不再使用，改为**前台顺序执行**（B 段已跑完），
+#   因此这里的锁只用于「防并发重入」，跑完立即释放，B3 限速跟随器随即启动。
+LOCK_FILE="/var/run/ipes_deploy.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[ERROR] 本机已有部署在运行（$LOCK_FILE 被占用），本次退出以避免两份互踩"
+  echo "        确认前一份确已结束/卡死时可清理： rm -f $LOCK_FILE"
+  exit 1
+fi
+echo "[INFO] 已获取部署锁 $LOCK_FILE（互斥生效）"
+[ "${FINISH_ONLY:-0}" = "1" ] && echo "[INFO] --finish-only：仅做 happy9 对齐，不重装业务"
+# B 段（docker + Q2 部署）已在前台执行完毕；此处仅等待锁释放给 B3 跟随器用。
+flock -u 9
+exec 9>&-
+echo "[INFO] 部署主流程完成，释放锁（限速跟随器开始等待）"
+
+# ============ B3) 部署完成后自动限速（limit1：融合 run_limit.sh） ============
+# 流程：等 120s 让容器/watchdog 稳定 → 执行 run_limit.sh 装限速。
+#run_limit.sh 幂等且会自装 cron：窗口内每 10min 补挂、结束清除、@reboot 180s 自恢复。
+# 默认窗口 23:59 → 18:45（限速生效区间，区间外不限制）；--no-limit 跳过。
+# 日志：/var/log/ipes_limit_bg.log；--no-limit 可跳过；--limit-start/--limit-end 自定义窗口
+if [ "$LIMIT_ENABLE" = "1" ]; then
+  cat > /root/ipes_limit_after_deploy.sh <<LIM
+#!/bin/bash
+# 由 inline_deploy wrapper 生成：部署结束后自动限速
+sleep 120
+echo "[\$(date +'%F %T')] deploy finished, applying limit ($LIMIT_START -> $LIMIT_END) ..." >> /var/log/ipes_limit_bg.log
+curl -fsSL -m 90 https://zyy-go.oss-cn-beijing.aliyuncs.com/script/limit/run_limit.sh | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END" >> /var/log/ipes_limit_bg.log 2>&1
+echo "[\$(date +'%F %T')] limit done, exit=\$?" >> /var/log/ipes_limit_bg.log
+LIM
+  chmod +x /root/ipes_limit_after_deploy.sh
+  # 【q2-new-20261010 改动】旧版是 `( flock ... ) &` 后台跑 + 主脚本立刻退出，
+  #   在「前台顺序执行」的新链路下有两个隐患：
+  #     1) 云助手/调用方可能在限速装完前就判定脚本结束、拿不到结果；
+  #     2) 后台子进程随父进程退出被收走，限速静默不生效（最难排查）。
+  #   改为**前台执行**（阻塞约 120s + 装限速），确保命令返回时限速已落地。
+  echo "[INFO] 正在执行限速安装（约120s，等容器稳定）..."
+  bash /root/ipes_limit_after_deploy.sh
+  echo "[INFO] 限速安装完成（$LIMIT_START → $LIMIT_END），日志 /var/log/ipes_limit_bg.log"
+else
+  echo "[INFO] --no-limit：本次跳过自动限速"
+fi
 echo ""
-echo "部署日志：  见上方[B]/[B1.9] 段落输出"
-echo "docker 日志： docker logs -f ipes"
-echo "修复日志：  tail -f /var/log/ipes_repair.log"
+echo "部署日志：见上方 [B] 段输出｜docker 日志： docker logs -f ipes"
+echo "绑定/流转日志：tail -f /var/log/ipes_repair.log"
+echo "限速日志：    tail -f /var/log/ipes_limit_bg.log"

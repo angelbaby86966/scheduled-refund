@@ -10,9 +10,17 @@
 #     紧接着读真 SN 回填流转；全程一个步骤内闭环，不留独立"后面对齐"阶段）
 #   纯净版：不做系统调优（cubic + pfifo_fast），happ 固定 9 路
 #
-# 用法：贴进云助手「命令助手」，超时 ≥1800 秒
+# 用法：先备好 token（export Q2_JWT=xxx，或 echo <token> > /etc/q2/jwt），再贴进云助手「命令助手」，超时 ≥1800 秒
 # ==============================================================================
-JWT="${Q2_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVVUlEIjoiMzhjZTQ2YTctZDNkMi00YzVlLWJkNTYtM2I3YzFlMDNkNmYyIiwiSUQiOjQwLCJVc2VybmFtZSI6IjE3Njk1OTM3NzU2IiwiTmlja05hbWUiOiLlvKDnnb8iLCJBdXRob3JpdHlJZCI6MjEsIlVzZXJUeXBlIjoxLCJSZWxhdGVkUGFydHlJRCI6MCwiWnlVaWRzIjoiIiwiQnVmZmVyVGltZSI6ODY0MDAsImlzcyI6Inp5eSIsImF1ZCI6WyJHVkEiXSwiZXhwIjoxNzkyMDI4ODI2LCJuYmYiOjE3OTE0MjQwMjZ9.USrQ-EgFhWBKJKpOzFgj5FlnJZnBJ_QTm7WdfCh8iJ0}"
+# ── token 外置：脚本不再内置 JWT（公开 CDN 不再泄露密钥）──
+#   读取优先级：export Q2_JWT=xxx  >  文件 ${Q2_JWT_FILE:-/etc/q2/jwt}  >  报错退出
+#   换 token 只需改环境变量或重写该文件，无需改脚本；JWT 过期也能即时更替
+Q2_JWT_FILE="${Q2_JWT_FILE:-/etc/q2/jwt}"
+if [ -z "${Q2_JWT:-}" ] && [ -f "$Q2_JWT_FILE" ]; then
+  Q2_JWT="$(cat "$Q2_JWT_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+: "${Q2_JWT:?未找到 JWT：请 export Q2_JWT=xxx，或 echo <新token> > $Q2_JWT_FILE（脚本已不再内置密钥）}"
+JWT="$Q2_JWT"
 CHAN_AK="${Q2_AK:-06d78b19bd0d9fc0aa300c6d}"
 CHAN_SK="${Q2_SK:-16d6c46443308e62bb51f22c074a90ed}"
 ISP="${Q2_ISP:-联通}"

@@ -236,28 +236,38 @@ main_deploy() {
 
   # ② 启动后台部署（命令立即返回，真进度落 /var/log/ipes_nohup.log）
   say ""; say "===== 启动后台部署（setsid 脱离会话）====="
-  # ⚠️ 必须先把自身落盘再执行：管道执行(`curl … | bash`)时 $0 == "bash"，
-  #    直接 `setsid "$0" --internal-deploy` 会变成 `bash --internal-deploy`
-  #    → bash 报 "invalid option" 退出，后台部署静默不启动（踩过的真实坑）。
+  # ⚠️ 关键（真实踩坑）：管道执行(`curl … | bash`)时 $0=="bash" 且 BASH_SOURCE 为空，
+  #    `setsid "$0" --internal-deploy` 会变成 `bash --internal-deploy`
+  #    → bash 报 "--internal-deploy: invalid option" 退出，后台部署【静默不启动】，
+  #    日志里只剩一屏 bash 用法，且 deploy.status 永远不写 → 表现为"部署没成功"。
+  #    对策：把脚本实体落到磁盘，再用 /bin/bash <文件> --internal-deploy 启动。
+  #    落盘顺序：① BASH_SOURCE(文件执行场景) ② Q2_SELF_URL 自下载(管道场景) ③ 前台回落
   SELF="/etc/q2/q2_oneclick_v6.self.sh"
   mkdir -p /etc/q2 2>/dev/null
-  if [ -r "${BASH_SOURCE[0]:-}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
+  # ① 文件执行场景：直接复制自身
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -s "${BASH_SOURCE[0]:-}" ]; then
     cp -f "${BASH_SOURCE[0]}" "$SELF" 2>/dev/null
+    say "  · 自身落盘(复制 BASH_SOURCE) → $SELF"
+  fi
+  # ② 管道场景：BASH_SOURCE 为空，改用自下载
+  if [ ! -s "$SELF" ]; then
+    SELF_URL="${Q2_SELF_URL:-https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@1f890c0c4bb102d3fc2290deb995336c9a1838ca/ops/q2_oneclick_v6.sh}"
+    say "  · 管道执行无本地路径，自下载脚本 → $SELF_URL"
+    curl -fsSL --max-time 60 "$SELF_URL" -o "$SELF" 2>/dev/null
   fi
   if [ ! -s "$SELF" ]; then
-    say "  ✗ 无法把自身落盘到 $SELF（后台部署启动不了）"
-    say "     改用前台模式：去掉 --internal-deploy 走 internal_deploy()"
+    say "  ⚠️ 仍无法落盘，回落【前台】执行（会阻塞到部署完成，请把云助手超时调到 2400s）"
     internal_deploy
     return $?
   fi
   chmod +x "$SELF" 2>/dev/null
   setsid nohup /bin/bash "$SELF" --internal-deploy </dev/null >>"$NOHUP_LOG" 2>&1 &
   local pid=$!
-  sleep 2
+  sleep 3
   if kill -0 "$pid" 2>/dev/null; then
     say "  ✅ 后台部署已启动（PID=$pid），云助手命令立即返回。"
   else
-    say "  ⚠️ 后台进程未存活，回落前台执行（会阻塞，请把云助手超时调大）"
+    say "  ⚠️ 后台进程未存活，回落【前台】执行（会阻塞，请把云助手超时调到 2400s）"
     internal_deploy
     return $?
   fi

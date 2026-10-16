@@ -210,15 +210,25 @@ main_deploy() {
     say "  [2.1] 已绑定，跳过"
   fi
 
-  # ① 占位符流转「服务中」—— 放在绑定之后，新机也能拿到真 nodeID，流转真正生效
-  say ""; say "===== [1/4] 占位符流转「服务中」（先流转，再后台部署）====="
+  # ① 先提交业务属性(41/200M) + 占位符流转「服务中」—— 放在绑定之后，新机也立即拿到业务
+  say ""; say "===== [1/4] 提交业务(41/200M) + 占位符流转「服务中」====="
   NID=$(node_id)
   if [ -n "$NID" ]; then
-    R=$(flow "$NID" "$PLACEHOLDER" "inService")
+    LOC=$(detect_loc)
+    # 容器若已起来则带真 SN，否则用占位符（避免重跑时用占位符覆盖真 SN）
+    SN_NOW=$(docker exec ipes cat /app/ipses/bin/ipes_sn 2>/dev/null | tr -d '\r\n')
+    HOST="$PLACEHOLDER"; [ ${#SN_NOW} -ge 60 ] && HOST="$SN_NOW"
+    # submit_nominal 要求节点在 configured 阶段（inService 下提交返回 code:7），先降配
+    flow "$NID" "$HOST" "configured" >/dev/null 2>&1
+    R2=$(submit_nominal "$NID" "${LOC%%|*}" "${LOC##*|}")
+    case "$R2" in
+      *'"code":0'*) say "  ✅ 已提交业务属性(41/200M/${ISP})" ;;
+      *) say "  ⚠️ 属性提交未成功：$(echo "$R2" | head -c 80)" ;;
+    esac
+    R=$(flow "$NID" "$HOST" "inService")
     case "$R" in
-      *'"code":0'*) say "  ✅ 已流转服务中（业务ID暂为占位符，后台部署完成会自动回填真SN）" ;;
-      *) say "  ⚠️ 未成功：$(echo "$R" | head -c 80)"
-         say "     （JWT 401 最常见；后台部署会再回填一次，不影响部署）" ;;
+      *'"code":0'*) say "  ✅ 已流转服务中（业务41/200M已挂 ${HOST:0:16}…，后台部署完成回填真SN）" ;;
+      *) say "  ⚠️ 流转未成功：$(echo "$R" | head -c 80)" ;;
     esac
   else
     say "  ⚠️ 仍未取到 nodeID，流转跳过（后台部署完成后重跑本脚本可补）"

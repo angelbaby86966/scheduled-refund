@@ -1,10 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# 舟翼云 q2（业务41）一键部署 · v6.1（加固版）
+# 舟翼云 q2（业务41）一键部署 · v6.2（加固版）
 #   ① 先绑定+注册 → 占位符流转「服务中」（节点立刻可被调度）
 #   ② 部署（docker + Q2业务 + 9路一次做对 + 真SN回填 + 保活 + 限速）
 #      以 setsid 后台运行，云助手命令秒回，真进度写 /var/log/ipes_nohup.log
 #   纯净版：不做系统调优（cubic + pfifo_fast），happ 固定 9 路
+#   v6.2 新增：① 镜像源改【纯阿里云】registry（cn-beijing 北京，同云跨区拉取最快最稳，不做腾讯云回退）
+#             ② 限速【每分钟自愈】（窗口内 htb 规则丢失则 1 分钟内重建）
 #
 # ------------------------------------------------------------------
 # ★★ 部署命令（务必用这个，禁止 `curl … | bash`）★★
@@ -16,12 +18,16 @@
 #   /bin/bash /root/q2_oneclick_v6.sh --bootstrap
 #
 #   等价的自举命令（不依赖本文件的 --bootstrap，可直接复制粘贴）：
+#   ★ 国内源（init-full-deploy.app.workbuddy.host）排在最前，深圳/广州等出网
+#     不稳的机器优先走它，1 秒内拉到，内容与 GitHub 源同字节（sha256 一致）。
 #
 #   export Q2_JWT=<你的token>
-#   D=/root/q2_oneclick_v6.sh; R=angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh
-#   for U in "https://gh-proxy.com/https://raw.githubusercontent.com/$R" \
-#            "https://raw.githubusercontent.com/$R" \
-#            "https://cdn.jsdelivr.net/gh/$R"; do
+#   D=/root/q2_oneclick_v6.sh
+#   for U in \
+#     "https://init-full-deploy.app.workbuddy.host/q2_oneclick_v6" \
+#     "https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh" \
+#     "https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh" \
+#     "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh"; do
 #     curl -fsSL -m 90 "$U" -o "$D" 2>/dev/null && \
 #     [ "$(wc -c <"$D")" -gt 3000 ] && bash -n "$D" 2>/dev/null && break
 #     rm -f "$D"
@@ -92,18 +98,23 @@ fetch_script() {
 
 # ==============================================================================
 # ★ 自举段：安全地把自己下载到磁盘并执行（对应 v6 的缺陷①）
-#   多源 gh-proxy.com → raw.githubusercontent.com → cdn.jsdelivr.net
+#   多源（国内源优先）→ gh-proxy.com → raw.githubusercontent.com → cdn.jsdelivr.net
+#   国内源（WorkBuddy 静态托管）深圳/广州等出网不稳的机器也能 1 秒内拉到，
+#   且返回的是与本文件同字节的内容（sha256 一致），无版本漂移。
 #   全失败必须非 0 退出并打印 [FATAL]，绝不允许"静默成功"。
 # ==============================================================================
 Q2_REF="${Q2_REF:-92e5cff4bb102d3fc2290deb995336c9a1838ca}"
 Q2_RAW="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
 Q2_CDN="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
+# 国内源：WorkBuddy 静态托管（该站点禁止 .sh 扩展名，故用无扩展名文件名）
+Q2_DOM="https://init-full-deploy.app.workbuddy.host/q2_oneclick_v6"
 Q2_BOOT_DST="${Q2_BOOT_DST:-/root/q2_oneclick_v6.sh}"
 
 q2_bootstrap() {
-  say "===== q2 v6.1 自举下载（多源 + 落盘 + 校验，禁止 curl|bash）====="
+  say "===== q2 v6.2 自举下载（国内源优先 + 多源 + 落盘 + 校验，禁止 curl|bash）====="
   say "  目标: $Q2_BOOT_DST"
   if fetch_script "$Q2_BOOT_DST" 3000 90 2 \
+      "${Q2_DOM}" \
       "https://gh-proxy.com/${Q2_RAW}" \
       "${Q2_RAW}" \
       "${Q2_CDN}"; then
@@ -112,7 +123,7 @@ q2_bootstrap() {
     exec /bin/bash "$Q2_BOOT_DST" "$@"
   fi
   # ↓↓↓ 绝不静默：所有源都失败 → 明确报错 + 非 0 退出 ↓↓↓
-  echo "[FATAL] 下载失败：q2_oneclick_v6.sh 全部候选源均不可用或校验未通过（gh-proxy.com / raw.githubusercontent.com / cdn.jsdelivr.net）" >&2
+  echo "[FATAL] 下载失败：q2_oneclick_v6.sh 全部候选源均不可用或校验未通过（国内源 init-full-deploy.app.workbuddy.host / gh-proxy.com / raw.githubusercontent.com / cdn.jsdelivr.net）" >&2
   say "  ❌ [FATAL] 下载失败，未执行任何部署动作；请检查出网/代理后重试"
   exit 1
 }
@@ -196,7 +207,13 @@ sn_current() { read_sn >/dev/null 2>&1; printf '%s' "$SN"; }
 #      写成复数 → [ -f "$CFG" ] 永假 → 9 路分支永远走 else → happ 永远 1 路。
 # ==============================================================================
 ROOT=/data/happ; CFG=/opt/ipes/var/db/ipes/happ-conf/custom.yml
-IMG="ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:latest"
+# v6.2：镜像源【纯阿里云】—— cn-beijing 北京 registry（同云跨区拉取最快最稳），不做任何腾讯云回退
+# ⚠️ 阿里云 registry 为私有，需登录；凭据可经环境变量覆盖（Q2_ALI_USER / Q2_ALI_PASS）
+ALI_REG="crpi-0myzmqp9v99mnimv.cn-beijing.personal.cr.aliyuncs.com"
+ALI_REPO="qy_q2/ipes-linux-amd64-youkai-latest:latest"
+ALI_USER="${Q2_ALI_USER:-nick5404979015}"
+ALI_PASS="${Q2_ALI_PASS:-zblove0222}"
+IMG="${ALI_REG}/${ALI_REPO}"
 ready_probe() {
   READY_MISSING=""
   docker inspect ipes >/dev/null 2>&1 || READY_MISSING="$READY_MISSING 容器ipes"
@@ -214,6 +231,83 @@ wait_ready() {
   done
   say "     ✗ 等待 $READY_TRY 次（$((READY_TRY * READY_WAIT))s）仍不就绪，缺少：$READY_MISSING"
   return 1
+}
+
+# ==============================================================================
+# ★ v6.2 镜像拉取：纯阿里云 registry（cn-beijing 北京，同云跨区最快最稳）
+#   - 登录凭据走环境变量覆盖（Q2_ALI_USER/PASS），默认用平台共用值
+#   - 阿里云登录/拉取失败即标红退出，不做腾讯云回退（避免"偷偷换源"导致部署形态不可控）
+# ==============================================================================
+q2_pull_image() {
+  # 0) 配置 registry-mirror（加速基础层拉取，与平台一致；仅当 daemon.json 不存在时写入，避免覆盖既有配置）
+  if [ -d /etc/docker ] && [ ! -f /etc/docker/daemon.json ]; then
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": ["https://stxam7vz.mirror.aliyuncs.com"]
+}
+EOF
+    systemctl restart docker >/dev/null 2>&1; sleep 3
+    say "  · 已写入 docker registry-mirror: stxam7vz.mirror.aliyuncs.com"
+  fi
+  # 1) 纯阿里云：登录 + 拉取
+  say "  [镜像] 阿里云 registry：${ALI_REG}/${ALI_REPO}"
+  if docker login "${ALI_REG}" --username="${ALI_USER}" --password="${ALI_PASS}" >/dev/null 2>&1 \
+     && docker pull "${ALI_REG}/${ALI_REPO}" >/dev/null 2>&1; then
+    IMG="${ALI_REG}/${ALI_REPO}"
+    say "  ✅ 阿里云镜像拉取成功 → $IMG"
+    return 0
+  fi
+  # 2) 阿里云失败：直接标红退出，绝不偷偷换源（部署形态必须可控）
+  mark_fail "镜像拉取(阿里云失败：${ALI_REG}/${ALI_REPO})"
+  return 1
+}
+
+# ==============================================================================
+# ★ v6.2 限速自愈：窗口内若 eth0 上 htb 规则丢失，1 分钟内重建
+#   - run_limit.sh 本身已含 @reboot + 每 10 分钟 cron 自愈（speed_limit.sh 自带 sfq + 交互高优 class）
+#   - 这里额外加一个 systemd 每分钟 watch：弥补"窗口内 TC 被冲掉、距下次 10 分钟 cron 还有空窗"的漏洞
+# ==============================================================================
+q2_limit_watch_install() {
+  local LSTART="$LIMIT_START" LEND="$LIMIT_END" DEV=eth0 OSSREF="$OSS"
+  cat > /usr/local/bin/q2_limit_watch.sh <<EOF
+#!/bin/bash
+# q2 v6.2 限速自愈：处于限速窗口且 eth0 上 htb 规则丢失时，重跑 run_limit.sh 重建
+LSTART="$LSTART"; LEND="$LEND"; DEV=eth0; OSSREF="$OSSREF"
+hm() { local h=\$(date +%H|sed 's/^0//'); local m=\$(date +%M|sed 's/^0//'); echo \$((h*60+m)); }
+now=\$(hm)
+sm=\$((\${LSTART:0:2}*60+\${LSTART:3:2})); em=\$((\${LEND:0:2}*60+\${LEND:3:2}))
+inwin=false
+if [ \$sm -le \$em ]; then [ \$now -ge \$sm ] && [ \$now -lt \$em ] && inwin=true
+else { [ \$now -ge \$sm ] || [ \$now -lt \$em ]; } && inwin=true; fi
+if \$inwin; then
+  if ! tc qdisc show dev \$DEV 2>/dev/null | grep -q "htb 1:"; then
+    curl -fsSL -m 180 "\$OSSREF/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "\$LSTART" "\$LEND"
+  fi
+fi
+EOF
+  chmod +x /usr/local/bin/q2_limit_watch.sh
+  cat > /etc/systemd/system/q2-limit-watch.service <<'EOF'
+[Unit]
+Description=q2 limit self-heal
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/q2_limit_watch.sh
+EOF
+  cat > /etc/systemd/system/q2-limit-watch.timer <<'EOF'
+[Unit]
+Description=q2 limit self-heal timer (per minute)
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now q2-limit-watch.timer >/dev/null 2>&1
+  local st=$(systemctl is-enabled q2-limit-watch.timer 2>/dev/null || echo n/a)
+  say "  · 限速自愈 timer: $st（每分钟巡检，窗口内 htb 丢失即重建）"
 }
 
 LOCK=/var/run/ipes_deploy.lock
@@ -236,6 +330,8 @@ internal_deploy() {
   curl -fsSL -m 300 "$OSS/install_docker/install_docker-ce_v2.sh" -o /tmp/_dk.sh 2>/dev/null \
     && bash /tmp/_dk.sh || mark_fail "docker安装"
   say "  docker: $(docker --version 2>/dev/null || echo 失败)"
+  # v6.2：docker 就绪后先预拉取镜像（阿里云优先），后续 9 路重建与平台 ecache 均复用已缓存镜像
+  q2_pull_image || say "  ⚠️ 镜像预拉取失败，交由平台 ecache 脚本兜底拉取"
   say "  [2.3] Q2 业务部署（-i 2 -t 2）…"
   curl -fsSL -m 1800 "$OSS/Q2_test/ecache_auto_disk_install.sh" -o /tmp/_q2.sh 2>/dev/null \
     && bash /tmp/_q2.sh -i 2 -t 2 || mark_fail "Q2部署"
@@ -340,13 +436,19 @@ internal_deploy() {
   #           ② 未就绪 → 多源 + 3 轮重试 + 落盘校验安装，装不上才 mark_fail。
   HC_SCRIPT=/tmp/_hc.sh
   HC_BIN=/usr/local/bin/ipes_health_check.sh
-  HC_URL="${Q2_HC_URL:-$OSS/Q2_test/install_ipses_health_check.sh}"
+  # v6.2 修正：保活安装器真名是 install_ipes_health_check.sh（v6.1 误写文件名多一个字符，OSS 返回 404 死链）
+  HC_URL="${Q2_HC_URL:-$OSS/Q2_test/install_ipes_health_check.sh}"
+  # 若随脚本分发有本地副本则优先用（OSS 不可达也能装）；不存在再走上面的 OSS 源
+  HC_LOCAL="$(dirname "${BASH_SOURCE[0]:-}")/install_ipes_health_check.sh"
+  if [ -s "$HC_LOCAL" ] && cp -f "$HC_LOCAL" "$HC_SCRIPT" 2>/dev/null; then
+    say "  · 保活安装器：用本地副本 $(basename "$HC_LOCAL")"
+  fi
   hc_cron_cnt() { crontab -l 2>/dev/null | grep -cE 'ipes_health|health_check'; }
   if [ -x "$HC_BIN" ] && [ "$(hc_cron_cnt)" -ge 1 ] 2>/dev/null; then
     say "  ✅ 保活已就绪：$HC_BIN 存在，cron $(hc_cron_cnt) 条，跳过安装"
   else
     say "  保活未就绪（HC_BIN=$([ -x "$HC_BIN" ] && echo 有 || echo 无)，cron $(hc_cron_cnt) 条），开始安装…"
-    if fetch_script "$HC_SCRIPT" 200 120 3 "$HC_URL"; then
+    if [ -s "$HC_SCRIPT" ] || fetch_script "$HC_SCRIPT" 200 120 3 "$HC_URL"; then
       say "  执行保活安装脚本…"
       if bash "$HC_SCRIPT"; then
         say "  ✅ 保活安装脚本执行完成"
@@ -363,7 +465,8 @@ internal_deploy() {
   # ==============================================================================
   say ""; say "===== [4/4] 挂限速 ${LIMIT_START} → ${LIMIT_END} ====="
   curl -fsSL -m 180 "$OSS/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END"
-  say "  qdisc=$(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条  cron=$(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条"
+  q2_limit_watch_install
+  say "  qdisc=$(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条  cron=$(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条  heal-timer=$(systemctl is-enabled q2-limit-watch.timer 2>/dev/null || echo 无)"
 
   flock -u 9 2>/dev/null; exec 9>&-
   # ==============================================================================
@@ -377,7 +480,8 @@ internal_deploy() {
   say "真SN     : ${ACC_SN:-未取到}  (来源 ${ACC_SN_SRC:-无})"
   say "SN 长度  : ${#ACC_SN}  (期望 76)"
   say "保活cron : $(hc_cron_cnt) 条（脚本 $([ -x "$HC_BIN" ] && echo 存在 || echo 缺失)）"
-  say "限速     : qdisc $(tc qdisc show dev eth0 2>/dev/null | grep -c htb) / cron $(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条"
+  say "限速     : qdisc $(tc qdisc show dev eth0 2>/dev/null | grep -c htb) / cron $(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条 / 自愈timer=$(systemctl is-enabled q2-limit-watch.timer 2>/dev/null || echo 无)"
+  say "镜像源   : $IMG"
   say "纯净版   : CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) Q=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)  (应 cubic + pfifo_fast)"
   say "nodeID   : $(node_id)"
   if [ "$NINE_OK" = "1" ]; then
@@ -413,7 +517,7 @@ internal_deploy() {
 # 主流程（云助手执行这段，秒回）：绑定 → 占位符流转 → 启动后台部署
 # ==============================================================================
 main_deploy() {
-  say "===== q2 一键部署 v6.1（加固版）开始 $(date '+%F %T') ====="
+  say "===== q2 一键部署 v6.2（加固版）开始 $(date '+%F %T') ====="
   say "日志: $LOG"
 
   # 2.1 绑定 + 设备注册（无设备码时才做，已绑则跳过）
@@ -471,6 +575,7 @@ main_deploy() {
   if [ ! -s "$SELF" ]; then
     say "  · 管道执行无本地路径，多源 + 校验自下载脚本 → $SELF"
     if fetch_script "$SELF" 3000 90 2 \
+        "${Q2_DOM}" \
         "https://gh-proxy.com/${Q2_RAW}" \
         "${Q2_RAW}" \
         "${Q2_CDN}"; then

@@ -390,7 +390,7 @@ iJkuLi4iCiAgICAgICAgICBiYXNoICRDTEVBUl9TQ1JJUFQKICAgICAgZmkKICBmaQp9CgptYWluICIk
 #   且返回的是与本文件同字节的内容（sha256 一致），无版本漂移。
 #   全失败必须非 0 退出并打印 [FATAL]，绝不允许"静默成功"。
 # ==============================================================================
-Q2_REF="${Q2_REF:-280f9aec3bdfcd29ef2377e75dc4258862f53d58}"
+Q2_REF="${Q2_REF:-4e1d118d158e3ebb2825e67ec8c2d0745f89748f}"
 Q2_RAW="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
 Q2_CDN="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
 # 国内源：WorkBuddy 静态托管（该站点禁止 .sh 扩展名，故用无扩展名文件名）

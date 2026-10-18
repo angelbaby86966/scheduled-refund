@@ -5,7 +5,7 @@
 #   ② 部署（docker + Q2业务 + 9路一次做对 + 真SN回填 + 保活 + 限速）
 #      以 setsid 后台运行，云助手命令秒回，真进度写 /var/log/ipes_nohup.log
 #   纯净版：不做系统调优（cubic + pfifo_fast），happ 固定 9 路
-#   v6.2 新增：① 镜像源改【纯阿里云】registry（cn-beijing 北京，同云跨区拉取最快最稳，不做腾讯云回退）
+#   v6.2 新增：① 镜像源【腾讯云 CCR 省外】youkai-latest:latest（youkai/youkai@6688 实测有效，绕开过期的阿里云北京仓库；失败时 OSS tar 兜底）
 #             ② 限速【每分钟自愈】（窗口内 htb 规则丢失则 1 分钟内重建）
 #
 # ------------------------------------------------------------------
@@ -25,9 +25,9 @@
 #   D=/root/q2_oneclick_v6.sh
 #   for U in \
 #     "https://init-full-deploy.app.workbuddy.host/q2_oneclick_v6" \
-#     "https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh" \
-#     "https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh" \
-#     "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@main/ops/q2_oneclick_v6.sh"; do
+#     "https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@d7f2b12ece86635079b5c543cf66475d5186f72c/ops/q2_oneclick_v6.sh" \
+#     "https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@d7f2b12ece86635079b5c543cf66475d5186f72c/ops/q2_oneclick_v6.sh" \
+#     "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@d7f2b12ece86635079b5c543cf66475d5186f72c/ops/q2_oneclick_v6.sh"; do
 #     curl -fsSL -m 90 "$U" -o "$D" 2>/dev/null && \
 #     [ "$(wc -c <"$D")" -gt 3000 ] && bash -n "$D" 2>/dev/null && break
 #     rm -f "$D"
@@ -97,13 +97,37 @@ fetch_script() {
 }
 
 # ==============================================================================
+# ★ 通用二进制下载器（镜像 tar 等非脚本文件）：下载 → 大小校验 → 落盘
+#   用法: fetch_blob <输出文件> <最小字节> <超时秒> <URL>
+#   返回: 0=下载成功且大小达标；1=网络错误/过小
+#   不校验内容语法（二进制），仅用最小字节防截断/网关拦截页。
+# ==============================================================================
+fetch_blob() {
+  local out="$1" min="$2" to="$3" url="$4" tmp sz
+  tmp="${out}.part.$$"; rm -f "$tmp" 2>/dev/null
+  if ! curl -fsSL -m "$to" "$url" -o "$tmp" 2>/dev/null; then
+    say "        ✗ 下载失败（网络错误/404/超时）"; rm -f "$tmp" 2>/dev/null; return 1
+  fi
+  sz=$(wc -c <"$tmp" 2>/dev/null | tr -d ' ')
+  case "${sz:-x}" in (''|*[!0-9]*) sz=0 ;; esac
+  if [ "$sz" -lt "$min" ]; then
+    say "        ✗ 内容过小（${sz}B < ${min}B，疑似被截断/网关拦截页）"
+    rm -f "$tmp" 2>/dev/null; return 1
+  fi
+  if mv -f "$tmp" "$out" 2>/dev/null; then
+    say "        ✅ 校验通过（${sz}B）→ $out"; return 0
+  fi
+  say "        ✗ 落盘失败：$out"; rm -f "$tmp" 2>/dev/null; return 1
+}
+
+# ==============================================================================
 # ★ 自举段：安全地把自己下载到磁盘并执行（对应 v6 的缺陷①）
 #   多源（国内源优先）→ gh-proxy.com → raw.githubusercontent.com → cdn.jsdelivr.net
 #   国内源（WorkBuddy 静态托管）深圳/广州等出网不稳的机器也能 1 秒内拉到，
 #   且返回的是与本文件同字节的内容（sha256 一致），无版本漂移。
 #   全失败必须非 0 退出并打印 [FATAL]，绝不允许"静默成功"。
 # ==============================================================================
-Q2_REF="${Q2_REF:-92e5cff4bb102d3fc2290deb995336c9a1838ca}"
+Q2_REF="${Q2_REF:-d7f2b12ece86635079b5c543cf66475d5186f72c}"
 Q2_RAW="https://raw.githubusercontent.com/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
 Q2_CDN="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${Q2_REF}/ops/q2_oneclick_v6.sh"
 # 国内源：WorkBuddy 静态托管（该站点禁止 .sh 扩展名，故用无扩展名文件名）
@@ -207,13 +231,23 @@ sn_current() { read_sn >/dev/null 2>&1; printf '%s' "$SN"; }
 #      写成复数 → [ -f "$CFG" ] 永假 → 9 路分支永远走 else → happ 永远 1 路。
 # ==============================================================================
 ROOT=/data/happ; CFG=/opt/ipes/var/db/ipes/happ-conf/custom.yml
-# v6.2：镜像源【纯阿里云】—— cn-beijing 北京 registry（同云跨区拉取最快最稳），不做任何腾讯云回退
-# ⚠️ 阿里云 registry 为私有，需登录；凭据可经环境变量覆盖（Q2_ALI_USER / Q2_ALI_PASS）
-ALI_REG="crpi-0myzmqp9v99mnimv.cn-beijing.personal.cr.aliyuncs.com"
-ALI_REPO="qy_q2/ipes-linux-amd64-youkai-latest:latest"
-ALI_USER="${Q2_ALI_USER:-nick5404979015}"
-ALI_PASS="${Q2_ALI_PASS:-zblove0222}"
-IMG="${ALI_REG}/${ALI_REPO}"
+# v6.2：镜像源【腾讯云 CCR 省外】—— ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:latest
+#   （youkai/youkai@6688 实测有效，绕开已过期的阿里云北京个人版仓库；:latest 即平台省外镜像）
+ALI_REG="crpi-0myzmqp9v99mnimv.cn-beijing.personal.cr.aliyuncs.com"   # 已过期·弃用
+ALI_REPO="qy_q2/ipes-linux-amd64-youkai-latest:latest"                 # 已过期·弃用
+ALI_USER="${Q2_ALI_USER:-nick5404979015}"                              # 已过期·弃用
+ALI_PASS="${Q2_ALI_PASS:-zblove0222}"                                  # 已过期·弃用
+# ★ 腾讯云 CCR 省外镜像（唯一外部源；凭据 youkai/youkai@6688 实测有效）
+TENC_REG="ccr.ccs.tencentyun.com"
+TENC_REPO="zyy_cloud/ipes-linux-amd64-youkai-latest:latest"
+TENC_USER="${Q2_TENC_USER:-youkai}"
+TENC_PASS="${Q2_TENC_PASS:-youkai@6688}"
+IMG="${TENC_REG}/${TENC_REPO}"                                        # 默认镜像=腾讯云 CCR 省外
+# ★ v6.2 OSS 镜像 tar 兜底（腾讯CCR拉不到时用）：私有对象+预签名GET URL（1年有效期），
+#   sha256=该tar实测值，docker load 后与 IMG 一致。到期需用 _a34tools/build_oss_mirror.py 重新生成。
+Q2_IMG_TAR_URL="${Q2_IMG_TAR_URL:-https://zyy-q2-mirror-41.oss-cn-shenzhen.aliyuncs.com/youkai/ipes-youkai-latest.tar.gz?OSSAccessKeyId=LTAI5t9vLpigzfS6vttQN85e&Expires=1823839584&Signature=Rt%2BFNsTes95b7eEMYpf42nEDF5g%3D}"
+Q2_IMG_TAR_SHA256="${Q2_IMG_TAR_SHA256:-8df489523dd77daffdbc8c24cce0b6b52a93c6751fe3689e9f8a5f39794514d3}"
+Q2_IMG_TAR_MIN="${Q2_IMG_TAR_MIN:-330909889}"
 ready_probe() {
   READY_MISSING=""
   docker inspect ipes >/dev/null 2>&1 || READY_MISSING="$READY_MISSING 容器ipes"
@@ -234,9 +268,8 @@ wait_ready() {
 }
 
 # ==============================================================================
-# ★ v6.2 镜像拉取：纯阿里云 registry（cn-beijing 北京，同云跨区最快最稳）
-#   - 登录凭据走环境变量覆盖（Q2_ALI_USER/PASS），默认用平台共用值
-#   - 阿里云登录/拉取失败即标红退出，不做腾讯云回退（避免"偷偷换源"导致部署形态不可控）
+# ★ v6.2 镜像拉取：腾讯云 CCR 省外（ccr.ccs.tencentyun.com，youkai/youkai@6688 实测有效）
+#   - 唯一外部源即省外镜像（:latest）；失败时走 OSS tar 兜底（同一省外镜像的备用副本，需提前构建上传）
 # ==============================================================================
 q2_pull_image() {
   # 0) 配置 registry-mirror（加速基础层拉取，与平台一致；仅当 daemon.json 不存在时写入，避免覆盖既有配置）
@@ -248,18 +281,61 @@ q2_pull_image() {
 }
 EOF
     systemctl restart docker >/dev/null 2>&1; sleep 3
-    say "  · 已写入 docker registry-mirror: stxam7vz.mirror.aliyuncs.com"
+    if ! docker info >/dev/null 2>&1; then
+      say "  ⚠️ docker 重启后未就绪，后续拉取可能失败"
+    fi
+    say "  · 已写入 docker registry-mirror: stxam7vz.mirror.aliyuncs.com（已重启 docker 生效）"
   fi
-  # 1) 纯阿里云：登录 + 拉取
-  say "  [镜像] 阿里云 registry：${ALI_REG}/${ALI_REPO}"
-  if docker login "${ALI_REG}" --username="${ALI_USER}" --password="${ALI_PASS}" >/dev/null 2>&1 \
-     && docker pull "${ALI_REG}/${ALI_REPO}" >/dev/null 2>&1; then
-    IMG="${ALI_REG}/${ALI_REPO}"
-    say "  ✅ 阿里云镜像拉取成功 → $IMG"
+  # 1) 腾讯云 CCR 省外镜像（唯一外部源：youkai/youkai@6688 实测有效；:latest 即平台省外镜像）
+  say "  [镜像] 腾讯云 CCR 省外：${TENC_REG}/${TENC_REPO}"
+  # ★ v6.2 加固：本地已存在则直接复用，避免 registry 抖动/重登导致重跑失败（12:29 能拉、13:01 偶发握手失败）
+  if docker image inspect "${TENC_REG}/${TENC_REPO}" >/dev/null 2>&1; then
+    IMG="${TENC_REG}/${TENC_REPO}"
+    say "  ✅ 本地已存在 ${IMG}，跳过拉取直接复用（如需强制刷新先 docker rmi 再跑）"
     return 0
   fi
-  # 2) 阿里云失败：直接标红退出，绝不偷偷换源（部署形态必须可控）
-  mark_fail "镜像拉取(阿里云失败：${ALI_REG}/${ALI_REPO})"
+  if docker login "${TENC_REG}" --username="${TENC_USER}" --password="${TENC_PASS}" >/dev/null 2>&1 \
+     && docker pull "${TENC_REG}/${TENC_REPO}" >/dev/null 2>&1; then
+    IMG="${TENC_REG}/${TENC_REPO}"
+    say "  ✅ 腾讯云 CCR 镜像拉取成功 → $IMG"
+    return 0
+  fi
+  # 拉取失败但本地恰好有（极端竞态兜底）：复用本地，不让整段失败
+  if docker image inspect "${TENC_REG}/${TENC_REPO}" >/dev/null 2>&1; then
+    IMG="${TENC_REG}/${TENC_REPO}"
+    say "  ⚠️ 拉取失败但本地已存在 ${IMG}，复用本地镜像"
+    return 0
+  fi
+  # 2) 腾讯云失败 → OSS 镜像 tar 兜底（同一省外镜像的备用副本，需提前 docker save 上传 OSS）
+  #    ⚠️ 兜底前提：${TENC_REG}/${TENC_REPO} 已 docker save 成 tar 上传到 OSS，
+  #       且 Q2_IMG_TAR_URL 指向可访问（公开或预签名）的下载地址；
+  #       保存时必须带原 repo:tag，docker load 后才与 IMG 一致，后续 docker run 才认。
+  say "  ⚠️ 腾讯云 registry 拉取失败，尝试 OSS 镜像兜底（同一省外镜像的备用副本）…"
+  if [ -n "${Q2_IMG_TAR_URL:-}" ]; then
+    say "  [镜像兜底] 从 OSS 下载镜像 tar: ${Q2_IMG_TAR_URL}"
+    local tar=/tmp/q2_youkai.tar
+    if fetch_blob "$tar" "${Q2_IMG_TAR_MIN:-300000000}" 1200 "${Q2_IMG_TAR_URL}"; then
+      if [ -n "${Q2_IMG_TAR_SHA256:-}" ]; then
+        local got; got=$(sha256sum "$tar" 2>/dev/null | awk '{print $1}')
+        if [ "$got" != "${Q2_IMG_TAR_SHA256}" ]; then
+          say "     ✗ sha256 校验失败（${got:-?} != ${Q2_IMG_TAR_SHA256}）"; rm -f "$tar"
+          mark_fail "镜像兜底(sha256不符)"; return 1
+        fi
+      fi
+      if docker load -i "$tar" >/dev/null 2>&1; then
+        IMG="${TENC_REG}/${TENC_REPO}"
+        say "  ✅ OSS 镜像兜底加载成功 → $IMG"
+        rm -f "$tar"; return 0
+      fi
+      say "     ✗ docker load 失败"; rm -f "$tar"
+    else
+      say "     ✗ OSS tar 下载/大小校验失败"
+    fi
+  else
+    say "     （未配置 Q2_IMG_TAR_URL，跳过 OSS 兜底）"
+  fi
+  # 兜底也失败：标红退出（腾讯云 + OSS 副本均不可用）
+  mark_fail "镜像拉取(腾讯云失败 + OSS兜底失败：${TENC_REG}/${TENC_REPO})"
   return 1
 }
 
@@ -282,7 +358,7 @@ if [ \$sm -le \$em ]; then [ \$now -ge \$sm ] && [ \$now -lt \$em ] && inwin=tru
 else { [ \$now -ge \$sm ] || [ \$now -lt \$em ]; } && inwin=true; fi
 if \$inwin; then
   if ! tc qdisc show dev \$DEV 2>/dev/null | grep -q "htb 1:"; then
-    curl -fsSL -m 180 "\$OSSREF/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "\$LSTART" "\$LEND"
+    curl -fsSL -m 180 "\$OSSREF/limit/run_limit.sh" -o /tmp/_wl.sh 2>/dev/null && [ -s /tmp/_wl.sh ] && bash /tmp/_wl.sh "\$LSTART" "\$LEND"
   fi
 fi
 EOF
@@ -330,8 +406,11 @@ internal_deploy() {
   curl -fsSL -m 300 "$OSS/install_docker/install_docker-ce_v2.sh" -o /tmp/_dk.sh 2>/dev/null \
     && bash /tmp/_dk.sh || mark_fail "docker安装"
   say "  docker: $(docker --version 2>/dev/null || echo 失败)"
-  # v6.2：docker 就绪后先预拉取镜像（阿里云优先），后续 9 路重建与平台 ecache 均复用已缓存镜像
-  q2_pull_image || say "  ⚠️ 镜像预拉取失败，交由平台 ecache 脚本兜底拉取"
+  # v6.2：docker 就绪后先拉取镜像（阿里云优先，失败则 OSS tar 兜底；双失败直接判失败，不再"假成功"）
+  if ! q2_pull_image; then
+    mark_fail "镜像拉取失败(阿里云+OSS兜底均失败)"
+    return 1
+  fi
   say "  [2.3] Q2 业务部署（-i 2 -t 2）…"
   curl -fsSL -m 1800 "$OSS/Q2_test/ecache_auto_disk_install.sh" -o /tmp/_q2.sh 2>/dev/null \
     && bash /tmp/_q2.sh -i 2 -t 2 || mark_fail "Q2部署"
@@ -377,12 +456,19 @@ internal_deploy() {
       # shellcheck disable=SC2086
       # ⚠️ 挂载目标与启动命令必须是【单数 ipes】！与 Q2 官方 docker run 完全一致：
       #    -v /opt/ipes/.../custom.yml:/app/ipes/.../custom.yml + /app/ipes/bin/ipes start
+      _drlog=$(mktemp)
       docker run -d --restart=always --name=ipes --network=host $MARGS \
         -v "$CFG:/app/ipes/var/db/ipes/happ-conf/custom.yml" \
-        "$IMG" sh -c '/app/ipes/bin/ipes start && tail -f /dev/null' >/dev/null 2>&1
+        "$IMG" sh -c '/app/ipes/bin/ipes start && tail -f /dev/null' >"$_drlog" 2>&1
       RCD=$?
       say "     docker run 返回码=$RCD"
-      [ "$RCD" != "0" ] && { NINE_OK=0; mark_fail "9路部署(docker run 返回码=$RCD)"; }
+      if [ "$RCD" != "0" ]; then
+        say "     ✗ docker run 报错（前 20 行）："
+        sed 's/^/       /' "$_drlog" 2>/dev/null | head -20
+        NINE_OK=0; mark_fail "9路部署(docker run 返回码=$RCD)"
+      else
+        rm -f "$_drlog"
+      fi
       # 健康轮询：等 happ 进程达到 9 路（最多 60s），替代固定 sleep 40
       for _h in $(seq 1 12); do
         HP=$(docker exec ipes sh -c 'ps -ef | grep -c "[h]app"' 2>/dev/null | tr -d '\r')
@@ -464,7 +550,15 @@ internal_deploy() {
 
   # ==============================================================================
   say ""; say "===== [4/4] 挂限速 ${LIMIT_START} → ${LIMIT_END} ====="
-  curl -fsSL -m 180 "$OSS/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END"
+  # ★ 限速脚本先落盘校验再执行（修 v6 的缺陷：curl|bash 下载失败仍"静默成功"）
+  local lf=/tmp/_run_limit.sh
+  if curl -fsSL -m 180 "$OSS/limit/run_limit.sh" -o "$lf" 2>/dev/null && [ -s "$lf" ]; then
+    bash "$lf" "$LIMIT_START" "$LIMIT_END"
+    say "  · 限速脚本执行完成（若下方 qdisc 计数为 0 表示限速未生效，需重跑）"
+  else
+    say "  ❌ 限速脚本下载失败或为空（源 $OSS/limit/run_limit.sh）"
+    mark_fail "限速(脚本下载失败)"
+  fi
   q2_limit_watch_install
   say "  qdisc=$(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条  cron=$(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条  heal-timer=$(systemctl is-enabled q2-limit-watch.timer 2>/dev/null || echo 无)"
 

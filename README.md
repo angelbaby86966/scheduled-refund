@@ -116,3 +116,17 @@ sudo bash setup.sh
 - 方案 A 的 AK/SK 从 GitHub Secrets 读取；方案 B 的 AK/SK 从你的 Supabase `user_data` 读取（VM 上不存密钥）。
 - 两套方案并存也不会重复退：方案 A 用固定 clientToken 幂等，方案 B 有按 AK 去重 + 窗口判断。
 - 安全提醒：本仓库使用的 GitHub PAT 如已不再需要，请去 GitHub 撤销。
+
+---
+
+## Q2 纯净版一键部署
+
+恢复自 2026-10-19 14:00 的旧 v5（独立副本，已钉死版本，内容不可变）。纯净版 = 9 路分片 + ipes 1.3.0 + conntrack=481792，仅末尾加限速。
+
+```bash
+export Q2_JWT=<你的JWT>
+curl -fsSL --max-time 60 https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@3533da0cd823dcf14b4d733184e792acb72c82ca/ops/q2纯净版.sh | bash
+```
+
+- 链接钉死 commit `3533da0…`，**内容不可变**；请勿改用 `@main/ops/q2纯净版.sh`（会随分支被改/删而失效）。
+- 仅限 q2 业务部署使用，与上方退订方案互不相关。

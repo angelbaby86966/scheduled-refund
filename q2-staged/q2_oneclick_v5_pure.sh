@@ -263,7 +263,24 @@ if [ "$RC" -ne 0 ] || echo "$OUT" | grep -qiE 'connection refused|get services f
   docker restart "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已重启恢复" >> "$LOG" || echo "[$(ts)] 重启失败，请检查" >> "$LOG"
   exit 0
 fi
-echo "[$(ts)] 服务正常" >> "$LOG"
+# happ 9 路守恒：v5 固定 9 路，容器内 happ:vod 进程数必须恒为 9；
+# 容器活着但某路 happ 进程掉了（health 探针未必能查到分片数下降），这里兜底重启拉回 9 路。
+HC=$(docker exec "$C" sh -c 'ps -ef 2>/dev/null | grep -c "[h]app:vod"' 2>/dev/null | tr -d '\r\n')
+if [ "${HC:-0}" != "9" ]; then
+  LR2=/var/lib/ipes-preheat/.last_happ_restart
+  now_ts=$(date +%s)
+  last_ts=$(cat "$LR2" 2>/dev/null || echo 0)
+  if [ $((now_ts - last_ts)) -lt 600 ]; then
+    echo "[$(ts)] happ 进程数=$HC(期望9) 但处于重启冷却期(10分钟)，本次跳过" >> "$LOG"
+  else
+    mkdir -p /var/lib/ipes-preheat 2>/dev/null
+    echo "$now_ts" > "$LR2" 2>/dev/null || true
+    echo "[$(ts)] happ 进程数=$HC(期望9)，准备 docker restart 拉回 9 路" >> "$LOG"
+    docker restart "$C" >> "$LOG" 2>&1 && echo "[$(ts)] 已重启恢复 9 路" >> "$LOG" || echo "[$(ts)] 重启失败，请检查" >> "$LOG"
+  fi
+  exit 0
+fi
+echo "[$(ts)] 服务正常（happ=$HC）" >> "$LOG"
 HEALTH
   chmod +x /usr/local/bin/ipes_health_check.sh
   touch /var/log/ipes_health.log 2>/dev/null

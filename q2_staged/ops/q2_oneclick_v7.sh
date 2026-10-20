@@ -44,7 +44,7 @@ fi
 
 # ── ② 四道校验下载 q2_stage.sh（发布时占位符被回填为钉版本 URL）──
 # 占位符未被回填 = 本地/未发布副本直接拿来跑，必须显式报错，不能静默 curl 占位符
-STAGE_URL="__Q2_STAGE_URL__"
+STAGE_URL="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@d4d30f24fa734b0438b28969f85575f87e0c9824/q2_staged/q2_stage.sh"
 if [ "$STAGE_URL" = "__Q2_STAGE_URL__" ] || [ -z "$STAGE_URL" ]; then
   say "❌ 下载源占位符 __Q2_STAGE_URL__ 未被回填：本文件是未发布副本。"
   say "   请改用发布后的 URL（publish_q2_staged.py 输出里的 jsDelivr 钉版本地址），"

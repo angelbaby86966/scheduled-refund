@@ -57,7 +57,7 @@ REMOTE_SCRIPT = "/root/q2_stage.sh"
 SCRIPT_SOURCE_RAW = (
     "https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/main/q2_staged/q2_stage.sh"
 )
-SCRIPT_PINNED_URL = ""  # 发布回填：https://cdn.jsdelivr.net/gh/<repo>@<sha>/q2_staged/q2_stage.sh
+SCRIPT_PINNED_URL = "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@d4d30f24fa734b0438b28969f85575f87e0c9824/q2_staged/q2_stage.sh"  # 发布回填：https://cdn.jsdelivr.net/gh/<repo>@<sha>/q2_staged/q2_stage.sh
 SCRIPT_SOURCE = SCRIPT_PINNED_URL or SCRIPT_SOURCE_RAW
 SCRIPT_FALLBACKS = tuple(
     dict.fromkeys(u for u in (SCRIPT_SOURCE_RAW, SCRIPT_PINNED_URL) if u)

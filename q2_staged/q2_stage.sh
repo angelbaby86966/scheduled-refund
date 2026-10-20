@@ -41,7 +41,7 @@ Q2_JWT_FILE="${Q2_JWT_FILE:-${Q2_DIR}/jwt}"
 Q2_SELF="${Q2_SELF:-}"
 # 管道执行（curl … | bash）时 $0=bash，self_path 解析不到真实路径 → 用该 URL 自下载回落。
 # 默认留空占位：发布时由 publish_q2_staged.py 回填钉 commit 的 jsDelivr URL（勿写死假 SHA）。
-Q2_SELF_URL="${Q2_SELF_URL:-}"
+Q2_SELF_URL="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@d8a0e6fa23100e02b3d00df9f699aca1e5842e19/q2_staged/q2_stage.sh"
 Q2_SELF_FILE="${Q2_SELF_FILE:-${Q2_DIR}/q2_stage.self.sh}"
 Q2_SELF_MD5="${Q2_SELF_MD5:-}"      # 可选：自下载后期望 md5（不填则只做通用校验）
 Q2_SELF_SIZE="${Q2_SELF_SIZE:-}"    # 可选：自下载后期望字节数

@@ -320,27 +320,11 @@
                   <div id="cancelCredList" style="max-height:220px; overflow:auto; border:1px solid #e1e4e8; border-radius:6px; padding:8px; background:#fafbfc;" data-page-node-id="d5Hg1Mk8ZwQa3Xt7BnR2V">
                     <div style="color:#999; font-size:12px; padding:6px;" data-page-node-id="m3Tf6Bq9XwZr2Kn7YdV5J">凭证加载中…</div>
                   </div>
-                  <small style="color:#888" data-page-node-id="p8Ln4Wq2XbJm6Rt1ZcK9T">⚠️ 定时退订到点后，<strong data-page-node-id="s5Dv9Xq1WmT3Rb7KnJ4P">仅对上面勾选的凭证</strong>执行退订，其余账号不会被触碰；此操作不可逆。</small>
+                  <small style="color:#888" data-page-node-id="p8Ln4Wq2XbJm6Rt1ZcK9T">⚠️ 每个凭证右侧点「📍 地区」可<strong>单独选择该凭证要退订的地区</strong>；未选地区的凭证会被跳过、其云主机完全不动。勾选凭证后仅对<strong>勾选的凭证 + 各自勾选的地区</strong>执行退订，其余账号/地区一律不碰；此操作不可逆。</small>
                 </div>
 
-                <!-- 📍 参与退订的地区（多选，2026-10-21 新增）：只退勾选地区内的实例，未勾选地区一律不动 -->
-                <div class="form-group" id="cancelRegionGroup">
-                  <label>参与退订的地区<span style="color:#c0392b;font-weight:700;">（必选，至少勾选 1 个）</span></label>
-                  <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px;">
-                    <label style="display:flex; align-items:center; gap:5px; cursor:pointer; font-size:13px;">
-                      <input type="checkbox" id="cancelRegionSelectAll" onchange="toggleCancelRegionAll(this.checked)"> 全选
-                    </label>
-                    <label style="display:flex; align-items:center; gap:5px; cursor:pointer; font-size:13px;">
-                      <input type="checkbox" id="cancelRegionSelectNone" onchange="toggleCancelRegionNone()"> 全不选
-                    </label>
-                    <span id="cancelRegionCount" style="font-size:12px; color:#888;">已选 0 个</span>
-                    <button class="btn btn-sm btn-outline" type="button" onclick="renderCancelRegionSelect()" style="padding:2px 10px; font-size:12px;">↺ 恢复全部启用地区</button>
-                  </div>
-                  <div id="cancelRegionList" style="max-height:180px; overflow:auto; border:1px solid #e1e4e8; border-radius:6px; padding:8px; background:#fafbfc; display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:2px 10px;">
-                    <div style="color:#999; font-size:12px; padding:6px;">地区加载中…</div>
-                  </div>
-                  <small style="color:#888">⚠️ 只对<strong>勾选地区</strong>内的云主机执行退订，未勾选地区（如上海/广州）完全不动。地区清单 =「⚙️ 地区管理」里已启用的地区。</small>
-                </div>
+                <!-- 📍 地区选择已改为「每个凭证各自选地区」（v115）：见下方 #cancelCredList 内每个凭证右侧的「📍 地区」按钮，点开可单独勾选该凭证要退订的地区 -->
+                <div class="form-group" id="cancelRegionGroup" style="display:none"></div>
                 <div class="action-bar" data-page-node-id="JuNMhwL5C5CfNPYAzYJsvu">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" data-page-node-id="D1iCPfSCuWsJOICISfgjBK">🗑️ 立即退订</button>
                   <button class="btn btn-outline" onclick="renderScheduledTasks()" data-page-node-id="m09DHv7EMS1zmKNKLn5KCM">📋 定时任务</button>
@@ -868,7 +852,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=18"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=114"></script>
+  <script src="app.js?v=115"></script>
   <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
   <script src="image-clone.js?v=19&r=33"></script>

@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v113 已加载 - 退订凭证勾选：定时/立即退订只对勾选的凭证执行（schedule_ak_ids 云端精确生效；未勾选一律不动）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v114 已加载 - 退订范围双勾选：凭证（schedule_ak_ids）× 地区（schedule_region_ids），定时/立即退订都只打勾选范围，未勾选一律不动', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -1541,7 +1541,7 @@ function switchTab(tabName) {
   document.getElementById('tab-' + tabName).classList.add('active');
   if (tabName === 'firewall') renderCredMultiFor(fwApplyCredMulti);  // 进入防火墙面板渲染凭证多选
   if (tabName === 'regionmgmt') renderRegionMgmtTable();  // 进入地区管理页重绘表格（页面加载时不渲染，避免空白）
-  if (tabName === 'cancel') renderCancelCredSelect();  // 进入退订面板时渲染「参与退订的凭证」勾选区
+  if (tabName === 'cancel') { renderCancelCredSelect(); renderCancelRegionSelect(); }  // 进入退订面板时渲染「参与退订的凭证 + 地区」两个勾选区
 }
 
 // ====== 防火墙 ======
@@ -2376,6 +2376,168 @@ function updateCancelCredCount() {
   el.style.color = n === 0 ? '#c0392b' : '#16a34a';
 }
 
+// ====== 退订地区勾选区（2026-10-21 新增，与凭证勾选区并列） ======
+// 设计要点：
+//  - 以 regionId（如 cn-shanghai）为标识持久化到 user_data.schedule_region_ids（字符串数组）；
+//  - 未配置勾选（老数据）→ 沿用旧行为：遍历全部【已启用】地区，保证线上现有任务行为不变；
+//  - 一旦勾选：立即退订 / 前端补跑 / 云端 scheduled_refund.py 都只打勾选地区，
+//    未勾选地区一律不查询、不退订；
+//  - 前端对「勾选但已被地区管理禁用」的地区做交集，避免打出已禁用地区。
+var _cancelRegionSelected = [];
+
+/** 读取当前勾选的地区 ID（去重、剔除空值） */
+function getCancelRegionSelection() {
+  return (_cancelRegionSelected || []).filter(function (r) { return !!r; });
+}
+
+/** 本次退订真正要打的地区 = 勾选 ∩ 已启用；未配置勾选 → 全部已启用地区（老行为） */
+function cancelRegionIds() {
+  var active = activeRegionIds();
+  var sel = getCancelRegionSelection();
+  if (!sel.length) return active;
+  return active.filter(function (r) { return sel.indexOf(r) >= 0; });
+}
+
+/**
+ * 渲染地区勾选列表。
+ * @param {Array<string>} [preselect] 预勾选的地区 ID；不传则回显云端 schedule_region_ids（缺省=全部启用）
+ */
+function renderCancelRegionSelect(preselect) {
+  var listEl = document.getElementById('cancelRegionList');
+  if (!listEl) return;
+  var active = activeRegionIds();
+
+  if (!active.length) {
+    listEl.innerHTML = '<div style="color:#c0392b; font-size:12px; padding:6px;">⚠️ 当前没有启用中的地区，请先到「⚙️ 地区管理」启用至少 1 个地区。</div>';
+    _cancelRegionSelected = [];
+    updateCancelRegionCount();
+    return;
+  }
+
+  if (!preselect) {
+    preselect = [];
+    try {
+      var d = (window.CloudStore && currentUser && currentUser.user)
+        ? CloudStore.getUserDataSync(currentUser.user) : null;
+      var saved = d && d.schedule_region_ids;
+      if (Array.isArray(saved)) {
+        preselect = saved.filter(function (r) { return active.indexOf(r) >= 0; });
+      }
+    } catch (e) { /* 云端未就绪则退化为全选 */ }
+    // 老数据/未配置：默认全选，行为与改造前完全一致
+    if (!preselect.length) preselect = active.slice();
+  }
+
+  _cancelRegionSelected = (preselect || []).filter(function (r) { return active.indexOf(r) >= 0; });
+
+  var html = '';
+  for (var i = 0; i < active.length; i++) {
+    var rid = active[i];
+    var checked = _cancelRegionSelected.indexOf(rid) >= 0;
+    html += '<label class="cred-multi-item region-multi-item' + (checked ? ' checked' : '') + '" data-regionid="' + escAttr(rid) + '" '
+      + 'style="display:flex; align-items:center; gap:6px; padding:4px 6px; cursor:pointer; font-size:13px;">'
+      + '<input type="checkbox" data-regionid="' + escAttr(rid) + '"' + (checked ? ' checked' : '') + '>'
+      + '<span class="cred-multi-name">📍 ' + escHtml(REGION_INFO[rid] || rid)
+      + ' <span style="color:#aaa;font-size:11px;">' + escHtml(rid) + '</span></span></label>';
+  }
+  listEl.innerHTML = html;
+
+  Array.prototype.forEach.call(listEl.querySelectorAll('input[type=checkbox][data-regionid]'), function (cb) {
+    cb.addEventListener('change', function () { onCancelRegionToggle(cb); });
+  });
+  Array.prototype.forEach.call(listEl.querySelectorAll('.region-multi-item'), function (item) {
+    item.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (e.target.tagName === 'INPUT') return;
+      var cb = item.querySelector('input');
+      if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+    });
+  });
+  updateCancelRegionCount();
+}
+
+/** 单个地区勾选变化 */
+function onCancelRegionToggle(cb) {
+  var rid = cb.getAttribute('data-regionid');
+  if (!rid) return;
+  if (!_cancelRegionSelected) _cancelRegionSelected = [];
+  if (cb.checked) {
+    if (_cancelRegionSelected.indexOf(rid) < 0) _cancelRegionSelected.push(rid);
+  } else {
+    _cancelRegionSelected = _cancelRegionSelected.filter(function (r) { return r !== rid; });
+  }
+  var allBox = document.getElementById('cancelRegionSelectAll');
+  var noneBox = document.getElementById('cancelRegionSelectNone');
+  if (allBox) allBox.checked = false;
+  if (noneBox) noneBox.checked = false;
+  var item = cb.closest ? cb.closest('.region-multi-item') : null;
+  if (item) item.classList.toggle('checked', cb.checked);
+  updateCancelRegionCount();
+}
+
+/** 全选 / 全不选（同一个实现，checked=false 即全不选） */
+function toggleCancelRegionAll(checked) {
+  var listEl = document.getElementById('cancelRegionList');
+  if (!listEl) return;
+  var boxes = listEl.querySelectorAll('input[type=checkbox][data-regionid]');
+  _cancelRegionSelected = [];
+  for (var i = 0; i < boxes.length; i++) {
+    boxes[i].checked = !!checked;
+    var rid = boxes[i].getAttribute('data-regionid');
+    if (checked && rid) _cancelRegionSelected.push(rid);
+    var it = boxes[i].closest ? boxes[i].closest('.region-multi-item') : null;
+    if (it) { if (checked) { it.classList.add('checked'); } else { it.classList.remove('checked'); } }
+  }
+  if (!checked) {
+    var allBox = document.getElementById('cancelRegionSelectAll');
+    if (allBox) allBox.checked = false;
+  }
+  var noneBox = document.getElementById('cancelRegionSelectNone');
+  if (noneBox) noneBox.checked = false;
+  updateCancelRegionCount();
+}
+
+function toggleCancelRegionNone() {
+  toggleCancelRegionAll(false);
+  var noneBox = document.getElementById('cancelRegionSelectNone');
+  if (noneBox) noneBox.checked = true;
+}
+
+/** 更新「已选 N 个地区」文案 */
+function updateCancelRegionCount() {
+  var el = document.getElementById('cancelRegionCount');
+  if (!el) return;
+  var n = getCancelRegionSelection().length;
+  var total = activeRegionIds().length;
+  el.textContent = n === 0
+    ? '⚠️ 已选 0 个地区（不勾选无法保存/退订）'
+    : '已选 ' + n + '/' + total + ' 个地区';
+  el.style.color = n === 0 ? '#c0392b' : '#16a34a';
+}
+
+/**
+ * 校验至少勾选了一个地区。
+ * ⚠️ 与凭证同级的**安全边界**：云端 scheduled_refund.py 把 schedule_region_ids 为空/缺失
+ * 视为「未配置」→ 退全部启用地区。若前端放行空选并写入 []，等于悄悄打开「退全部地区」的口子。
+ */
+function requireCancelRegionSelection() {
+  if (getCancelRegionSelection().length === 0) {
+    log('❌ 请先在「参与退订的地区」中至少勾选 1 个地区。未勾选时不会执行任何退订（避免误退其他地区）', 'error');
+    alert('请先勾选至少 1 个参与退订的地区。\n\n未勾选任何地区时，为避免误退其他地区，退订不会执行。');
+    return false;
+  }
+  return true;
+}
+
+/** 地区勾选的展示文案（用于定时任务卡片） */
+function describeCancelRegionSelection(data) {
+  var saved = data && data.schedule_region_ids;
+  if (Array.isArray(saved) && saved.length) {
+    return saved.map(function (r) { return REGION_INFO[r] || r; }).join('、');
+  }
+  return '全部启用地区（未配置勾选）';
+}
+
 /**
  * 校验至少勾选了一个凭证。
  *
@@ -2424,10 +2586,17 @@ function toggleCancelMode() {
   // 凭证勾选区两种模式都要用（立即退订同样只退勾选的凭证），故始终显示
   var credGroup = document.getElementById('cancelCredGroup');
   if (credGroup) credGroup.style.display = 'block';
+  // 地区勾选区同样两种模式都要用（立即退订也只退勾选地区）
+  var regionGroup = document.getElementById('cancelRegionGroup');
+  if (regionGroup) regionGroup.style.display = 'block';
   // 首次切入时渲染凭证列表（延后一帧，确保 DOM 可见）
   var listEl = document.getElementById('cancelCredList');
   if (listEl && listEl.innerHTML.indexOf('凭证加载中') >= 0) {
     setTimeout(function () { renderCancelCredSelect(); }, 0);
+  }
+  var regionListEl = document.getElementById('cancelRegionList');
+  if (regionListEl && regionListEl.innerHTML.indexOf('地区加载中') >= 0) {
+    setTimeout(function () { renderCancelRegionSelect(); }, 0);
   }
   var btn = document.getElementById('cancelBtn');
   if (btn) {
@@ -2481,6 +2650,16 @@ async function executeCancel() {
     if (!requireCancelCredSelection()) return;
     var selNames = getCancelCredSelection();
 
+    // 【必选】参与退订的地区：未勾选任何地区 → 拒绝保存（绝不静默退掉全部地区）
+    if (!requireCancelRegionSelection()) return;
+    var selRegionIds = getCancelRegionSelection().filter(function (r) { return activeRegionIds().indexOf(r) >= 0; });
+    if (!selRegionIds.length) {
+      log('❌ 勾选的地区都已不在「启用的地区」里（可能被地区管理禁用了），请重新勾选', 'error');
+      alert('勾选的地区都已被禁用，请重新勾选后再保存。');
+      return;
+    }
+    var selRegionNames = selRegionIds.map(function (r) { return REGION_INFO[r] || r; }).join('、');
+
     // 【关键】定时退订由 Supabase 云端定时(pg_cron)执行，与电脑/浏览器开关无关。
     // 必须保证云端配置完整：时间 + 开关 + AK/SK + 勾选凭证都要落地到 Supabase，否则云端到点无凭证可退。
     if (!(window.AliyunClient && AliyunClient.hasCredentials && AliyunClient.hasCredentials())) {
@@ -2501,6 +2680,7 @@ async function executeCancel() {
           ak_id: ak,
           ak_secret: sk,
           schedule_ak_ids: selNames,
+          schedule_region_ids: selRegionIds,
         });
         // 回读云端确认已落库
         var saved = await CloudStore.getUserData(currentUser.user, true);
@@ -2510,7 +2690,11 @@ async function executeCancel() {
         } else {
           // 回读勾选范围（老数据可能为空数组 → 以实际落库为准展示）
           var savedIds = (saved.schedule_ak_ids && saved.schedule_ak_ids.length) ? saved.schedule_ak_ids : selNames;
-          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订【仅 ' + savedIds.join('、') + '】这 ' + savedIds.length + ' 个凭证（关电脑/关浏览器也会按时执行）', 'success');
+          var savedRegionIds = (saved.schedule_region_ids && saved.schedule_region_ids.length) ? saved.schedule_region_ids : selRegionIds;
+          var savedRegionNames = savedRegionIds.map(function (r) { return REGION_INFO[r] || r; }).join('、');
+          log('✅ 配置已保存到云端：每晚 ' + hourStr + ':' + minuteStr + '（23:35–23:59 窗口）自动退订'
+            + '【仅 ' + savedIds.join('、') + '】这 ' + savedIds.length + ' 个凭证、'
+            + '【仅 ' + savedRegionNames + '】这 ' + savedRegionIds.length + ' 个地区（关电脑/关浏览器也会按时执行）', 'success');
         }
       } else {
         log('⚠️ 未登录云端账号，配置仅本地生效；请登录后再保存，云端调度才会接管', 'warn');
@@ -2526,6 +2710,16 @@ async function executeCancel() {
   // 立即退订
   // 【必选】未勾选任何凭证 → 拒绝执行（避免误退未勾选账号）
   if (!requireCancelCredSelection()) return;
+  // 【必选】未勾选任何地区 → 拒绝执行（避免误退未勾选地区）
+  if (!requireCancelRegionSelection()) return;
+
+  var _runRegionIds = cancelRegionIds();
+  if (!_runRegionIds.length) {
+    log('❌ 勾选的地区都已被禁用（地区管理），本次不执行任何退订', 'error');
+    alert('勾选的地区都已被禁用，请到「⚙️ 地区管理」启用后再试。');
+    return;
+  }
+  var _runRegionNames = _runRegionIds.map(function (r) { return REGION_INFO[r] || r; }).join('、');
 
   var credProfiles = getCancelCredProfiles() || [];
   if (!credProfiles.length) {
@@ -2535,10 +2729,12 @@ async function executeCancel() {
   }
   var credLabel = credProfiles.map(function (p) { return p.name; }).join('、');
   if (!confirm('确认现在退订吗？\n\n⚠️ 将对以下 ' + credProfiles.length + ' 个凭证执行退订（真正退款，不可逆）：\n· ' + credLabel
-    + '\n\n每个凭证名下所有【已启用地区】的云主机都会被退订，其他未勾选账号不受影响。')) return;
+    + '\n\n退订范围（' + _runRegionIds.length + ' 个地区）：' + _runRegionNames
+    + '\n\n仅这 ' + _runRegionIds.length + ' 个地区内的云主机会被退订；未勾选的地区、账号一律不动。')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🗑️ 开始【退订退款】—— 仅对勾选的 ' + credProfiles.length + ' 个凭证：' + credLabel, 'warn');
+  log('📍 退订地区范围（' + _runRegionIds.length + ' 个）：' + _runRegionNames, 'warn');
   log('⏳ 正在查询实例列表...', 'warn');
 
   try {
@@ -2587,8 +2783,8 @@ async function executeCancel() {
 async function refundCurrentCredInstances() {
   var totals = { success: 0, skipped: 0, locked: 0, fail: 0 };
 
-  // 第1步：遍历所有【已启用】地域获取实例（已禁用地区天然被 activeRegionIds 过滤掉）
-  var regionIds = activeRegionIds();
+  // 第1步：遍历【已勾选且已启用】的地域获取实例（cancelRegionIds 已把禁用地区与未勾选地区过滤掉）
+  var regionIds = cancelRegionIds();
   var allInstances = [];
   var byRegion = {};
 
@@ -2962,6 +3158,9 @@ async function renderScheduledTasks() {
       // 参与退订的凭证（勾选范围）；老数据无 schedule_ak_ids 时明确提示为「全部凭证」
       var credDesc = describeCancelCredSelection(data);
       var isAllCred = !(data.schedule_ak_ids && data.schedule_ak_ids.length);
+      // 参与退订的地区（勾选范围）；老数据无 schedule_region_ids 时明确提示为「全部启用地区」
+      var regionDesc = describeCancelRegionSelection(data);
+      var isAllRegion = !(data.schedule_region_ids && data.schedule_region_ids.length);
       listEl.innerHTML =
         '<div class="task-item" style="padding:12px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px;">' +
         '<div style="display:flex; justify-content:space-between; align-items:center;">' +
@@ -2969,8 +3168,10 @@ async function renderScheduledTasks() {
         '<strong>⏰ 每天 ' + timeStr + ' 自动退订</strong><br>' +
         '<small style="color:#c0392b">🔑 参与退订的凭证：' + escHtml(credDesc)
           + (isAllCred ? '（未配置勾选=全部凭证）' : '（共 ' + data.schedule_ak_ids.length + ' 个，其余凭证不会被退订）') + '</small><br>' +
+        '<small style="color:#0e7490">📍 参与退订的地区：' + escHtml(regionDesc)
+          + (isAllRegion ? '（未配置勾选）' : '（共 ' + data.schedule_region_ids.length + ' 个，其余地区不会被退订）') + '</small><br>' +
         lastInfo +
-        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。仅对上述勾选凭证执行，退订=真正退款，不可逆。</small>' +
+        '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。仅对上述勾选凭证 + 勾选地区执行，退订=真正退款，不可逆。</small>' +
         '</div>' +
         '<div style="display:flex; flex-direction:column; gap:6px;">' +
         '<button class="btn btn-danger" style="padding:4px 12px; font-size:12px;" onclick="runScheduledCancelNow()">🚀 立即执行</button>' +
@@ -3102,13 +3303,34 @@ async function executeScheduledRefund() {
   try { _allProfiles = AliyunClient.listProfiles() || []; } catch(e) { _allProfiles = []; }
 
   var _schedIds = null;
+  var _schedRegionIds = null;
   try {
     var _ud = (window.CloudStore && currentUser && currentUser.user)
       ? await CloudStore.getUserData(currentUser.user, true) : null;
     if (_ud && Array.isArray(_ud.schedule_ak_ids) && _ud.schedule_ak_ids.length) {
       _schedIds = _ud.schedule_ak_ids;
     }
-  } catch(e) { _schedIds = null; }
+    if (_ud && Array.isArray(_ud.schedule_region_ids) && _ud.schedule_region_ids.length) {
+      _schedRegionIds = _ud.schedule_region_ids;
+    }
+  } catch(e) { _schedIds = null; _schedRegionIds = null; }
+
+  // 【地区范围】与 scheduled_refund.py 的 build_regions 同语义：
+  //   已配置 schedule_region_ids → 只退「勾选 ∩ 已启用」的地区；
+  //   未配置（老数据）→ 沿用旧行为：全部已启用地区。
+  var _runRegionIds;
+  if (_schedRegionIds) {
+    _runRegionIds = activeRegionIds().filter(function (r) { return _schedRegionIds.indexOf(r) >= 0; });
+    if (!_runRegionIds.length) {
+      log('⛔ 已勾选的退订地区都已不在启用列表中（可能被禁用），为避免误退，本次不执行任何退订', 'error');
+      return;
+    }
+    log('📍 本次仅退订已勾选的 ' + _runRegionIds.length + ' 个地区：'
+      + _runRegionIds.map(function (r) { return REGION_INFO[r] || r; }).join('、') + '（其余地区不会被触碰）', 'warn');
+  } else {
+    _runRegionIds = activeRegionIds();
+    log('ℹ️ 未配置地区勾选（老数据），按旧行为退订全部启用地区（共 ' + _runRegionIds.length + ' 个）', 'warn');
+  }
 
   var profiles;
   if (_schedIds) {
@@ -3163,8 +3385,8 @@ async function executeScheduledRefund() {
     var _profSuccess = 0, _profSkip = 0, _profFail = 0;
     while (_round < _maxRounds) {
       _round++;
-      // 获取该凭证下的所有实例
-      var regionIds = activeRegionIds();
+      // 获取该凭证下的所有实例（仅限本次勾选的地区 _runRegionIds）
+      var regionIds = _runRegionIds;
       var allInstances = [];
       for (var i = 0; i < regionIds.length; i++) {
         var rid = regionIds[i];
@@ -3230,7 +3452,7 @@ async function executeScheduledRefund() {
 }
 
 async function runScheduledCancelNow() {
-  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订所有地域的所有云主机。\n\n确认继续？')) return;
+  if (!confirm('🚀 立即触发退订？\n\n这会立即调用 BSS RefundInstance 退订【已勾选凭证 × 已勾选地区】内的云主机。\n\n确认继续？')) return;
 
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
   log('🚀 立即触发定时退订...', 'warn');

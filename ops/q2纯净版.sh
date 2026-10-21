@@ -190,9 +190,20 @@ else
 fi
 
 # ==============================================================================
-say ""; say "===== [3/4] 安装保活 ====="
-curl -fsSL -m 120 "$OSS/Q2_test/install_ipes_health_check.sh" -o /tmp/_hc.sh 2>/dev/null \
-  && bash /tmp/_hc.sh || mark_fail "保活"
+say ""; say "===== [3/4] 安装真保活 v2.1（GitHub 版，不依赖 OSS）====="
+# OSS 上的 install_ipes_health_check.sh 已于 2026-10 被回滚成 6213B 旧假保活（无自愈），
+# 故保活改为从 GitHub 拉取真保活安装器（锁 commit，双通道回退 + 大小校验）。
+HC_SHA="2ac9c0ca75d0e3b6bc139283d2bc838514eb8093"
+HC_MIN_BYTES=3000
+curl -4fsSL -m 120 "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@${HC_SHA}/q2-staged/install_ipes_health_check_REAL.sh" -o /tmp/_hc.sh 2>/dev/null \
+  || curl -4fsSL -m 120 "https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/${HC_SHA}/q2-staged/install_ipes_health_check_REAL.sh" -o /tmp/_hc.sh 2>/dev/null \
+  || true
+if [ -s /tmp/_hc.sh ] && [ "$(stat -c%s /tmp/_hc.sh 2>/dev/null || echo 0)" -ge "$HC_MIN_BYTES" ]; then
+  bash /tmp/_hc.sh || mark_fail "保活"
+  grep -m1 'HC_VER=' /usr/local/bin/ipes_health_check.sh 2>/dev/null && say "  ✅ 真保活已安装"
+else
+  mark_fail "保活下载(GitHub)"
+fi
 say "  保活cron: $(crontab -l 2>/dev/null | grep -cE 'ipes_health|health_check') 条"
 
 # ==============================================================================

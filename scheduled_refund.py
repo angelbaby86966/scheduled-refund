@@ -575,6 +575,46 @@ def build_regions(data):
     return selected
 
 
+def build_cred_regions(data, label):
+    """返回某凭证本次要退订的地区 {regionId: 名称}（v115 每凭证独立地区）。
+
+    优先级（与前端 getScheduledCredRegionIds 完全一致）：
+      1) schedule_cred_regions[label] 存在（即使为空数组，也视为「显式指定」）→ 取其 ∩ 已启用；
+         空 / 与启用无交集 → 返回 {} 让调用方跳过该凭证（绝不回退成「全部地区」）。
+      2) 否则回退 schedule_region_ids（v114 老数据全局地区）∩ 已启用（即 build_regions）。
+      3) 否则（完全没有地区配置）→ 全部启用地区（老数据旧行为）。
+
+    ⚠️ 安全边界：显式空数组 = 用户选了该凭证却没勾任何地区 → 仅跳过该凭证，
+       绝不退化为「退该凭证全部地区」。脏数据（非字符串元素且无可解析地区）→ 跳过该凭证。
+    """
+    raw_map = data.get("schedule_cred_regions")
+    if isinstance(raw_map, dict) and label in raw_map:
+        raw = raw_map[label]
+        # 与 build_regions 同款安全守卫：非空数组里全是脏数据 → 跳过该凭证（宁可不退，也不误退）
+        if (isinstance(raw, list) and raw
+                and any(not isinstance(x, str) for x in raw)
+                and not _as_id_set(raw)):
+            log(f"  ⛔ 凭证「{label}」的 schedule_cred_regions 含非字符串脏数据且无任何合法地区，"
+                f"为避免误退，跳过该凭证", "ERROR")
+            return {}
+        wanted = _as_id_set(raw)
+        if not wanted:
+            # 显式空数组 → 该凭证跳过（前端已拦截，但云端必须兜底，绝不回退全部地区）
+            return {}
+        selected = {k: v for k, v in ACTIVE_REGIONS.items() if k in wanted}
+        unknown = sorted(wanted - set(REGION_INFO))
+        if unknown:
+            log(f"  ⚠️ 凭证「{label}」schedule_cred_regions 含未知地区（已忽略）：{', '.join(unknown)}", "WARN")
+        if not selected:
+            log(f"  ⛔ 凭证「{label}」勾选地区 {sorted(wanted)} 与当前启用地区 {sorted(ACTIVE_REGIONS)} 无交集；"
+                f"跳过该凭证", "ERROR")
+            return {}
+        return selected
+
+    # 回退：全局 schedule_region_ids（v114 老数据 / 未单独配置的凭证）
+    return build_regions(data)
+
+
 def build_credentials(data):
     """返回 [(label, ak, sk, source), ...]：决定本次要退订哪些凭证。
 
@@ -783,20 +823,19 @@ def process_user(row):
         log(f"用户 {username}: 缺少 AK/SK，跳过", "WARN")
         return
 
-    # 地区范围（勾选 ∩ 启用）；为空 = 用户勾选的地区都被禁用了 → 整单跳过，不退任何地区
-    regions = build_regions(data)
-    if not regions:
-        log(f"用户 {username}: 地区范围为空（勾选地区与启用地区无交集），本次不执行任何退订", "WARN")
-        return
-
     log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {int(hour):02d}:{int(minute):02d}），"
-        f"共 {len(creds)} 个凭证 × {len(regions)} 个地区", "WARN")
+        f"共 {len(creds)} 个凭证", "WARN")
     for (label, _ak, _sk, source) in creds:
         log(f"  🔑 凭证「{label}」来源：{source}", "INFO")
 
     grand = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
     executed_any = False
     for (label, ak, sk, _source) in creds:
+        # 每凭证独立地区（v115）：显式空/与启用无交集 → 跳过该凭证，绝不退其全部地区
+        regions = build_cred_regions(data, label)
+        if not regions:
+            log(f"  ⏭️ 凭证「{label}」无可执行地区（未勾选地区或与启用地区无交集），跳过", "WARN")
+            continue
         try:
             # 逐个凭证「退干净再退下一个」：drain_credential 内部会复查直到该凭证无实例
             t = drain_credential(username, label, ak, sk, regions=regions)

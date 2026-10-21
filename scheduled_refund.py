@@ -836,6 +836,9 @@ def process_user(row):
         if not regions:
             log(f"  ⏭️ 凭证「{label}」无可执行地区（未勾选地区或与启用地区无交集），跳过", "WARN")
             continue
+        # 线上肉眼可核验：明确打印该凭证本次只针对哪些地区执行
+        log(f"  📍 凭证「{label}」本次退订地区（{len(regions)} 个）："
+            + "、".join(f"{v}({k})" for k, v in regions.items()), "INFO")
         try:
             # 逐个凭证「退干净再退下一个」：drain_credential 内部会复查直到该凭证无实例
             t = drain_credential(username, label, ak, sk, regions=regions)

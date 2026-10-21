@@ -533,6 +533,48 @@ def _as_id_set(raw):
 
 
 # ===================== 主流程 =====================
+def build_regions(data):
+    """返回本次要退订的地区 {regionId: 名称}：用户勾选 ∩ 已启用；未配置 → 全部启用地区。
+
+    与 build_credentials 同构（2026-10-21 新增，配合前端「参与退订的地区」勾选区）：
+      1. schedule_region_ids 非空 → **只**退命中的地区，其余地区一个请求都不发
+      2. 缺失/为空（老数据）→ 沿用既有行为：ACTIVE_REGIONS 全量，线上任务行为零回归
+
+    ⚠️ 安全边界：若勾选的地区与当前启用地区**没有任何交集**（比如被 DISABLED_REGIONS
+    环境变量禁掉），必须返回空 dict 让调用方整单跳过 —— 绝不能回退成「全部地区」，
+    那等于把用户刻意收窄的范围重新放大到误退。
+    """
+    raw = data.get("schedule_region_ids")
+    # 与 build_credentials 同款安全守卫：非空数组里全是 null/数字等脏数据 →
+    # 绝不能退化成「未配置 → 全部地区」，直接整单跳过（宁可不退，也不误退）。
+    if (isinstance(raw, list) and raw
+            and any(not isinstance(x, str) for x in raw)
+            and not _as_id_set(raw)):
+        log("  ⛔ schedule_region_ids 含非字符串脏数据且无任何合法地区，"
+            "为避免误退全部地区，本次不执行任何退订", "ERROR")
+        return {}
+
+    wanted = _as_id_set(raw)
+    if not wanted:
+        return dict(ACTIVE_REGIONS)
+
+    selected = {k: v for k, v in ACTIVE_REGIONS.items() if k in wanted}
+    unknown = sorted(wanted - set(REGION_INFO))
+    if unknown:
+        log(f"  ⚠️ schedule_region_ids 含未知地区（已忽略）：{', '.join(unknown)}", "WARN")
+
+    if not selected:
+        log(f"  ⛔ 已勾选地区 {sorted(wanted)} 与当前启用地区 {sorted(ACTIVE_REGIONS)} 无交集；"
+            f"为避免误退全部地区，本次不执行任何退订", "ERROR")
+        return {}
+
+    skipped = len(ACTIVE_REGIONS) - len(selected)
+    log(f"  📍 定时退订地区范围：按勾选执行，共 {len(selected)} 个地区"
+        f"（{', '.join(f'{REGION_INFO[k]}({k})' for k in selected)}）"
+        + (f"；另有 {skipped} 个启用地区保持不动" if skipped > 0 else ""), "INFO")
+    return selected
+
+
 def build_credentials(data):
     """返回 [(label, ak, sk, source), ...]：决定本次要退订哪些凭证。
 
@@ -617,10 +659,13 @@ def build_credentials(data):
     return creds
 
 
-def drain_credential(username, label, ak, sk, max_rounds=12):
-    """退单凭证：每轮「并行列出全部地域实例 → 有界并发退订（限流退避重试）→ 复查」。
-    直到该凭证名下再无实例，才返回 —— 即「先把这一个凭证退干净，再退下一个凭证」，
+def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
+    """退单凭证：每轮「并行列出指定地区实例 → 有界并发退订（限流退避重试）→ 复查」。
+    直到该凭证名下（所选地区内）再无实例，才返回 —— 即「先把这一个凭证退干净，再退下一个凭证」，
     避免退到一半被窗口关闭打断导致同账号内有的凭证退完、有的没退。
+
+    :param regions: 本次要跑的地区 {regionId: 名称}；None → ACTIVE_REGIONS 全量（兼容旧调用）。
+                    由 build_regions(data) 按用户勾选算出来，未勾选地区**连列举请求都不发**。
 
     效率与限流的平衡：
       - 列出实例：6 个地域是独立 endpoint，用线程池并行（低量、安全）。
@@ -629,11 +674,15 @@ def drain_credential(username, label, ak, sk, max_rounds=12):
       - 万一被限流：自动指数退避重试，且复用同一 ClientToken 保证幂等（不会重复退款）。
     """
     total = {"success": 0, "skipped": 0, "locked": 0, "fail": 0}
+    scope = dict(regions) if regions else dict(ACTIVE_REGIONS)
+    if not scope:
+        log(f"  ⛔ 凭证「{label}」本次无可用地区（地区范围为空），跳过，不发任何请求", "ERROR")
+        return total
     for rnd in range(1, max_rounds + 1):
-        # 1) 并行列出本轮该凭证全部地域实例
+        # 1) 并行列出本轮该凭证【所选地区】的实例
         all_instances = []
-        with ThreadPoolExecutor(max_workers=len(ACTIVE_REGIONS)) as ex:
-            futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in ACTIVE_REGIONS}
+        with ThreadPoolExecutor(max_workers=max(1, len(scope))) as ex:
+            futs = {ex.submit(list_instances, ak, sk, rid): rid for rid in scope}
             for fut in as_completed(futs):
                 rid = futs[fut]
                 try:
@@ -734,7 +783,14 @@ def process_user(row):
         log(f"用户 {username}: 缺少 AK/SK，跳过", "WARN")
         return
 
-    log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {int(hour):02d}:{int(minute):02d}），共 {len(creds)} 个凭证", "WARN")
+    # 地区范围（勾选 ∩ 启用）；为空 = 用户勾选的地区都被禁用了 → 整单跳过，不退任何地区
+    regions = build_regions(data)
+    if not regions:
+        log(f"用户 {username}: 地区范围为空（勾选地区与启用地区无交集），本次不执行任何退订", "WARN")
+        return
+
+    log(f"▶ 用户 {username} 北京时间 {now_bj.strftime('%H:%M')} 触发定时退订（设定 {int(hour):02d}:{int(minute):02d}），"
+        f"共 {len(creds)} 个凭证 × {len(regions)} 个地区", "WARN")
     for (label, _ak, _sk, source) in creds:
         log(f"  🔑 凭证「{label}」来源：{source}", "INFO")
 
@@ -743,7 +799,7 @@ def process_user(row):
     for (label, ak, sk, _source) in creds:
         try:
             # 逐个凭证「退干净再退下一个」：drain_credential 内部会复查直到该凭证无实例
-            t = drain_credential(username, label, ak, sk)
+            t = drain_credential(username, label, ak, sk, regions=regions)
             executed_any = True
             for k in grand:
                 grand[k] += t.get(k, 0)

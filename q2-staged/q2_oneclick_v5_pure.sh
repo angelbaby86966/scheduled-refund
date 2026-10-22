@@ -90,15 +90,14 @@ fi
 say ""; say "===== [2/4] 部署：绑定 → docker → Q2业务 → 9路 → 真SN回填 ====="
 
 # 2.1 绑定 + 设备注册（无设备码时才做，已绑则跳过）
-#     BIND_SRC 指向仓库内「已修复吞错 bug」的 zyy_init_max.sh（OSS 版凭证过期且仍 exit 0 吞错，会静默死循环）；
-#     若平台后续更新 OSS 版本，需手动把修复同步到此副本。
-BIND_SRC="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@0cd6aa031a824efdd3bec091f89ef913d0951b3a/q2-staged/zyy_init_max.sh"
+#     绑定源用平台 OSS 原版 zyy_init_max.sh（公开可读、下载正常；与 docker/Q2/limit 同源）；
+#     AK/SK 外置（CHAN_AK/CHAN_SK ← Q2_AK/Q2_SK），不内置。
+#     ★ 保留双保险：OSS 原版注册失败仍 exit 0（吞错 bug 未改），
+#       故靠「注册成功标记 + 安装日志尾」兜底判失败，避免静默死循环 / 反复重跑。
 if [ -z "$NID" ] || ! grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then
-  say "  [2.1] 渠道绑定 + 设备注册（zyy_init_max 修复版，5-10 分钟）…"
+  say "  [2.1] 渠道绑定 + 设备注册（zyy_init_max OSS 原版，5-10 分钟）…"
   BIND_OK=0
-  # 修复版 zyy_init_max.sh 注册失败会 exit 1 → 这条链正确触发 mark_fail；
-  # 同时去掉原 -o /dev/null 吞 stderr，让下载失败也能被捕获。
-  curl -fsSL -m 900 "$BIND_SRC" -o /tmp/_bind.sh 2>/dev/null \
+  curl -fsSL -m 900 "$OSS/zyy_init/zyy_init_max.sh" -o /tmp/_bind.sh 2>/dev/null \
     && bash /tmp/_bind.sh --ak "$CHAN_AK" --sk "$CHAN_SK" --isp "$ISP" \
     && BIND_OK=1
   # 双保险：即便脚本异常地 exit 0，只要没写出「注册状态: 成功」也判失败（吞错 bug 兜底）

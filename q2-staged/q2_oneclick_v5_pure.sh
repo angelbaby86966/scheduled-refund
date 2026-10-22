@@ -21,13 +21,17 @@ if [ -z "${Q2_JWT:-}" ] && [ -f "$Q2_JWT_FILE" ]; then
 fi
 : "${Q2_JWT:?未找到 JWT：请 export Q2_JWT=xxx，或 echo <新token> > $Q2_JWT_FILE（脚本已不再内置密钥）}"
 JWT="$Q2_JWT"
-CHAN_AK="${Q2_AK:-06d78b19bd0d9fc0aa300c6d}"
-CHAN_SK="${Q2_SK:-16d6c46443308e62bb51f22c074a90ed}"
+# ── 渠道/管理员凭证全部外置：脚本不再内置任何密钥，缺失即报错退出 ──
+: "${Q2_AK:?未找到渠道 AK：请 export Q2_AK=xxx（脚本已去除内置凭证，以外置为准）}"
+: "${Q2_SK:?未找到渠道 SK：请 export Q2_SK=xxx（脚本已去除内置凭证，以外置为准）}"
+CHAN_AK="$Q2_AK"
+CHAN_SK="$Q2_SK"
 ISP="${Q2_ISP:-联通}"
 PLACEHOLDER="ZHOUYI_XIAODU"
 ADMIN_API="https://admin.zhouyi.top"
 OSS="https://zyy-go.oss-cn-beijing.aliyuncs.com/script"
 WRAP="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@main/inline_deploy_r20_oss_nt.sh"
+# ── admin API 凭证：内置默认（2026-10-22 确认可内置），env 可覆盖 ──
 ADMIN_APPID="${Q2_APPID:-fg5c21pbzfgu6y2s2yqvanvr6uv99drq}"
 ADMIN_AK="${Q2_ADMIN_AK:-ja3io44nq2m7hx63fjkpio7s422aksel}"
 ADMIN_SK="${Q2_ADMIN_SK:-ydDGuguZ8COcJN4Ztl3Lsic3Z00zGEani8fYOPiYk2XXCuXQ1AHyy7E1sgV4dyDT}"
@@ -86,10 +90,22 @@ fi
 say ""; say "===== [2/4] 部署：绑定 → docker → Q2业务 → 9路 → 真SN回填 ====="
 
 # 2.1 绑定 + 设备注册（无设备码时才做，已绑则跳过）
+#     绑定源用平台 OSS 原版 zyy_init_max.sh（公开可读、下载正常；与 docker/Q2/limit 同源）；
+#     AK/SK 外置（CHAN_AK/CHAN_SK ← Q2_AK/Q2_SK），不内置。
+#     ★ 保留双保险：OSS 原版注册失败仍 exit 0（吞错 bug 未改），
+#       故靠「注册成功标记 + 安装日志尾」兜底判失败，避免静默死循环 / 反复重跑。
 if [ -z "$NID" ] || ! grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then
-  say "  [2.1] 渠道绑定 + 设备注册（zyy_init_max，5-10 分钟）…"
+  say "  [2.1] 渠道绑定 + 设备注册（zyy_init_max OSS 原版，5-10 分钟）…"
+  BIND_OK=0
   curl -fsSL -m 900 "$OSS/zyy_init/zyy_init_max.sh" -o /tmp/_bind.sh 2>/dev/null \
-    && bash /tmp/_bind.sh --ak "$CHAN_AK" --sk "$CHAN_SK" --isp "$ISP" || mark_fail "绑定"
+    && bash /tmp/_bind.sh --ak "$CHAN_AK" --sk "$CHAN_SK" --isp "$ISP" \
+    && BIND_OK=1
+  # 双保险：即便脚本异常地 exit 0，只要没写出「注册状态: 成功」也判失败（吞错 bug 兜底）
+  if [ "$BIND_OK" != "1" ] || ! grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then
+    mark_fail "绑定"
+    say "     ── 绑定/注册失败，最后 20 行安装日志（真因在这里）──"
+    tail -n 20 /var/log/zycloud_agent_setup.log 2>/dev/null | sed 's/^/       /'
+  fi
   NID=$(node_id); say "  nodeID=${NID:-未生成}"
 else
   say "  [2.1] 已绑定，跳过"

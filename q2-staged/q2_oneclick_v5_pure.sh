@@ -31,12 +31,10 @@ PLACEHOLDER="ZHOUYI_XIAODU"
 ADMIN_API="https://admin.zhouyi.top"
 OSS="https://zyy-go.oss-cn-beijing.aliyuncs.com/script"
 WRAP="https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@main/inline_deploy_r20_oss_nt.sh"
-: "${Q2_APPID:?未找到 admin appId：请 export Q2_APPID=xxx}"
-: "${Q2_ADMIN_AK:?未找到 admin AK：请 export Q2_ADMIN_AK=xxx}"
-: "${Q2_ADMIN_SK:?未找到 admin SK：请 export Q2_ADMIN_SK=xxx}"
-ADMIN_APPID="$Q2_APPID"
-ADMIN_AK="$Q2_ADMIN_AK"
-ADMIN_SK="$Q2_ADMIN_SK"
+# ── admin API 凭证：内置默认（2026-10-22 确认可内置），env 可覆盖 ──
+ADMIN_APPID="${Q2_APPID:-fg5c21pbzfgu6y2s2yqvanvr6uv99drq}"
+ADMIN_AK="${Q2_ADMIN_AK:-ja3io44nq2m7hx63fjkpio7s422aksel}"
+ADMIN_SK="${Q2_ADMIN_SK:-ydDGuguZ8COcJN4Ztl3Lsic3Z00zGEani8fYOPiYk2XXCuXQ1AHyy7E1sgV4dyDT}"
 LIMIT_START="23:59"; LIMIT_END="18:25"; HAPP_N=9
 
 LOG=/tmp/q2_v4_$$.log

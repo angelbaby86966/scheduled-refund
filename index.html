@@ -472,7 +472,7 @@
                   </div>
                   <div id="icLaunchStatus" style="margin-top:10px;font-size:13px;color:#666;" data-page-node-id="kRUdH6PC5kwqigm7unqu9I"></div>
                   <div id="icLaunchResult" style="margin-top:8px;font-size:13px;" data-page-node-id="Adz1jRMwmo7HIsB8jiQ0gV"></div>
-                  <div id="icBizMap" style="margin-top:10px;" data-page-node-id="suAK2o0Y0huEWmUh1gCcJ5"></div>
+                  <div id="icBizMap" style="margin-top:10px;overflow-x:auto;" data-page-node-id="suAK2o0Y0huEWmUh1gCcJ5"></div>
                 </fieldset>
 
                 <!-- ④ 标准化脚本 -->
@@ -555,7 +555,7 @@
                       绑定前清除 /etc/.mac（镜像若带旧设备身份，先清掉让每台重新生成唯一ID，防重复）
                     </label>
                   </div>
-                  <div id="icBindList" style="max-height:220px;overflow-y:auto;border:1px solid #d6e4ff;border-radius:6px;padding:8px;font-size:13px;background:#fff;margin-bottom:10px;color:#666;" data-page-node-id="QLiZJo5gi06GVAL7monzFs">点「加载实例」后在此勾选要绑定的机器（默认全选运行中的实例）</div>
+                  <div id="icBindList" style="max-height:220px;overflow-y:auto;overflow-x:auto;border:1px solid #d6e4ff;border-radius:6px;padding:8px;font-size:13px;background:#fff;margin-bottom:10px;color:#666;" data-page-node-id="QLiZJo5gi06GVAL7monzFs">点「加载实例」后在此勾选要绑定的机器（默认全选运行中的实例）</div>
                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;" data-page-node-id="F7A6MtIOABd0RpF4b36PVT">
                     <button class="btn btn-primary" style="background:#0958d9;border:none;" onclick="icBindZhouyi()" data-page-node-id="qBKXjDvRrfBUViDqTaFOHO">🔗 绑定选中实例到舟翼云</button>
                     <button class="btn btn-primary" style="background:#52c41a;border:none;" onclick="icBindAndDeploy()" title="绑定舟翼云 → 等待设备上线 → 把新设备SN填入业务ID → 自动状态流转到服务中" data-page-node-id="l43gc3n0mudtdRbDAfGEXx">🚀 一键绑定并流转到服务中</button>
@@ -778,7 +778,7 @@
   <script src="ai-client.js?v=3"></script>
   <script src="app.js?v=115"></script>
   <script src="one-click-deploy.js?v=17"></script>
-  <script src="image-clone.js?v=20&r=34"></script>
+  <script src="image-clone.js?v=20&r=35"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「镜像克隆」
     (function() {

@@ -62,7 +62,7 @@
       '</div>' +
       // 滚动容器：max-height 220px（约 5 行），超出滚动
       '<div style="max-height:220px;overflow-y:auto;border:1px solid #e8e8e8;border-radius:4px;background:#fff;">' +
-        '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+        '<table style="width:100%;min-width:960px;border-collapse:collapse;font-size:12px;">' +
         '<thead><tr style="background:#e6f7ff;position:sticky;top:0;z-index:1;">' +
         '<th style="padding:4px 6px;width:28px;"></th>' +
         '<th style="padding:4px 6px;text-align:left;">实例ID (swas)</th>' +

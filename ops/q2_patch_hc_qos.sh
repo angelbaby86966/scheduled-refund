@@ -6,6 +6,8 @@
 #     [1/2] 真保活 v2.0（内嵌优先 → OSS 兜底）：docker 自愈 / 容器自愈重建 /
 #           custom.yml 路数校验 / happ 恒定 9（OOM 被杀的 happ 会自动补回 9）
 #     [2/2] htb 限速 QoS（run_limit.sh，默认 23:59 → 18:25，可用环境变量覆盖）
+#     [3/2] 缓存命中 + 磁盘读优化：a) vm 层保缓存/平滑回写 b) 块设备 readahead+调度器
+#           c) 容器 blkio 提权 —— 对应“磁盘读持续缓存对外服务 / 缓存被反复点播”两目标
 #   幂等：可重复执行；不碰业务容器与 9 路分片
 #   用法：curl -fsSL --max-time 60 <jsDelivr 锁 sha>/ops/q2_patch_hc_qos.sh | bash
 #         云助手超时建议 ≥600 秒；自定义限速窗口：LIMIT_START=HH:MM LIMIT_END=HH:MM
@@ -345,6 +347,41 @@ say ""; say "===== [2/2] 挂限速 QoS（htb ${LIMIT_START} → ${LIMIT_END}）=
 curl -fsSL -m 180 "$OSS/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END" \
   || mark_fail "限速QoS"
 
+# ── [3/2] 缓存命中 + 磁盘读优化（持续读缓存对外服务 / 缓存被反复点播）──
+say ""; say "===== [3/2] 缓存命中 + 磁盘读优化 ====="
+# a) vm 层：保缓存、平滑回写、读优先
+HCACHE_CONF=/etc/sysctl.d/99-ipes-cache.conf
+cat > "$HCACHE_CONF" <<'EOF'
+# q2 缓存/磁盘读优化（q2_patch_hc_qos）
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 10
+EOF
+sysctl -p "$HCACHE_CONF" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1
+say "  a) vm 调优 → $HCACHE_CONF（swappiness=10 / vfs_cache_pressure=50 / dirty 5,10）"
+# b) 块设备层：readahead 拉满顺序预读 + IO 调度器（持久化到重启）
+cat > /usr/local/bin/ipes_io_tune.sh <<'EOF'
+#!/bin/bash
+# IPES 磁盘读/容器 BLOCK I/O 优化：提升持续读缓存与外服命中率
+for q in /sys/block/*/queue/read_ahead_kb; do echo 2048 > "$q" 2>/dev/null; done
+for s in /sys/block/*/queue/scheduler; do
+  if grep -q mq-deadline "$s" 2>/dev/null; then echo mq-deadline > "$s" 2>/dev/null
+  elif grep -q none "$s" 2>/dev/null; then echo none > "$s" 2>/dev/null; fi
+done
+EOF
+chmod +x /usr/local/bin/ipes_io_tune.sh
+bash /usr/local/bin/ipes_io_tune.sh
+if ! crontab -l 2>/dev/null | grep -q 'ipes_io_tune.sh'; then
+  ( crontab -l 2>/dev/null; echo "@reboot /usr/local/bin/ipes_io_tune.sh" ) | crontab -
+fi
+say "  b) 块设备 readahead=2048 + 调度器 mq-deadline/none（已应用并注册 @reboot）"
+# c) 容器 BLOCK I/O：提权容器 blkio 权重（cgroups v1 best-effort）
+CID=$(docker inspect -f '{{.Id}}' ipes 2>/dev/null)
+for w in /sys/fs/cgroup/blkio/docker/"$CID"/blkio.weight /sys/fs/cgroup/blkio/system.slice/docker-"$CID".scope/blkio.weight; do
+  [ -f "$w" ] && echo 1000 > "$w" 2>/dev/null && say "  c) 容器 blkio 权重 → 1000（$w）"
+done
+
 # ── 立即跑一轮保活（把 OOM 杀掉的 happ 补回 9，不等 cron）──
 say ""; say "===== 立即执行一轮保活（补 happ → 9）====="
 if [ -f /usr/local/bin/ipes_health_check.sh ]; then
@@ -361,6 +398,7 @@ say "保活版本 : $(grep -m1 'HC_VER=' /usr/local/bin/ipes_health_check.sh 2>/
 say "保活cron : $(crontab -l 2>/dev/null | grep -cE 'ipes_health|health_check') 条  (期望 ≥1)"
 say "限速qdisc: $(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条 htb  (期望 ≥1)"
 say "限速cron : $(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条  (期望 ≥1)"
+say "缓存调优 : swappiness=$(sysctl -n vm.swappiness 2>/dev/null) vfs_cache_pressure=$(sysctl -n vm.vfs_cache_pressure 2>/dev/null) dirty_ratio=$(sysctl -n vm.dirty_ratio 2>/dev/null) readahead=$(cat /sys/block/*/queue/read_ahead_kb 2>/dev/null | head -1) blkio=$(docker inspect -f '{{.Id}}' ipes 2>/dev/null | while read c; do f=/sys/fs/cgroup/blkio/docker/$c/blkio.weight; [ -f "$f" ] && cat "$f"; done)"
 AFTER_HP="$(HP)"
 say "happ进程 : 安装前 ${BEFORE_HP:-0} → 现在 ${AFTER_HP:-0}  (期望 9；若仍 <9，保活 cron 每分钟会继续补)"
 say "容器     : $(docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | tr '\n' ' ')"

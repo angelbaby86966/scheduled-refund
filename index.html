@@ -89,8 +89,7 @@
         <!-- 右侧：操作面板 -->
         <main class="content" data-page-node-id="ITWyzVNKS6iN2FAChiugnF">
           <div class="tabs" data-page-node-id="4u7tByfo7uuEurm5quHhKO">
-            <button class="tab admin-only-tab active" data-tab="node" onclick="switchTab('node')" data-page-node-id="H7ycBMDS57hTXBrZ5cPRir">📋 节点ID提取</button>
-            <button class="tab" data-tab="firewall" onclick="switchTab('firewall')" data-page-node-id="U945aLkpkLOy2pJzsz6H5V">🛡️ 防火墙</button>
+            <button class="tab active" data-tab="firewall" onclick="switchTab('firewall')" data-page-node-id="U945aLkpkLOy2pJzsz6H5V">🛡️ 防火墙</button>
             <button class="tab" data-tab="command" onclick="switchTab('command')" data-page-node-id="NRunGAFzXS4xzT4nBmFmOY">💻 命令助手</button>
             <button class="tab" data-tab="cancel" onclick="switchTab('cancel')" data-page-node-id="tV1TI0PxMSN0V4R78MP8qP">⏰ 定时退订</button>
             <button class="tab" data-tab="order" onclick="switchTab('order')" data-page-node-id="Mfp4skgCjFpMZzWcj7ttAB">🛒 批量下单</button>
@@ -99,102 +98,8 @@
             <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')" data-page-node-id="YUlHHsVe7zq1spcDSbZBpl">🖼️ 镜像克隆</button>
           </div>
 
-          <!-- 节点ID提取面板 -->
-          <div class="tab-content admin-only-panel active" id="tab-node" data-page-node-id="9GNOn5eannlaU4VIaabxEo">
-            <div class="card" data-page-node-id="mS7D25XP2C6QqosBIU20Eo">
-              <div class="card-header" data-page-node-id="cScGVuxkhgb86RFKLYB0ai">
-                <h3 data-page-node-id="Sp3Uf0R09kI2kGtjoZGtQw">📋 节点ID提取（admin.zhouyi.top 资源池）</h3>
-                <p class="card-desc" data-page-node-id="ilZF4NtHiNc0ThEcCK4B4V">在资源池按「节点属主ID」搜索「在线」节点，提取所有节点ID，支持全选复制。</p>
-              </div>
-              <div class="card-body" data-page-node-id="nUVWfg0WsnDw621LxLZred">
-                <details open data-page-node-id="RNJpSfo4B0daUmXh8L1L7H">
-                  <summary data-page-node-id="DoVSabc3Q05ZWZqOf82iV0">🔑 admin.zhouyi.top 登录凭证（自动抓取需要，仅首次，按账号存本机）</summary>
-                  <div style="margin-top:10px;" data-page-node-id="84dVxKkVBy0rtiPKN9UAgx">
-                    <p style="font-size:12px;color:#666;margin:0 0 8px 0;" data-page-node-id="mekgwpceBEDcqgaDA0PZGE">登录 admin.zhouyi.top 后，按 F12 → Application（或网络） → 复制 Cookie 或请求头里的 <b data-page-node-id="4ezwLHaAPvQmYHOSHinsAE">Authorization</b> 值，粘贴到下方：</p>
-                    <textarea id="zyToken" rows="3" placeholder="粘贴 admin.zhouyi.top 的登录凭证（Cookie 或 Token）" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
-                    <div style="margin-top:8px;" data-page-node-id="O0ZBqzf3Pvz44wed7lbEMp">
-                      <button class="btn btn-sm btn-primary" onclick="saveZyToken()" data-page-node-id="8Qm0r4T5AIeIU16W2Q5EtN">💾 保存凭证</button>
-                      <span id="zyTokenStatus" style="margin-left:10px;font-size:13px;" data-page-node-id="m9KF029JHv39CM1BVFZR7h"></span>
-                    </div>
-                  </div>
-                </details>
-
-                <div class="form-group" style="margin-top:16px;" data-page-node-id="JhhphNWWd2h2mKYjXXgcON">
-                  <label style="font-weight:600;" data-page-node-id="CqK5m6HVfF4ZuMPwU4u09u">节点属主ID（自定义）</label>
-                  <input type="text" id="zyOwnerId" placeholder="属主ID，多个用逗号分隔（并行抓取）" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;" data-page-node-id="rYBayh1uuvh8oOE66lT2VL">
-                  <p style="font-size:12px;color:#666;margin:6px 0 0 0;" data-page-node-id="yZCxUUNV4BldzwE1irQkPO">网络状态固定为「在线」</p>
-                </div>
-
-                <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;" data-page-node-id="1YLGn8xkialFWRBK1Ghkic">
-                  <button class="btn btn-primary" id="zySearchBtn" onclick="zySearchNodes()" data-page-node-id="KxzsMkzwLN2sqJMRFwvFkT">🔍 自动抓取节点ID</button>
-                  <button class="btn btn-primary" id="zySearchIpBtn" onclick="zySearchAndQueryIps()" style="background:#722ed1;color:#fff;" data-page-node-id="6hAsILP4OMFL05gX9e58As">🌐 抓取并查公网IP</button>
-                  <button class="btn btn-sm" onclick="zyTestConnection()" title="不抓取，只测 token/接口是否通" data-page-node-id="t8OU3No8LrOMaBAq8nD3Wy">🔌 测试连接</button>
-                  <button class="btn btn-sm" onclick="zyDiagProxy()" title="直接打转发器看原始响应，定位是 token 还是后台接口问题" data-page-node-id="YNqtB9htdKh5Hyo3DeVc2D">🔬 诊断转发</button>
-                  <button class="btn btn-sm" onclick="zyClearTokenCache()" title="清掉本机缓存的旧 token，强制用输入框新 token" data-page-node-id="DLo0UCucdFLQtgBu5q3I76">🧹 清token缓存</button>
-                  <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#666;cursor:pointer;margin:0;" data-page-node-id="R1ukE1BhQTQcBNpqlfHlLp"><input type="checkbox" id="zyNoTimeout" checked data-page-node-id="rEphGEi7DjikZJCpwUdiVi"> 取消超时</label>
-                </div>
-
-                <!-- 高级模式：自定义后台接口（默认即 admin 资源池真实接口名） -->
-                <details style="margin-top:12px;" data-page-node-id="mBCOPSnHTMWz5sldEjQMGt">
-                  <summary style="cursor:pointer;font-size:13px;color:#666;" data-page-node-id="K6tlAF62NUMsSdIfGc8Lj8">⚙ 高级：自定义抓取接口（默认已填，与 admin.zhouyi.top 资源池一致）</summary>
-                  <div style="margin-top:8px;font-size:12px;color:#666;background:#fafafa;padding:10px;border-radius:6px;" data-page-node-id="sEHhUw6gTFPaVTBvLhwuZt">
-                    <p style="margin:0 0 8px 0;" data-page-node-id="6e5r7UQPLUX2KSv1krXPsG">
-                      默认已按后台资源池筛选项校准：<b data-page-node-id="7MYU2S0FF9R4vwf6zKtGJj">网络状态=在线(status=online)</b>、<b data-page-node-id="jW7xYBk5gUGorU7oDDWDeg">设备状态=待配置(stage=configured)</b>，只抓取这两种状态同时满足的节点。
-                      如果你看到抓取失败 / 列表为空，请在 admin.zhouyi.top 后台按 <b data-page-node-id="oPviiuUimm6x8mBJmG4WG4">F12 → 网络(Network)</b> → 看列表请求的
-                      <b data-page-node-id="NDzihbBOmIumgFHnVGjSR5">请求 URL / 方法 / Query 参数</b>，把 method/path/query 贴到下面覆盖默认即可。
-                      <code data-page-node-id="zNX1CfPyi4qEHgM9czlHgG">{ownerId}</code> 会自动替换为输入框里的属主ID。
-                    </p>
-                    <p style="margin:0 0 8px 0;color:#fa8c16;" data-page-node-id="b8LjGIQvMIo1xwtR1xfOkY">
-                      <b data-page-node-id="VuWo82x3x1LKL7AXyxvAYo">提示：</b>抓取出现「signal is aborted without reason」时，勾选上方「取消超时」再试；Edge Function 偶尔会慢到 20 秒以上。
-                    </p>
-                    <div style="display:grid;grid-template-columns:90px 1fr;gap:6px 10px;align-items:center;" data-page-node-id="2bHAgwUVsllrfFFWN5DfLg">
-                      <label style="font-size:13px;" data-page-node-id="wE6TTcNHxTOWvdHQBxQRhC">Method</label>
-                      <input type="text" id="zyApiMethod" value="GET" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;" data-page-node-id="yDnRui8zasuoVdbgfoCar3">
-                      <label style="font-size:13px;" data-page-node-id="uFQbio1lNYmfRBANds2Xot">Path</label>
-                      <input type="text" id="zyApiPath" value="/api/edgeNode/getEdgeNodeList" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;" data-page-node-id="bBNcVNO0ailj80wT3qFhJE">
-                      <label style="font-size:13px;" data-page-node-id="begZD4mfkJfxv0tLZVlfTU">Query</label>
-                      <input type="text" id="zyApiQuery" value="ownerId={ownerId}&isOnline=1&status=online&stage=configured" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-family:monospace;" data-page-node-id="4MZapI8A2zp45NN6EdorEU">
-                    </div>
-                    <div style="margin-top:8px;" data-page-node-id="DVmA3MCBoCqIwkRulZTBYF">
-                      <button class="btn btn-sm" onclick="zyResetAdvanced()" style="background:#999;color:white;" data-page-node-id="MvYr8OIzJg582NInubWBju">还原默认</button>
-                      <span id="zyAdvancedHint" style="margin-left:8px;font-size:12px;color:#999;" data-page-node-id="2UFdH7fjHSDPegpI9cAijF"></span>
-                    </div>
-                  </div>
-                </details>
-
-                <div style="margin:16px 0; text-align:center; color:#999; font-size:13px;" data-page-node-id="rGhpVzFUD5W8pNskCtJAHi">或</div>
-
-                <div class="form-group" data-page-node-id="ABNxvnu73SWfwUPO5K46V9">
-                  <label style="font-weight:600;" data-page-node-id="yKv0Fzer8f4BwmZJljxass">粘贴节点ID（舟翼云节点ID，查询对应云主机公网IP）</label>
-                  <textarea id="zyPaste" rows="4" placeholder="可粘贴多行 / 逗号 / 空格分隔的舟翼云节点ID，自动去重，查询后导出公网IP" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:12px; resize:vertical;"></textarea>
-                  <div style="margin-top:8px;" data-page-node-id="UHJD7XrYR5D87zdZCGZ3E7">
-                    <button class="btn btn-sm btn-primary" onclick="zyImportPaste()" data-page-node-id="8mMNb4DhaquELRjHVrAG9l">🔍 查询公网IP</button>
-                    <button class="btn btn-sm" onclick="zyClearResults()" style="background:#999; color:white; margin-left:8px;" data-page-node-id="wHhTFtA5mlDOZivDrp8dVa">清空</button>
-                  </div>
-                </div>
-
-                <div id="zySearchStatus" style="margin-top:12px;font-size:13px;" data-page-node-id="Asjurx0JxckVki7CXc2LWs"></div>
-
-                <div id="zyResultWrap" style="display:none; margin-top:16px; border:1px solid #eee; border-radius:6px; padding:12px;" data-page-node-id="qi5lgxbRSlYNZHHfwZ4caX">
-                  <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap;" data-page-node-id="bkymFwBdvX1sg6X9HqDC1q">
-                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; margin:0;" data-page-node-id="K4HeBaAm0cBXpLFCeH5ad3">
-                      <input type="checkbox" id="zySelectAll" onchange="zyToggleAll()" checked data-page-node-id="mPpqdIbeLzF2mFbmwiKbsD"> 全选
-                    </label>
-                    <span id="zySelectedCount" style="font-size:13px; color:#666;" data-page-node-id="21sO2zXssOHMX4NadAuEbE">已选 0 个</span>
-                    <button class="btn btn-sm btn-primary" onclick="zyCopySelected()" data-page-node-id="pqkmJEiCHokjoxKaB8yWf5">📋 复制选中</button>
-                    <button class="btn btn-sm btn-success" onclick="zyExportIpCsv()" data-page-node-id="dSBcpzwMX0vO6O7mAzLv50">⬇️ 导出CSV</button>
-                  </div>
-                  <div class="refund-list" id="zyNodeList" style="max-height:320px; overflow-y:auto;" data-page-node-id="sVpRow8hx2ifwvK2gJFufM"></div>
-                  <div style="margin-top:10px; padding-top:10px; border-top:1px solid #eee; font-size:13px; color:#666;" data-page-node-id="TRylAe7JAAqLnH9bHYXDiq">
-                    <span id="zyOwnerLabel" data-page-node-id="SxZddOwuDOtMVBRAuVDa8N">-</span> · 共 <strong id="zyCount" data-page-node-id="6BLoyQ6ofYrkY1EJd85Gty">0</strong> 条 · 找到公网IP <strong id="zyIpCount" data-page-node-id="fCIuWORH3eXcB1jjVmbjjN">0</strong> 条
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <!-- 防火墙面板 -->
-          <div class="tab-content" id="tab-firewall" data-page-node-id="TyMT2wIiCkZn8VkLvdtlA8">
+          <div class="tab-content active" id="tab-firewall" data-page-node-id="TyMT2wIiCkZn8VkLvdtlA8">
             <div class="card" data-page-node-id="gGgdFDDPqLgLT2k5RBs34X">
               <div class="card-header" data-page-node-id="3P8BHSGmA7hdCQ3deV7rPw">
                 <h3 data-page-node-id="o5k8gtKytSjorBkersIyOG">🛡️ 批量应用防火墙模板</h3>
@@ -853,11 +758,10 @@
   <script src="aliyun-client-v2.js?v=18"></script>
   <script src="ai-client.js?v=3"></script>
   <script src="app.js?v=115"></script>
-  <script src="node-extract.js?v=15"></script>
   <script src="one-click-deploy.js?v=17"></script>
   <script src="image-clone.js?v=19&r=33"></script>
   <script>
-    // 管理员权限控制：仅 zhangruiyao 可见「节点ID提取」与「镜像克隆」
+    // 管理员权限控制：仅 zhangruiyao 可见「镜像克隆」
     (function() {
       var ADMIN_USER = 'zhangruiyao';
       function getCurrentUser() {

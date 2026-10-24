@@ -372,6 +372,39 @@ def is_refund_exempt(instance_id, public_ip=None):
     return (instance_id in REFUND_EXEMPT_INSTANCE_IDS) or (public_ip and public_ip in REFUND_EXEMPT_PUBLIC_IPS)
 
 
+# ===================== 动态黄金机保护（根治「④ 一键全流程造的黄金机被定时退订误退」事故） =====================
+# 根因：④ 流程在源实例上标准化 + 打镜像后，该源实例即成为「黄金机（镜像源机）」，
+#       但从未被写进 GOLDEN_INSTANCE_IDS / GOLDEN_PUBLIC_IPS，于是每晚 23:35 的定时退订把它当普通机退掉，
+#       SWAS 退订源实例会连带删除其自定义镜像 → 克隆链路断源。
+# 根治：④ 流程在镜像创建完成后，把源实例登记进【当前用户】的 user_data.data.golden_instances
+#       （结构：[{instance_id, public_ip, registered_at, source}, ...]）；
+#       本函数在每轮任务启动时，把【所有用户】的 golden_instances 合并进全局 GOLDEN 集合，云端统一保护，不再写死。
+# 严格类型校验：仅接受 {instance_id, public_ip} 结构，脏数据一律忽略；解析失败绝不中断整轮任务，也绝不把非字符串塞进保护集。
+def load_dynamic_golden(rows):
+    added_ids = 0
+    added_ips = 0
+    for row in (rows or []):
+        data = (row or {}).get("data") or {}
+        gis = data.get("golden_instances")
+        if not isinstance(gis, list):
+            continue
+        for g in gis:
+            if not isinstance(g, dict):
+                continue
+            gid = str(g.get("instance_id") or g.get("instanceId") or "").strip()
+            gip = str(g.get("public_ip") or g.get("publicIp") or "").strip()
+            if not gid:
+                continue
+            if gid not in GOLDEN_INSTANCE_IDS:
+                GOLDEN_INSTANCE_IDS.add(gid)
+                added_ids += 1
+            if gip and gip not in GOLDEN_PUBLIC_IPS:
+                GOLDEN_PUBLIC_IPS.add(gip)
+                added_ips += 1
+    if added_ids or added_ips:
+        log(f"\U0001f31f 动态黄金机保护：从云端合并 {added_ids} 台实例 / {added_ips} 个公网 IP（④ 流程登记）", "WARN")
+
+
 def list_instances(ak, sk, region_id):
     """分页列出某地域全部实例，返回 [{regionId, instanceId}, ...]（已剔除黄金机）"""
     out = []
@@ -876,6 +909,8 @@ def main():
         log(f"读取 user_data 失败: {e}", "ERROR")
         sys.exit(1)
     log(f"共读取 {len(rows)} 个用户配置", "INFO")
+    # 动态黄金机保护：合并所有用户云端登记的 golden_instances（④ 流程创建镜像后写入）
+    load_dynamic_golden(rows)
 
     due_count = 0
     for row in rows:

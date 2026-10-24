@@ -307,6 +307,8 @@
       if (typeof showCredentialDialog === 'function') showCredentialDialog();
       return false;
     }
+    // 守卫触发时顺手刷新动态黄金机集合（云端登记的 ④ 黄金机在本次会话内也受保护）
+    icLoadDynamicGolden();
     return true;
   }
 
@@ -364,6 +366,8 @@
     });
     // 进入页面：先合并云端 clone 映射（Bug B 修复：清缓存/换浏览器不丢），再渲染
     icSyncCloudBizMap();
+    // 进入页面：加载云端登记的动态黄金机，让浏览器侧守卫生效（释放/退订/重置 不再误伤 ④ 黄金机）
+    icLoadDynamicGolden();
   }
 
   // 保存 admin.zhouyi.top Token（本页专用）
@@ -460,6 +464,59 @@
       icSaveGoldenMap(m);
     }
   })();
+
+  // ============ 🏆 动态黄金机云端登记（根治「④ 一键全流程造的黄金机被定时退订误退」事故） ============
+  // ④ 流程在源实例标准化 + 打镜像完成后，该源实例即成为「黄金机（镜像源机）」。
+  // 这里把它登记进【当前用户】的 user_data.data.golden_instances；云端定时退订脚本每轮启动时
+  // 合并该名单 → 黄金机永不被误退（SWAS 退源实例会连带删其自定义镜像、断克隆链路）。
+  // 浏览器侧同时 addDynamicGolden，让本次会话的守卫（释放/退订/重置）即刻生效。
+  async function icGetSourcePublicIp(region, instId) {
+    try {
+      var r = await AliyunClient.listInstances(region, { instanceIds: [instId] });
+      var insts = (r && (r.Instances || r.instances)) || [];
+      var m = insts[0] || {};
+      var ip = m.PublicIpAddress || m.publicIpAddress || m.IpAddress || m.ipAddress || '';
+      if (typeof ip === 'object') ip = (ip.IpAddress || ip.ipAddress || (ip[0] || ''));
+      return (typeof ip === 'string') ? ip : ((ip && ip[0]) || '');
+    } catch (e) { return ''; }
+  }
+
+  async function icRegisterGoldenInstance(instId, publicIp) {
+    try {
+      // 浏览器侧立即生效（防本次会话内手动误退）
+      if (window.AliyunClient && AliyunClient.addDynamicGolden) AliyunClient.addDynamicGolden(instId, publicIp);
+      // 云端持久化：合并进当前用户 data.golden_instances（下次定时退订自动保护）
+      var username = (typeof currentUser !== 'undefined' && currentUser && currentUser.user) ? currentUser.user : null;
+      if (!username) {
+        icLog('[镜像克隆] ⚠️ 未登录，跳过云端黄金机登记（请手动把 ' + instId + ' 加进保护名单）', 'warn');
+        return;
+      }
+      var data = await CloudStore.getUserData(username, true);  // 强制远端，避免覆盖他人并发登记
+      var list = Array.isArray(data.golden_instances) ? data.golden_instances.slice() : [];
+      var exists = list.some(function (g) { return g && (g.instance_id || g.instanceId) === instId; });
+      if (!exists) {
+        list.push({ instance_id: instId, public_ip: publicIp || '', registered_at: Date.now(), source: 'ic-oneclick-flow' });
+        await CloudStore.setUserData(username, Object.assign({}, data, { golden_instances: list }));
+        icLog('[镜像克隆] ✅ 黄金机已写入云端保护名单: ' + instId + (publicIp ? ' (' + publicIp + ')' : ''), 'success');
+      } else {
+        icLog('[镜像克隆] 黄金机已在云端保护名单: ' + instId, 'info');
+      }
+    } catch (e) {
+      icLog('[镜像克隆] ❌ 黄金机云端登记失败（不影响开通；但定时退订可能误退，请手动加保护名单）: ' + e.message, 'error');
+    }
+  }
+
+  // 页面初始化 / 守卫触发时，从云端拉取本用户已登记的动态黄金机，喂给浏览器侧守卫（isGoldenInstance）
+  async function icLoadDynamicGolden() {
+    try {
+      var username = (typeof currentUser !== 'undefined' && currentUser && currentUser.user) ? currentUser.user : null;
+      if (!username) return;
+      var data = await CloudStore.getUserData(username);  // 走缓存，避免高频重复联网
+      var list = Array.isArray(data.golden_instances) ? data.golden_instances : [];
+      if (window.AliyunClient && AliyunClient.setDynamicGolden) AliyunClient.setDynamicGolden(list);
+      if (list.length) icLog('[镜像克隆] 🏆 已从云端加载 ' + list.length + ' 台动态黄金机（浏览器侧守卫生效）', 'info');
+    } catch (e) { /* 云端不可达时退化为写死的硬判定，静默 */ }
+  }
 
   // RunCommand 下发并取回输出（提交 → 轮询 DescribeCommandInvocations → 返回 Output 文本）
   async function icRunCmdOutput(region, iid, cmd, timeoutSec) {
@@ -1938,6 +1995,13 @@
         return;
       }
       step('✅ 镜像就绪: ' + newImageId);
+
+      // 🏆 黄金机云端登记（根治：④ 造的黄金机此前没进保护名单 → 被定时退订误退）
+      //    源实例 instId 标准化 + 打镜像后即成为镜像源机（黄金机），立即登记，哪怕后续「开通」失败也已受保护
+      try {
+        var gip = await icGetSourcePublicIp(region, instId);
+        await icRegisterGoldenInstance(instId, gip);
+      } catch (ge2) { step('⚠️ 黄金机云端登记异常（不影响开通）: ' + ge2.message); }
 
       // 🔒 镜像已固化 → 立即禁用黄金机的首启脚本
       //    镜像快照里 firstboot 仍是 enabled（克隆机首启要靠它重生身份），

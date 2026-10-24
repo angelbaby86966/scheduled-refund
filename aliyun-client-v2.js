@@ -1239,11 +1239,18 @@
   var GOLDEN_NODE_ID = 'b1bd4b68f9cac05a3cf3de642341b8a9';
   var GOLDEN_PUBLIC_IP = '118.178.193.66';
 
+  // 动态黄金机（④ 一键全流程创建镜像后登记到云端 user_data.data.golden_instances，
+  // 运行时由 image-clone.js 加载进来）。根治「写死名单漏登 → ④ 造的黄金机被定时退订误退」。
+  var _dynamicGoldenIds = new Set();
+  var _dynamicGoldenIps = new Set();
+
   /** 判定是否为黄金机。入参可为实例对象（含 InstanceId/PublicIpAddress）或 实例ID/公网IP/节点ID 字符串。 */
   function isGoldenInstance(inst) {
     if (!inst) return false;
     if (typeof inst === 'string') {
-      return inst === GOLDEN_INSTANCE_ID || inst === GOLDEN_PUBLIC_IP || inst === GOLDEN_NODE_ID;
+      if (inst === GOLDEN_INSTANCE_ID || inst === GOLDEN_PUBLIC_IP || inst === GOLDEN_NODE_ID) return true;
+      if (_dynamicGoldenIds.has(inst) || _dynamicGoldenIps.has(inst)) return true;
+      return false;
     }
     var id   = inst.InstanceId || inst.instanceId || inst.InstanceID || inst.id || '';
     var ip   = inst.PublicIpAddress || inst.publicIpAddress || inst.IpAddress || inst.ipAddress || inst.publicIp || inst.publicIP || '';
@@ -1251,6 +1258,9 @@
     if (id && id === GOLDEN_INSTANCE_ID) return true;
     if (ip && ip === GOLDEN_PUBLIC_IP) return true;
     if (node && node === GOLDEN_NODE_ID) return true;
+    if (id && _dynamicGoldenIds.has(id)) return true;
+    if (ip && _dynamicGoldenIps.has(ip)) return true;
+    if (node && _dynamicGoldenIds.has(node)) return true;
     return false;
   }
   /** 按 ID/IP/节点ID 字符串判定（供只有 ID 的场景用） */
@@ -1277,6 +1287,24 @@
   window.AliyunClient.assertNotGolden = assertNotGolden;
   window.AliyunClient.filterOutGolden = filterOutGolden;
   window.AliyunClient.GOLDEN = { instanceId: GOLDEN_INSTANCE_ID, nodeId: GOLDEN_NODE_ID, publicIp: GOLDEN_PUBLIC_IP };
+
+  /** 用云端 golden_instances 列表覆盖运行时动态黄金机集合（image-clone.js 启动时调用）。 */
+  window.AliyunClient.setDynamicGolden = function (list) {
+    _dynamicGoldenIds = new Set();
+    _dynamicGoldenIps = new Set();
+    (list || []).forEach(function (g) {
+      if (!g || typeof g !== 'object') return;
+      var gid = (g.instance_id || g.instanceId || '').toString().trim();
+      var gip = (g.public_ip || g.publicIp || '').toString().trim();
+      if (gid) _dynamicGoldenIds.add(gid);
+      if (gip) _dynamicGoldenIps.add(gip);
+    });
+  };
+  /** 增量登记一台黄金机（④ 流程创建镜像后立即调用，本次会话内浏览器侧守卫即刻生效）。 */
+  window.AliyunClient.addDynamicGolden = function (instId, publicIp) {
+    if (instId) _dynamicGoldenIds.add(instId);
+    if (publicIp) _dynamicGoldenIps.add(publicIp);
+  };
 
   console.log('[aliyun-client] 浏览器端阿里云客户端已就绪');
 })();

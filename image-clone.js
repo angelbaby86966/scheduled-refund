@@ -43,10 +43,10 @@
       var safeId = String(id).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
       return '<tr data-iid="' + safeId + '">' +
         '<td style="padding:3px 6px;border-top:1px solid #eee;"><input type="checkbox" class="ic-biz-chk" data-iid="' + safeId + '" onchange="window.icBizUpdateBar && icBizUpdateBar()" /></td>' +
-        '<td style="padding:3px 6px;font-family:monospace;border-top:1px solid #eee;font-size:12px;">' + id + '</td>' +
-        '<td style="padding:3px 6px;font-weight:600;color:#0050b3;border-top:1px solid #eee;font-size:12px;">' + b.businessId + '</td>' +
-        '<td style="padding:3px 6px;font-family:monospace;color:#666;font-size:11px;border-top:1px solid #eee;">' + (b.publicIp || '—') + '</td>' +
-        '<td style="padding:3px 6px;border-top:1px solid #eee;font-size:12px;">' + dev + '</td>' +
+        '<td class="ic-brk" style="padding:3px 6px;font-family:monospace;border-top:1px solid #eee;font-size:12px;">' + id + '</td>' +
+        '<td class="ic-brk" style="padding:3px 6px;font-weight:600;color:#0050b3;border-top:1px solid #eee;font-size:12px;">' + b.businessId + '</td>' +
+        '<td class="ic-brk" style="padding:3px 6px;font-family:monospace;color:#666;font-size:11px;border-top:1px solid #eee;">' + (b.publicIp || '—') + '</td>' +
+        '<td class="ic-brk" style="padding:3px 6px;border-top:1px solid #eee;font-size:12px;">' + dev + '</td>' +
         '<td style="padding:3px 6px;color:#888;font-size:11px;border-top:1px solid #eee;">' + (b.region || '') + '</td>' +
         '<td style="padding:3px 6px;color:#999;font-size:11px;border-top:1px solid #eee;">' + (b.updatedAt || '') + '</td>' +
         '</tr>';
@@ -60,15 +60,15 @@
           'id="icBizDelBtn" disabled>🗑️ 删除选中</button>' +
         '<span id="icBizSelCount" style="color:#888;">共 ' + ids.length + ' 台</span>' +
       '</div>' +
-      // 滚动容器：max-height 220px（约 5 行），超出滚动
-      '<div style="max-height:220px;overflow-y:auto;border:1px solid #e8e8e8;border-radius:4px;background:#fff;">' +
+      '<style>#icBizMap .ic-scroll::-webkit-scrollbar{height:8px;width:8px}#icBizMap .ic-scroll::-webkit-scrollbar-thumb{background:#b9b9b9;border-radius:4px}#icBizMap .ic-scroll::-webkit-scrollbar-track{background:#f1f1f1;border-radius:4px}#icBizMap td.ic-brk,#icBizMap th.ic-brk{word-break:break-all}</style>' +
+      '<div class="ic-scroll" style="max-height:220px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid #e8e8e8;border-radius:4px;background:#fff;">' +
         '<table style="width:100%;min-width:960px;border-collapse:collapse;font-size:12px;">' +
         '<thead><tr style="background:#e6f7ff;position:sticky;top:0;z-index:1;">' +
         '<th style="padding:4px 6px;width:28px;"></th>' +
-        '<th style="padding:4px 6px;text-align:left;">实例ID (swas)</th>' +
-        '<th style="padding:4px 6px;text-align:left;">业务ID</th>' +
-        '<th style="padding:4px 6px;text-align:left;">公网IP</th>' +
-        '<th style="padding:4px 6px;text-align:left;">设备ID(舟翼云)</th>' +
+        '<th class="ic-brk" style="padding:4px 6px;text-align:left;">实例ID (swas)</th>' +
+        '<th class="ic-brk" style="padding:4px 6px;text-align:left;">业务ID</th>' +
+        '<th class="ic-brk" style="padding:4px 6px;text-align:left;">公网IP</th>' +
+        '<th class="ic-brk" style="padding:4px 6px;text-align:left;">设备ID(舟翼云)</th>' +
         '<th style="padding:4px 6px;text-align:left;">地域</th>' +
         '<th style="padding:4px 6px;text-align:left;">更新时间</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table>' +

@@ -429,10 +429,29 @@
                   <div id="icImagesList" style="margin-top:10px;font-size:13px;color:#666;" data-page-node-id="T7Xa8y1jA7pbXBbJ5blRBs"></div>
                 </fieldset>
 
+                <!-- ②.5 跨账号共享镜像 -->
+                <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;" data-page-node-id="icShareFs1">
+                  <legend style="font-weight:600;color:#1677ff;padding:0 6px;" data-page-node-id="icShareFs2">②.5 分享镜像到其他阿里云账号（跨账号共享，AddCustomImageShareAccount）</legend>
+                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;" data-page-node-id="icShareFs3">
+                    <div class="form-group" style="margin:0;flex:1;min-width:260px;" data-page-node-id="icShareFs4">
+                      <label style="font-size:12px;" data-page-node-id="icShareFs5">目标阿里云主账号 ID（可多个，逗号/空格分隔；使用上方②选中的镜像与当前地域）</label>
+                      <input type="text" id="icShareAccounts" class="input" placeholder="例如 1234567890123456, 6543210987654321" data-page-node-id="icShareFs6" />
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="icShareImage()" data-page-node-id="icShareFs7">🔗 共享选中镜像</button>
+                    <button class="btn btn-sm" onclick="icListShareAccounts()" data-page-node-id="icShareFs8">📋 查看已共享账号</button>
+                    <button class="btn btn-sm btn-danger" onclick="icRemoveAllShareAccounts()" data-page-node-id="icShareFs9">❌ 取消全部共享</button>
+                  </div>
+                  <div id="icShareStatus" style="margin-top:10px;font-size:13px;color:#666;" data-page-node-id="icShareFs10"></div>
+                </fieldset>
+
                 <!-- ③ 开通 -->
                 <fieldset style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:16px;" data-page-node-id="ZcPFyI3yNrBN3nlmIlan9W">
                   <legend style="font-weight:600;color:#1677ff;padding:0 6px;" data-page-node-id="Q3eNbMCAu6cEFnm7YTVHTa">③ 基于镜像开通新云主机（不勾选自动支付 → CreateOrder 待支付订单，不扣费）</legend>
                   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;align-items:end;" data-page-node-id="ESSdKFVJtTJHgsh2eT6ZZn">
+                    <div class="form-group" style="margin:0;" data-page-node-id="icManualImgWrap">
+                      <label style="font-size:12px;" data-page-node-id="icManualImgLabel">指定镜像 ImageId（留空=用②选中的；可填其他账号共享来的 m-xxx）</label>
+                      <input type="text" id="icManualImageId" class="input" placeholder="m-bp1gf5t8x2srcpdum19x（可选，填了优先用它下单）" data-page-node-id="icManualImgInput" />
+                    </div>
                     <div class="form-group" style="margin:0;" data-page-node-id="etRTY0Ie5R38Sf3Jl9UQ8S">
                       <label style="font-size:12px;" data-page-node-id="5LNFU9GCUuS557QGD2vS3J">套餐 PlanId</label>
                       <input type="text" id="icPlanId" class="input" placeholder="默认锁定套餐" data-page-node-id="KEK2bf3OWmjm4tOS9MGeuW" />
@@ -759,7 +778,7 @@
   <script src="ai-client.js?v=3"></script>
   <script src="app.js?v=115"></script>
   <script src="one-click-deploy.js?v=17"></script>
-  <script src="image-clone.js?v=19&r=33"></script>
+  <script src="image-clone.js?v=20&r=34"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「镜像克隆」
     (function() {

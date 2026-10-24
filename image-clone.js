@@ -615,6 +615,131 @@
     }
   }
 
+  // ====== [跨账号共享] 自定义镜像共享给其他阿里云账号（AddCustomImageShareAccount） ======
+  function icParseAccounts() {
+    var raw = (document.getElementById('icShareAccounts') || {}).value || '';
+    var list = raw.split(/[\s,，;；]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    var seen = {}, out = [];
+    list.forEach(function (a) { if (!seen[a]) { seen[a] = 1; out.push(a); } });
+    return out;
+  }
+  async function icShareImage() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var sel = document.getElementById('icImageSelect');
+    var imageId = sel ? sel.value : '';
+    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像再共享'); return; }
+    var accounts = icParseAccounts();
+    if (!accounts.length) { alert('请填写目标阿里云主账号 ID（可多个，逗号/空格分隔）'); return; }
+    var st = document.getElementById('icShareStatus');
+    st.innerHTML = '⏳ 正在共享镜像 ' + imageId + '（' + region + '）给 ' + accounts.length + ' 个账号...';
+    var ok = [], fail = [];
+    for (var i = 0; i < accounts.length; i++) {
+      try {
+        await AliyunClient.callCentralApi('AddCustomImageShareAccount', {
+          RegionId: region, ImageId: imageId, 'Account.1': accounts[i]
+        });
+        ok.push(accounts[i]);
+      } catch (e1) {
+        // 兼容：个别端点要求扁平参数名 Account（非数组式），重试一次
+        try {
+          await AliyunClient.callCentralApi('AddCustomImageShareAccount', {
+            RegionId: region, ImageId: imageId, Account: accounts[i]
+          });
+          ok.push(accounts[i]);
+        } catch (e2) {
+          fail.push(accounts[i] + '：' + ((e2 && (e2.message || e2.code)) || '未知错误'));
+        }
+      }
+    }
+    var html = '🔗 共享完成（<b>' + ok.length + '/' + accounts.length + '</b> 成功）';
+    if (ok.length) html += '<br>✅ 已共享给：<code>' + ok.join('</code>、<code>') + '</code>';
+    if (fail.length) html += '<br>❌ 失败：<span style="color:#cf1322;">' + fail.join('<br>') + '</span>';
+    st.innerHTML = html;
+    icLog('[镜像克隆] 共享镜像 ' + imageId + ' → ' + (ok.join(',') || '无') + '，失败 ' + fail.length + ' 个', fail.length ? 'warn' : 'success');
+  }
+  async function icListShareAccounts() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var sel = document.getElementById('icImageSelect');
+    var imageId = sel ? sel.value : '';
+    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像'); return; }
+    var st = document.getElementById('icShareStatus');
+    st.innerHTML = '⏳ 正在查询镜像 ' + imageId + ' 的共享账号...';
+    var users = [], page = 1;
+    try {
+      while (page <= 10) {
+        var r = await AliyunClient.callCentralApi('ListCustomImageShareAccounts', {
+          RegionId: region, ImageId: imageId, PageSize: 50, PageNumber: page
+        });
+        var arr = (r && (r.ImageShareUsers || r.ImageShareUsersList || []));
+        if (Array.isArray(arr)) users = users.concat(arr);
+        var total = parseInt((r && r.TotalCount) || 0, 10);
+        if (users.length >= total || !arr || !arr.length) break;
+        page++;
+      }
+    } catch (e) {
+      st.innerHTML = '❌ 查询失败：' + ((e && (e.message || e.code)) || e);
+      return;
+    }
+    if (!users.length) {
+      st.innerHTML = '📋 镜像 ' + imageId + ' 当前没有共享给任何账号。';
+      return;
+    }
+    var items = users.map(function (u) {
+      return (typeof u === 'string') ? u : (u.AccountId || u.Account || u.accountId || JSON.stringify(u));
+    });
+    st.innerHTML = '📋 镜像 <b>' + imageId + '</b> 已共享给 <b>' + items.length + '</b> 个账号：<code>' +
+      items.join('</code>、<code>') + '</code>';
+  }
+  async function icRemoveAllShareAccounts() {
+    if (!icGuard()) return;
+    var region = icGetRegion();
+    var sel = document.getElementById('icImageSelect');
+    var imageId = sel ? sel.value : '';
+    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像'); return; }
+    if (!confirm('确认取消镜像 ' + imageId + ' 的全部跨账号共享？取消后对方账号将无法再用该镜像开通。')) return;
+    var st = document.getElementById('icShareStatus');
+    st.innerHTML = '⏳ 正在查询并取消共享...';
+    var users = [];
+    try {
+      var r = await AliyunClient.callCentralApi('ListCustomImageShareAccounts', {
+        RegionId: region, ImageId: imageId, PageSize: 50, PageNumber: 1
+      });
+      users = (r && (r.ImageShareUsers || r.ImageShareUsersList || [])) || [];
+    } catch (e) {
+      st.innerHTML = '❌ 查询共享列表失败：' + ((e && (e.message || e.code)) || e);
+      return;
+    }
+    var items = users.map(function (u) {
+      return (typeof u === 'string') ? u : (u.AccountId || u.Account || u.accountId || '');
+    }).filter(Boolean);
+    if (!items.length) { st.innerHTML = '📋 该镜像当前没有共享给任何账号，无需取消。'; return; }
+    var ok = [], fail = [];
+    for (var i = 0; i < items.length; i++) {
+      try {
+        await AliyunClient.callCentralApi('RemoveCustomImageShareAccount', {
+          RegionId: region, ImageId: imageId, 'Account.1': items[i]
+        });
+        ok.push(items[i]);
+      } catch (e1) {
+        try {
+          await AliyunClient.callCentralApi('RemoveCustomImageShareAccount', {
+            RegionId: region, ImageId: imageId, Account: items[i]
+          });
+          ok.push(items[i]);
+        } catch (e2) {
+          fail.push(items[i] + '：' + ((e2 && (e2.message || e2.code)) || '未知错误'));
+        }
+      }
+    }
+    var html = '❌ 取消共享完成（' + ok.length + '/' + items.length + '）';
+    if (ok.length) html += '<br>✅ 已取消：<code>' + ok.join('</code>、<code>') + '</code>';
+    if (fail.length) html += '<br>⚠️ 失败（可重试）：<span style="color:#cf1322;">' + fail.join('<br>') + '</span>';
+    st.innerHTML = html;
+    icLog('[镜像克隆] 取消共享镜像 ' + imageId + '，取消 ' + ok.length + ' 个账号', fail.length ? 'warn' : 'success');
+  }
+
   // ====== [合并自本地旧版] 只下单不扣费：调 SWAS CreateOrder ======
   // 阿里云 SWAS CreateInstances 不支持 AutoPay 参数，调用即扣费；
   // 想"只生成待支付订单不扣费"必须走 CreateOrder（Commodity.AutoPay=false）。
@@ -715,8 +840,10 @@
     if (!icGuard()) return;
     var region = icGetRegion();
     var sel = document.getElementById('icImageSelect');
-    var imageId = sel ? sel.value : '';
-    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像'); return; }
+    var manualInput = document.getElementById('icManualImageId');
+    var manualId = manualInput ? (manualInput.value || '').trim() : '';
+    var imageId = manualId || (sel ? sel.value : '');
+    if (!imageId) { alert('请先「② 加载并选择」一个自定义镜像，或在③「指定镜像 ImageId」里填写（如其他账号共享来的 m-xxx）'); return; }
     var planId = (document.getElementById('icPlanId').value || '').trim();
     var amount = parseInt(document.getElementById('icAmount').value, 10) || 1;
     var period = parseInt(document.getElementById('icPeriod').value, 10) || 1;
@@ -2367,6 +2494,9 @@
   window.icBizToggleAll = icBizToggleAll;
   window.icBizUpdateBar = icBizUpdateBar;
   window.icBizDeleteSelected = icBizDeleteSelected;
+  window.icShareImage = icShareImage;
+  window.icListShareAccounts = icListShareAccounts;
+  window.icRemoveAllShareAccounts = icRemoveAllShareAccounts;
   // 手动指定 nodeId 查详情（默认填 f670e4ea965c392ef44dca557b320a43）
   async function icQuerySelectedEdgeDetail() {
     var st = document.getElementById('icBindStatus');

@@ -88,15 +88,31 @@ detect_loc() {
   [ -z "$p" ] && p="浙江"; [ -z "$c" ] && c="杭州"; echo "${p}|${c}"
 }
 # ★ 真 SN 回填 + 再流转（抽成函数，正常部署与「快捷路径」共用）
-# ★ 克隆机场景默认删旧 SN 重新生成（克隆机会继承黄金机的 ipes_sn → 业务ID冲突），
-#   缓存不受影响（缓存全在 /data/happ，SN 文件在容器内）。Q2_NEW_SN=0 可跳过。
+# ★ 克隆机场景默认重建容器注入自定义指纹（Q2_NEW_SN=1 默认开，=2 强制换新，=0 关）：
+#   克隆盘会把黄金机的磁盘 UUID 一起克隆 → ipes 以磁盘指纹派生 phy_sn → 逻辑SN 与黄金机
+#   完全相同（业务ID冲突）。实测删 SN 文件+重启无效（指纹确定性派生，会再生出同一个）。
+#   正解 = 重建容器并注入 -e IPES_PHY_SN=<随机32hex>（缓存挂载原样保留，缓存不受影响）。
+#   phy_sn 持久化到 /opt/ipes/ipes_phy_sn_custom → 重跑幂等（同指纹=同SN，不漂移）。
 sn_flow() {
   say "  [SN] 读真SN → 回填 → 再流转服务中…"
-  if [ "${Q2_NEW_SN:-1}" = "1" ]; then
-    say "     [新SN] 删除旧SN并重启 ipes 以重新生成…"
-    docker exec ipes rm -f /app/ipes/bin/ipes_sn 2>/dev/null
-    docker restart ipes >/dev/null 2>&1 || true
-    sleep 5
+  if [ "${Q2_NEW_SN:-1}" != "0" ]; then
+    local PHY_FILE=/opt/ipes/ipes_phy_sn_custom
+    if [ "${Q2_NEW_SN}" = "2" ] || [ ! -s "$PHY_FILE" ]; then
+      openssl rand -hex 16 2>/dev/null > "$PHY_FILE" || \
+        { head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$PHY_FILE"; }
+    fi
+    local PHY; PHY=$(cat "$PHY_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$PHY" ] && docker ps -a --format '{{.Names}}' | grep -qx ipes; then
+      say "     [新SN] 以自定义指纹重建容器（挂载/缓存不变）: phy=${PHY:0:8}…"
+      local OLD_IMG MOUNTS
+      OLD_IMG=$(docker inspect ipes --format '{{.Config.Image}}' 2>/dev/null); OLD_IMG=${OLD_IMG:-$IMG}
+      MOUNTS=$(docker inspect ipes --format '{{range .Mounts}} -v {{.Source}}:{{.Destination}}{{end}}' 2>/dev/null)
+      docker rm -f ipes >/dev/null 2>&1
+      docker run -itd --restart=always --name=ipes --network=host \
+        -e IPES_PHY_SN="$PHY" $MOUNTS "$OLD_IMG" \
+        sh -c '/app/ipes/bin/ipes start && tail -f /dev/null' >/dev/null 2>&1
+      sleep 5
+    fi
   fi
   local SN=""
   for i in $(seq 1 24); do

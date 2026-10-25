@@ -143,9 +143,11 @@ if doctor_ok && docker image inspect "$IMG" >/dev/null 2>&1 \
 fi
 if [ "$FAST" = "1" ]; then
   CACHE_PROTECT=1
+  T_PAR=$T0; T_NINE=$T0   # O5：快路径无重装阶段，打点对齐，避免负数耗时
   docker start ipes >/dev/null 2>&1 || true
   for _c in $(seq 1 12); do docker ps --format '{{.Names}}' | grep -qx ipes && break; sleep 5; done
   sn_flow
+  T_SN=$(date +%s)
   say ""; say "===== [3/4] doctor 已存在，跳过安装 ====="
   say "  保活cron: $(crontab -l 2>/dev/null | grep -cE 'ipes_health|health_check') 条"
 else

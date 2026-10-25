@@ -18,6 +18,7 @@
 #   回退开关：
 #     Q2_NO_PARALLEL=1  退回「绑定 → docker → Q2」串行（其余优化保留）
 #     Q2_SKIP_PATCH=1   不 patch 官方脚本（sleep 90s 原样保留）
+#     Q2_NEW_SN=0       不重新生成 SN（默认=1：删继承的旧 SN 重新生成，克隆机防业务ID冲突）
 #
 #   用法：export Q2_JWT=xxx Q2_AK=xxx Q2_SK=xxx 后
 #         nohup bash q2_oneclick_v6_cache_safe.sh > /tmp/q2_v5.log 2>&1 &
@@ -87,9 +88,11 @@ detect_loc() {
   [ -z "$p" ] && p="浙江"; [ -z "$c" ] && c="杭州"; echo "${p}|${c}"
 }
 # ★ 真 SN 回填 + 再流转（抽成函数，正常部署与「快捷路径」共用）
+# ★ 克隆机场景默认删旧 SN 重新生成（克隆机会继承黄金机的 ipes_sn → 业务ID冲突），
+#   缓存不受影响（缓存全在 /data/happ，SN 文件在容器内）。Q2_NEW_SN=0 可跳过。
 sn_flow() {
   say "  [SN] 读真SN → 回填 → 再流转服务中…"
-  if [ "${Q2_NEW_SN:-0}" = "1" ]; then
+  if [ "${Q2_NEW_SN:-1}" = "1" ]; then
     say "     [新SN] 删除旧SN并重启 ipes 以重新生成…"
     docker exec ipes rm -f /app/ipes/bin/ipes_sn 2>/dev/null
     docker restart ipes >/dev/null 2>&1 || true

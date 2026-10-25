@@ -385,6 +385,112 @@
     } catch (e) { if (st) st.textContent = '❌ 保存失败: ' + e.message; }
   };
 
+  // 🔄 一键刷新 admin Token：调 /api/base/captcha 弹验证码 → /api/base/login 换新 token → 自动回填保存
+  // 背景：admin 后端登录强制验证码（实测 code:7「CaptchaId值不能为空/验证码错误」），无法静默自动登录，
+  // 所以做成「点按钮 → 弹验证码图 → 输 4 位码 → 自动拿到最新 token」，免去 F12 翻 localStorage。
+  window.icRefreshToken = async function () {
+    function setSt(t) { var el = document.getElementById('icBindTokenStatus'); if (el) el.textContent = t; }
+    try {
+      // ① 登录凭证：优先读本机缓存，没有则询问一次（保存到本机 localStorage，之后刷新免输）
+      var user = '', pass = '';
+      try { user = localStorage.getItem('zy_admin_user') || ''; pass = localStorage.getItem('zy_admin_pass') || ''; } catch (e) {}
+      if (!user || !pass) {
+        user = prompt('舟翼云 admin（admin.zhouyi.top）登录账号：\n（保存到本机浏览器，下次刷新免输）');
+        if (user === null) return;
+        pass = prompt('舟翼云 admin 登录密码：');
+        if (pass === null) return;
+        try { localStorage.setItem('zy_admin_user', user.trim()); localStorage.setItem('zy_admin_pass', pass); } catch (e2) {}
+      }
+      setSt('⏳ 正在获取验证码...');
+      // ② 拉验证码
+      var capJson = await icZyyFetchJson('POST', '/api/base/captcha', {});
+      if (!capJson || capJson.code !== 0 || !capJson.data || !capJson.data.captchaId) {
+        throw new Error('获取验证码失败: ' + (capJson ? (capJson.msg || JSON.stringify(capJson).slice(0, 120)) : 'HTTP 异常'));
+      }
+      var pic = capJson.data.picPath || '';
+      if (pic && !/^data:image/.test(pic)) pic = 'data:image/png;base64,' + pic;
+      // ③ 弹验证码弹窗（点图可换一张）
+      var cap = await icCaptchaDialog(pic, capJson.data.captchaLength || 4, capJson.data.captchaId);
+      if (!cap) { setSt(''); return; }  // 用户取消
+      setSt('⏳ 正在登录换取最新 token...');
+      // ④ 登录换 token（gin-vue-admin 标准：{code:0,data:{token,expiresAt}}）
+      var loginJson = await icZyyFetchJson('POST', '/api/base/login', {
+        username: user.trim(), password: pass, captcha: cap.captcha, captchaId: cap.captchaId
+      });
+      if (!loginJson || loginJson.code !== 0 || !loginJson.data || !loginJson.data.token) {
+        throw new Error(loginJson ? ('admin: ' + (loginJson.msg || JSON.stringify(loginJson).slice(0, 120))) : 'HTTP 异常');
+      }
+      var token = loginJson.data.token;
+      // ⑤ 回填输入框 + 同步 ocdToken + 写 localStorage（与 icBindSaveToken 同口径）
+      var tokenEl = document.getElementById('icBindToken');
+      if (tokenEl) tokenEl.value = token;
+      var ocdToken = document.getElementById('ocdToken');
+      if (ocdToken) ocdToken.value = token;
+      try { localStorage.setItem('zy_admin_token', token); } catch (e2) {}
+      setSt('✅ 已从舟翼云 API 拉取最新 token 并保存（' + new Date().toLocaleTimeString() + '）');
+    } catch (e) {
+      setSt('❌ 刷新失败: ' + (e.message || e));
+    }
+  };
+
+  // admin.zhouyi.top 裸 JSON 调用（登录/验证码接口无需 x-token，浏览器直连）
+  async function icZyyFetchJson(method, path, body) {
+    var resp = await fetch('https://admin.zhouyi.top' + path, {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body == null ? undefined : JSON.stringify(body)
+    });
+    var json = null;
+    try { json = await resp.json(); } catch (e) {}
+    if (!json) throw new Error('HTTP ' + resp.status + '（非 JSON 响应' + (resp.status === 0 ? '/CORS 拦截' : '') + '）');
+    return json;
+  }
+
+  // 验证码弹窗：resolve {captcha, captchaId}；取消 → null。点图片换一张（换图同时换 captchaId）
+  function icCaptchaDialog(picPath, capLen, captchaId) {
+    return new Promise(function (resolve) {
+      var mask = document.createElement('div');
+      mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
+      var box = document.createElement('div');
+      box.style.cssText = 'background:#fff;border-radius:10px;padding:18px 20px;min-width:300px;box-shadow:0 8px 30px rgba(0,0,0,.25);text-align:center;';
+      box.innerHTML =
+        '<div style="font-size:14px;font-weight:bold;margin-bottom:10px;">🔄 拉取最新 Token · 输入验证码</div>' +
+        '<img id="icCapImg" src="' + picPath + '" style="width:200px;height:64px;border:1px solid #eee;border-radius:6px;cursor:pointer;" title="看不清？点击换一张" />' +
+        '<input id="icCapInput" class="input" maxlength="' + (capLen || 6) + '" placeholder="输入验证码（点图可换）" style="width:100%;margin-top:10px;text-align:center;font-size:16px;letter-spacing:4px;" />' +
+        '<div style="display:flex;gap:8px;margin-top:12px;">' +
+        '<button id="icCapCancel" type="button" class="btn btn-sm" style="flex:1;">取消</button>' +
+        '<button id="icCapOk" type="button" class="btn btn-sm btn-primary" style="flex:1;">确认拉取</button>' +
+        '</div>';
+      mask.appendChild(box);
+      document.body.appendChild(mask);
+      var input = box.querySelector('#icCapInput');
+      var curCaptchaId = captchaId || '';
+      var done = false;
+      function close(val) { if (done) return; done = true; document.body.removeChild(mask); resolve(val); }
+      async function refreshImg() {
+        try {
+          var j = await icZyyFetchJson('POST', '/api/base/captcha', {});
+          if (j && j.code === 0 && j.data && j.data.captchaId) {
+            curCaptchaId = j.data.captchaId;
+            var p = j.data.picPath || '';
+            if (p && !/^data:image/.test(p)) p = 'data:image/png;base64,' + p;
+            box.querySelector('#icCapImg').src = p;
+            input.value = '';
+          }
+        } catch (e) {}
+      }
+      box.querySelector('#icCapImg').addEventListener('click', refreshImg);
+      box.querySelector('#icCapCancel').addEventListener('click', function () { close(null); });
+      box.querySelector('#icCapOk').addEventListener('click', function () {
+        var code = (input.value || '').trim();
+        if (!code) { input.focus(); return; }
+        close({ captcha: code, captchaId: curCaptchaId || '' });
+      });
+      input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { box.querySelector('#icCapOk').click(); } });
+      setTimeout(function () { input.focus(); }, 50);
+    });
+  }
+
   // 读取 token 的优先级：本页输入框 > 一键部署面板 > localStorage
   function icGetAdminToken() {
     var token = '';

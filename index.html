@@ -506,6 +506,7 @@
                     <div style="display:flex;gap:8px;" data-page-node-id="Pm7EnPjAC9N3jCVfs3jjza">
                       <input type="text" id="icBindToken" class="input" placeholder="从浏览器 F12 请求头复制 x-token" style="flex:1;" data-page-node-id="jpzz9KqAKes1yiwMyK3Hnh" />
                       <button type="button" class="btn btn-sm" onclick="icBindSaveToken()" style="white-space:nowrap;" data-page-node-id="xAKIACIbc14NNQypUAbS0S">💾 保存凭证</button>
+                      <button type="button" class="btn btn-sm" onclick="icRefreshToken()" style="white-space:nowrap;" title="从舟翼云 API 自动登录拉取最新 token（需输一次验证码）">🔄 刷新Token</button>
                     </div>
                     <span id="icBindTokenStatus" style="font-size:12px;color:#999;" data-page-node-id="x4Pk0cmcTgwJ3lk9jMLydM"></span>
                   </div>
@@ -778,7 +779,7 @@
   <script src="ai-client.js?v=3"></script>
   <script src="app.js?v=115"></script>
   <script src="one-click-deploy.js?v=17"></script>
-  <script src="image-clone.js?v=20&r=36"></script>
+  <script src="image-clone.js?v=20&r=37"></script>
   <script>
     // 管理员权限控制：仅 zhangruiyao 可见「镜像克隆」
     (function() {

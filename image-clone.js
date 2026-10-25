@@ -2227,11 +2227,44 @@
         insts = insts.concat(more);
         page++;
       }
+      // v21：只显示「自定义镜像克隆机」，其余（黄金机/裸机等）整行不显示
+      var cloneSet = {};
+      function icAddClone(k, v) {
+        if (!v || v.kind !== 'clone') return;
+        if (/^[0-9a-f]{32}$/i.test(k)) cloneSet[k] = 1;
+        if (v.instanceId && /^[0-9a-f]{32}$/i.test(v.instanceId)) cloneSet[v.instanceId] = 1;
+      }
+      try { var lbm = icLoadCloneBizMap() || {}; Object.keys(lbm).forEach(function (k) { icAddClone(k, lbm[k]); }); } catch (e) {}
+      try {
+        if (window.OcdBizCloud) {
+          var cbm = await window.OcdBizCloud.load();
+          if (cbm) Object.keys(cbm).forEach(function (k) { icAddClone(k, cbm[k]); });
+        }
+      } catch (e) {}
+      // 兜底：无克隆记录时，用当前选中的自定义镜像 ImageId 匹配实例 ImageId
+      if (!Object.keys(cloneSet).length) {
+        try {
+          var selImg = (document.getElementById('icImageSelect') || {}).value || '';
+          if (selImg) {
+            insts.forEach(function (x) { if ((x.ImageId || x.imageId || '') === selImg) cloneSet[x.InstanceId || x.instanceId] = 1; });
+          }
+        } catch (e) {}
+      }
+      var totalAll = insts.length;
+      insts = insts.filter(function (x) {
+        var id = x.InstanceId || x.instanceId;
+        return cloneSet[id] && !icIsGolden(id);   // 🏆 黄金机即使有克隆记录也绝不显示
+      });
       icBindInstances = insts;
-      if (!insts.length) { box.innerHTML = '该地域暂无实例'; return; }
+      if (!insts.length) {
+        box.innerHTML = '该地域无「自定义镜像克隆机」记录（其余 ' + totalAll + ' 台已隐藏）';
+        icLog('[绑定舟翼云] 克隆机过滤：0/' + totalAll + ' 台显示（其余已隐藏）', 'info');
+        return;
+      }
       var running = insts.filter(function (x) { return (x.Status || x.status || '') === 'Running'; });
       box.innerHTML = '<label style="display:block;font-weight:600;margin-bottom:6px;cursor:pointer;">' +
-        '<input type="checkbox" id="icBindAll" checked onchange="icBindToggleAll(this)"> 全选（共 ' + insts.length + ' 台，其中运行中 ' + running.length + ' 台）</label>' +
+        '<input type="checkbox" id="icBindAll" checked onchange="icBindToggleAll(this)"> 全选（共 ' + insts.length + ' 台克隆机，其中运行中 ' + running.length + ' 台' +
+        (totalAll > insts.length ? '；已隐藏其余 ' + (totalAll - insts.length) + ' 台' : '') + '）</label>' +
         '<div style="border-top:1px solid #eee;padding-top:6px;">' +
         insts.map(function (x, i) {
           var id = x.InstanceId || x.instanceId;

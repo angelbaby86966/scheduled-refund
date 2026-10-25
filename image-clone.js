@@ -2241,15 +2241,26 @@
           if (cbm) Object.keys(cbm).forEach(function (k) { icAddClone(k, cbm[k]); });
         }
       } catch (e) {}
-      // 兜底：无克隆记录时，用当前选中的自定义镜像 ImageId 匹配实例 ImageId
-      if (!Object.keys(cloneSet).length) {
-        try {
-          var selImg = (document.getElementById('icImageSelect') || {}).value || '';
-          if (selImg) {
-            insts.forEach(function (x) { if ((x.ImageId || x.imageId || '') === selImg) cloneSet[x.InstanceId || x.instanceId] = 1; });
-          }
-        } catch (e) {}
-      }
+      // 核心判定：实例 ImageId ∈ 本账号自定义镜像列表 = 克隆机（不依赖映射表/下拉框）
+      try {
+        var ir = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
+        var imgs = [];
+        if (ir.Images && ir.Images.Image) imgs = ir.Images.Image;
+        else if (Array.isArray(ir.Images)) imgs = ir.Images;
+        else if (ir.Image) imgs = ir.Image;
+        else if (Array.isArray(ir.image)) imgs = ir.image;
+        var customIds = {};
+        (imgs || []).forEach(function (im) {
+          if (!im.ImageType || /custom/i.test(im.ImageType || '')) customIds[im.ImageId || ''] = 1;
+        });
+        insts.forEach(function (x) {
+          if (customIds[x.ImageId || x.imageId || '']) cloneSet[x.InstanceId || x.instanceId] = 1;
+        });
+        // 兜底：当前选中的镜像也纳入（防列表接口漏掉）
+        var selImg = (document.getElementById('icImageSelect') || {}).value || '';
+        if (selImg) insts.forEach(function (x) { if ((x.ImageId || x.imageId || '') === selImg) cloneSet[x.InstanceId || x.instanceId] = 1; });
+        icLog('[绑定舟翼云] 克隆机判定：自定义镜像 ' + Object.keys(customIds).length + ' 个，命中 ' + Object.keys(cloneSet).length + ' 台', 'info');
+      } catch (e) { icLog('[绑定舟翼云] 自定义镜像匹配失败: ' + e.message, 'warn'); }
       var totalAll = insts.length;
       insts = insts.filter(function (x) {
         var id = x.InstanceId || x.instanceId;

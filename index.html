@@ -1053,9 +1053,11 @@
   </div>
   <script>
     // ====== SWAS 批量命令工具（OpenAPI 通道入口）======
-    // 走本地 127.0.0.1 服务，不受控制台「命令助手」CmdCount.ExceedQuota 配额限制
+    // 主路径：公网链接（换电脑 / 换网络 / 别人都能用）
+    // 备选：本地 127.0.0.1 服务（离线时的兜底）
     (function() {
-      var CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
+      var PUBLIC_URL = 'https://swas-batch-cmd.app.workbuddy.host/?sharecode=R3Y47IVJ52';
+      var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
       var TOOL_NAME = 'SWAS 批量命令工具';
 
       function showTip(html, ok) {
@@ -1077,46 +1079,58 @@
           var done = false;
           var ctl = new AbortController();
           var timer = setTimeout(function(){ if(!done){ done=true; try{ctl.abort();}catch(e){} resolve(false); } }, 1500);
-          fetch(url + '/api/accounts', { signal: ctl.signal, cache: 'no-store' })
+          fetch(url + '/api/health', { signal: ctl.signal, cache: 'no-store' })
             .then(function(r){ if(!done){ done=true; clearTimeout(timer); resolve(r.ok); } })
             .catch(function(){ if(!done){ done=true; clearTimeout(timer); resolve(false); } });
         });
       }
 
       async function openBatchCmdTool() {
-        var found = null;
-        for (var i = 0; i < CANDIDATES.length; i++) {
-          if (await probe(CANDIDATES[i])) { found = CANDIDATES[i]; break; }
-        }
-        if (found) {
-          window.open(found, '_blank', 'noopener');
+        // 1) 优先公网（任何设备都能用）
+        if (await probe(PUBLIC_URL.split('?')[0] + '/api/health?sharecode=R3Y47IVJ52')) {
+          window.open(PUBLIC_URL, '_blank', 'noopener');
           return;
         }
+        // 2) 备选：本地服务
+        for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
+          if (await probe(LOCAL_CANDIDATES[i])) {
+            window.open(LOCAL_CANDIDATES[i], '_blank', 'noopener');
+            return;
+          }
+        }
+        // 3) 都不可用 → 给公网链接 + 本地启动方式
         showTip(
-          '⚠️ <b>' + TOOL_NAME + '</b> 服务未启动\n\n'
-          + '该工具跑在本机 127.0.0.1:8899（走 SWAS OpenAPI 通道，绕开控制台命令助手配额）。\n\n'
-          + '请在终端执行：\n'
+          '⚠️ <b>' + TOOL_NAME + '</b> 暂时无法打开\n\n'
+          + '公网链接（推荐，任何电脑/网络都能用）：\n'
+          + '<a href="' + PUBLIC_URL + '" target="_blank" style="color:#ff6a00;word-break:break-all">'
+          + PUBLIC_URL + '</a>\n\n'
+          + '或在本机启动本地版：\n'
           + '<code style="background:#f2f3f5;padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px">'
-          + 'cd swas_batch_web && python3 server.py 8899</code>\n\n'
-          + '然后再点一次本按钮。', false);
+          + 'cd swas_batch_web && python3 server.py 8899</code>', false);
       }
 
       window.openBatchCmdTool = openBatchCmdTool;
 
-      // 启动后探测一次：在线就把按钮标题标绿，不在线保持普通样式
+      // 启动后探测公网，在线就把按钮标成主题色
       window.addEventListener('load', function() {
         var btn = document.getElementById('btnBatchCmd');
         if (!btn) return;
         (async function() {
-          for (var i = 0; i < CANDIDATES.length; i++) {
-            if (await probe(CANDIDATES[i])) {
+          if (await probe(PUBLIC_URL.split('?')[0] + '/api/health?sharecode=R3Y47IVJ52')) {
+            btn.style.color = 'var(--primary)';
+            btn.style.borderBottomColor = 'var(--primary)';
+            btn.title = TOOL_NAME + ' — 公网在线，点击打开（换电脑/换网络都能用）';
+            return;
+          }
+          for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
+            if (await probe(LOCAL_CANDIDATES[i])) {
               btn.style.color = 'var(--primary)';
               btn.style.borderBottomColor = 'var(--primary)';
-              btn.title = TOOL_NAME + ' — 服务运行中，点击打开';
+              btn.title = TOOL_NAME + ' — 本地服务运行中，点击打开';
               return;
             }
           }
-          btn.title = TOOL_NAME + ' — 服务未启动，点击查看启动方法';
+          btn.title = TOOL_NAME + ' — 点击查看访问方式';
         })();
       });
     })();

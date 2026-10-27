@@ -1057,6 +1057,7 @@
     // 备选：本地 127.0.0.1 服务（离线时的兜底）
     (function() {
       var PUBLIC_URL = 'https://swas-batch-cmd.app.workbuddy.host/?sharecode=R3Y47IVJ52';
+      var PUBLIC_HEALTH = 'https://swas-batch-cmd.app.workbuddy.host/api/health?sharecode=R3Y47IVJ52';
       var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
       var TOOL_NAME = 'SWAS 批量命令工具';
 
@@ -1074,39 +1075,40 @@
         setTimeout(function(){ if(document.body.contains(box)) box.remove(); }, ok ? 4000 : 12000);
       }
 
-      function probe(url) {
+      // 探测：传入完整 URL，不再自行拼接路径（避免 sharecode 后被再次拼接导致 403）
+      function probe(fullUrl) {
         return new Promise(function(resolve) {
           var done = false;
           var ctl = new AbortController();
-          var timer = setTimeout(function(){ if(!done){ done=true; try{ctl.abort();}catch(e){} resolve(false); } }, 1500);
-          fetch(url + '/api/health', { signal: ctl.signal, cache: 'no-store' })
+          var timer = setTimeout(function(){ if(!done){ done=true; try{ctl.abort();}catch(e){} resolve(false); } }, 4000);
+          fetch(fullUrl, { signal: ctl.signal, cache: 'no-store', mode: 'cors' })
             .then(function(r){ if(!done){ done=true; clearTimeout(timer); resolve(r.ok); } })
             .catch(function(){ if(!done){ done=true; clearTimeout(timer); resolve(false); } });
         });
       }
 
       async function openBatchCmdTool() {
-        // 1) 优先公网（任何设备都能用）
-        if (await probe(PUBLIC_URL.split('?')[0] + '/api/health?sharecode=R3Y47IVJ52')) {
+        // 1) 优先公网（任何设备/网络都能用）
+        if (await probe(PUBLIC_HEALTH)) {
           window.open(PUBLIC_URL, '_blank', 'noopener');
           return;
         }
         // 2) 备选：本地服务
         for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
-          if (await probe(LOCAL_CANDIDATES[i])) {
+          if (await probe(LOCAL_CANDIDATES[i] + '/api/health')) {
             window.open(LOCAL_CANDIDATES[i], '_blank', 'noopener');
             return;
           }
         }
-        // 3) 都不可用 → 给公网链接 + 本地启动方式
+        // 3) 探测失败不阻断：直接给链接让用户自己点（公网链接始终有效）
         showTip(
-          '⚠️ <b>' + TOOL_NAME + '</b> 暂时无法打开\n\n'
-          + '公网链接（推荐，任何电脑/网络都能用）：\n'
-          + '<a href="' + PUBLIC_URL + '" target="_blank" style="color:#ff6a00;word-break:break-all">'
+          '⚠️ <b>' + TOOL_NAME + '</b> 在线探测未通过，请直接点下面链接打开\n\n'
+          + '<a href="' + PUBLIC_URL + '" target="_blank" rel="noopener" style="color:#ff6a00;word-break:break-all;font-weight:600">'
           + PUBLIC_URL + '</a>\n\n'
-          + '或在本机启动本地版：\n'
+          + '（换电脑 / 换网络都能用，无需在本机启动任何东西）\n\n'
+          + '若本机已启动本地版，也可用：\n'
           + '<code style="background:#f2f3f5;padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px">'
-          + 'cd swas_batch_web && python3 server.py 8899</code>', false);
+          + 'cd swas_batch_pub && python3 server.py 8899</code>', false);
       }
 
       window.openBatchCmdTool = openBatchCmdTool;
@@ -1116,24 +1118,25 @@
         var btn = document.getElementById('btnBatchCmd');
         if (!btn) return;
         (async function() {
-          if (await probe(PUBLIC_URL.split('?')[0] + '/api/health?sharecode=R3Y47IVJ52')) {
+          if (await probe(PUBLIC_HEALTH)) {
             btn.style.color = 'var(--primary)';
             btn.style.borderBottomColor = 'var(--primary)';
             btn.title = TOOL_NAME + ' — 公网在线，点击打开（换电脑/换网络都能用）';
             return;
           }
           for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
-            if (await probe(LOCAL_CANDIDATES[i])) {
+            if (await probe(LOCAL_CANDIDATES[i] + '/api/health')) {
               btn.style.color = 'var(--primary)';
               btn.style.borderBottomColor = 'var(--primary)';
               btn.title = TOOL_NAME + ' — 本地服务运行中，点击打开';
               return;
             }
           }
-          btn.title = TOOL_NAME + ' — 点击查看访问方式';
+          btn.title = TOOL_NAME + ' — 点击打开（公网链接，任何电脑都能用）';
         })();
       });
     })();
   </script>
+
 </body>
 </html>

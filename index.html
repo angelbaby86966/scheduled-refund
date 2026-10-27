@@ -1088,11 +1088,14 @@
       }
 
       async function openBatchCmdTool() {
-        // 1) 优先公网（任何设备/网络都能用）
+        // 1) 优先公网（任何设备/网络都能用）；探测失败也照常打开，不阻断
         if (await probe(PUBLIC_HEALTH)) {
           window.open(PUBLIC_URL, '_blank', 'noopener');
           return;
         }
+        // 1.5) 探测失败 → 仍然直接打开公网链接（链接本身始终有效）
+        var w = window.open(PUBLIC_URL, '_blank', 'noopener');
+        if (w) return;
         // 2) 备选：本地服务
         for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
           if (await probe(LOCAL_CANDIDATES[i] + '/api/health')) {
@@ -1105,10 +1108,7 @@
           '⚠️ <b>' + TOOL_NAME + '</b> 在线探测未通过，请直接点下面链接打开\n\n'
           + '<a href="' + PUBLIC_URL + '" target="_blank" rel="noopener" style="color:#ff6a00;word-break:break-all;font-weight:600">'
           + PUBLIC_URL + '</a>\n\n'
-          + '（换电脑 / 换网络都能用，无需在本机启动任何东西）\n\n'
-          + '若本机已启动本地版，也可用：\n'
-          + '<code style="background:#f2f3f5;padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px">'
-          + 'cd swas_batch_pub && python3 server.py 8899</code>', false);
+          + '（换电脑 / 换网络都能用，无需在本机启动任何东西）', false);
       }
 
       window.openBatchCmdTool = openBatchCmdTool;

@@ -437,6 +437,26 @@ body {
   display: block;
 }
 
+/* ====== 外部工具入口按钮（SWAS 批量命令工具）====== */
+.tab-sep {
+  width: 1px;
+  height: 20px;
+  align-self: center;
+  margin: 0 6px;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+
+.tab.tab-ext {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+.tab.tab-ext:hover {
+  color: var(--primary);
+  background: var(--bg);
+}
+
 /* ====== 卡片 ====== */
 .card {
   background: var(--bg-card);

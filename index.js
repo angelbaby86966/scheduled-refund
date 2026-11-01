@@ -1,50 +1,62 @@
 /**
- * 阿里云轻量云服务器定时自动退订脚本
- * 服务端运行（GitHub Actions），关闭浏览器也能到点执行
- * 依赖：@alicloud/pop-core
+ * 阿里云轻量云服务器定时自动退订脚本（服务端版，与 scheduled_refund.py 语义一致）
  *
- * 退订策略（对齐前端 app.js?v=73 有界并发模式）：
+ * 部署：阿里云函数计算（FC）refund 函数；GitHub Actions 也跑 scheduled_refund.py，
+ *      两者读同一份 Supabase `user_data`、幂等，不冲突。
+ *
+ * 关键修复（2026-11-01）：
+ *   旧版 index.js 写死 9 个地域 + 单一全局 AK/SK，完全无视前端「按凭证 + 按地区」勾选，
+ *   每天 23:35 无脑退全部地域 → 用户取消勾选的地域照样被退（54 的北京、56 的杭州被误退）。
+ *   新版改为读取 Supabase `user_data`，严格按 schedule_ak_ids + schedule_cred_regions
+ *   只退「勾选的凭证 ∩ 勾选的地区」，未勾选地区一律不碰。
+ *
+ * 退订策略（对齐 scheduled_refund.py / 前端 app.js 有界并发模式）：
  *   1) 全局令牌桶：平滑到 REFUND_QPS 次/秒，避免突发尖峰触发限流
  *   2) 并发上限：worker 池最多 REFUND_CONCURRENCY 个在途请求
  *   3) 幂等：每个实例固定一个 clientToken，限流重试时复用，避免重复退款
  *   4) 单实例退避：Throttling/ServiceUnavailable 等瞬时错误指数退避重试，不阻塞其他 worker
  */
-const RPCClient = require('@alicloud/pop-core');
 
 // ====== 配置 ======
-const AK = process.env.ALIYUN_AK || '';
-const SK = process.env.ALIYUN_SK || '';
-const REGION_LIST = (process.env.REGIONS || 'cn-hangzhou,cn-beijing,cn-shanghai,cn-shenzhen,cn-chengdu,cn-guangzhou,cn-heyuan,cn-wuhan-lr,cn-wulanchabu')
-  .split(',').map(s => s.trim()).filter(Boolean);
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://opauwtkivhjxlijfqaix.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
+const REST_BASE = SUPABASE_URL.replace(/\/$/, '') + '/rest/v1';
+
+// 旧版单一全局 AK/SK：仅在用户 data 里完全没有 ak_profiles（纯老数据）时作为兜底
+const LEGACY_AK = process.env.ALIYUN_AK || '';
+const LEGACY_SK = process.env.ALIYUN_SK || '';
 
 const REFUND_CONCURRENCY = 8;     // 同时最多在途请求数（有界并发上限）
 const REFUND_QPS = 8;             // 目标平稳速率（令牌桶：容量=QPS，refill=QPS/秒）
 const REFUND_MAX_RETRY = 5;       // 单实例限流最大重试次数
-const REFUND_BACKOFF_MAX_MS = 5000; // 单实例退避最大等待毫秒（v83 对齐前端：400ms 起、封顶 5s）
-const REFUND_PER_INSTANCE_TIMEOUT = 60000; // 单实例请求超时
+const REFUND_BACKOFF_MAX_MS = 5000;
+const REFUND_PER_INSTANCE_TIMEOUT = 60000;
 
-const REGION_NAMES = {
-  'cn-hangzhou': '杭州',
-  'cn-beijing': '北京',
-  'cn-shanghai': '上海',
-  'cn-shenzhen': '深圳',
-  'cn-chengdu': '成都',
-  'cn-guangzhou': '广州',
-  'cn-heyuan': '河源',
-  'cn-wuhan-lr': '武汉',
+// 地域表（与前端 REGION_INFO / scheduled_refund.py 一致）
+const REGION_INFO = {
+  'cn-hangzhou': '杭州', 'cn-beijing': '北京', 'cn-shanghai': '上海', 'cn-shenzhen': '深圳',
+  'cn-chengdu': '成都', 'cn-guangzhou': '广州', 'cn-heyuan': '河源', 'cn-wuhan-lr': '武汉',
   'cn-wulanchabu': '乌兰察布',
 };
+// 默认禁用地区（与 scheduled_refund.py DISABLED_REGIONS_DEFAULT 一致）
+const DISABLED_REGIONS_DEFAULT = ['cn-heyuan', 'cn-wuhan-lr', 'cn-wulanchabu'];
 
-// ====== 黄金机 / 退订豁免 硬保护 ======
-// ⚠️ 权威 ID 来自「舟翼云 PCDN 项目长期记忆」：
-//    现役 2 台黄金机（cn-shanghai），任何情况下都不得退订 / 释放 / 重置：
-//      ① 1341164c82ed49a6ae0ab8c89b7eed37（公网 IP 47.116.51.223）
-//      ② f05cf2489e41413382dfc944773386b8（公网 IP 47.101.145.6）
-//    曾经的黄金机（杭州 9f2adaf7…）账号已注销，按用户要求「 former 不管」，不再纳入保护。
-//    双保险：实例 ID + 公网 IP。与 scheduled_refund.py 保持同源常量。
+function computeActiveRegions() {
+  const envWhite = (process.env.REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (envWhite.length) return envWhite.filter(r => REGION_INFO[r]);
+  const envBlack = process.env.DISABLED_REGIONS;
+  const disabled = (envBlack !== undefined && envBlack !== null)
+    ? envBlack.split(',').map(s => s.trim()).filter(Boolean)
+    : DISABLED_REGIONS_DEFAULT;
+  return Object.keys(REGION_INFO).filter(r => !disabled.includes(r));
+}
+const ACTIVE_REGIONS = computeActiveRegions();
+
+// ====== 黄金机 / 退订豁免 硬保护（与 scheduled_refund.py 同源常量）======
+// 现役 2 台黄金机（cn-shanghai），任何情况下都不得退订 / 释放 / 重置
 const GOLDEN_INSTANCE_IDS = new Set([
-  '1341164c82ed49a6ae0ab8c89b7eed37',  // ← 现役黄金机 ①（cn-shanghai，IP 47.116.51.223）—— 锁死，绝不退订
-  'f05cf2489e41413382dfc944773386b8',  // ← 现役黄金机 ②（cn-shanghai，IP 47.101.145.6）—— 锁死，绝不退订
+  '1341164c82ed49a6ae0ab8c89b7eed37',  // ← 现役黄金机 ①（cn-shanghai，IP 47.116.51.223）
+  'f05cf2489e41413382dfc944773386b8',  // ← 现役黄金机 ②（cn-shanghai，IP 47.101.145.6）
 ]);
 const GOLDEN_PUBLIC_IPS = new Set([
   '47.116.51.223',   // ← 现役黄金机 ① 公网 IP
@@ -57,28 +69,10 @@ const REFUND_EXEMPT_PUBLIC_IPS = new Set([
   '106.15.92.45',
 ]);
 
-function publicIpOf(it) {
-  const v = it && (it.PublicIpAddress || it.PublicIpAddresses);
-  if (Array.isArray(v)) return (v.find(Boolean) || '');
-  return (v || '');
-}
-function isGolden(it) {
-  const id = it && it.InstanceId;
-  if (id && GOLDEN_INSTANCE_IDS.has(id)) return true;
-  const ip = publicIpOf(it);
-  return !!(ip && GOLDEN_PUBLIC_IPS.has(ip));
-}
-function isRefundExempt(it) {
-  const id = it && it.InstanceId;
-  if (id && REFUND_EXEMPT_INSTANCE_IDS.has(id)) return true;
-  const ip = publicIpOf(it);
-  return !!(ip && REFUND_EXEMPT_PUBLIC_IPS.has(ip));
-}
-
 // ====== 工具 ======
-function now() { return new Date().toLocaleString('zh-CN', { hour12: false }); }
+function nowStr() { return new Date().toLocaleString('zh-CN', { hour12: false }); }
 function log(msg, level = 'info') {
-  const prefix = `[${now()}]`;
+  const prefix = `[${nowStr()}]`;
   if (level === 'error') console.error(prefix, '❌', msg);
   else if (level === 'warn') console.warn(prefix, '⚠️', msg);
   else if (level === 'success') console.log(prefix, '✅', msg);
@@ -106,24 +100,19 @@ function makeTokenBucket(capacity, refillPerSec) {
 }
 
 // ====== 客户端 ======
-if (!AK || !SK) {
-  log('缺少阿里云凭证：请设置 ALIYUN_AK 和 ALIYUN_SK 环境变量', 'error');
-  process.exit(1);
+const RPCClient = require('@alicloud/pop-core');
+function makeClients(ak, sk) {
+  return {
+    swas: new RPCClient({
+      endpoint: 'https://swas-open.aliyuncs.com', apiVersion: '2020-06-01',
+      accessKeyId: ak, accessKeySecret: sk,
+    }),
+    bss: new RPCClient({
+      endpoint: 'https://business.aliyuncs.com', apiVersion: '2017-12-14',
+      accessKeyId: ak, accessKeySecret: sk,
+    }),
+  };
 }
-
-const swasClient = new RPCClient({
-  endpoint: 'https://swas-open.aliyuncs.com',
-  apiVersion: '2020-06-01',
-  accessKeyId: AK,
-  accessKeySecret: SK,
-});
-
-const bssClient = new RPCClient({
-  endpoint: 'https://business.aliyuncs.com',
-  apiVersion: '2017-12-14',
-  accessKeyId: AK,
-  accessKeySecret: SK,
-});
 
 // ====== 错误分类 ======
 const THROTTLE_PATTERNS = [
@@ -142,43 +131,37 @@ const LOCKED_PATTERNS = [
 function isThrottle(msg) { return THROTTLE_PATTERNS.some(p => msg.includes(p)); }
 function isLocked(msg) { return LOCKED_PATTERNS.some(p => msg.includes(p)); }
 
-// ====== API 调用 ======
-async function listInstancesInRegion(regionId) {
-  const instances = [];
-  let page = 1;
-  while (true) {
-    try {
-      const res = await swasClient.request('DescribeInstances', {
-        RegionId: regionId,
-        PageNumber: page,
-        PageSize: 100,
-      }, { method: 'POST' });
-      const list = (res && res.Instances) || [];
-      instances.push(...list);
-      const total = (res && res.TotalCount) || list.length;
-      if (instances.length >= total) break;
-      page++;
-    } catch (e) {
-      log(`[${REGION_NAMES[regionId] || regionId}] 查询实例列表失败: ${e.message || e}`, 'error');
-      break;
-    }
-  }
-  return instances;
+function publicIpOf(it) {
+  const v = it && (it.PublicIpAddress || it.PublicIpAddresses);
+  if (Array.isArray(v)) return (v.find(Boolean) || '');
+  return (v || '');
+}
+function isGolden(it) {
+  const id = it && it.InstanceId;
+  if (id && GOLDEN_INSTANCE_IDS.has(id)) return true;
+  const ip = publicIpOf(it);
+  return !!(ip && GOLDEN_PUBLIC_IPS.has(ip));
+}
+function isRefundExempt(it) {
+  const id = it && it.InstanceId;
+  if (id && REFUND_EXEMPT_INSTANCE_IDS.has(id)) return true;
+  const ip = publicIpOf(it);
+  return !!(ip && REFUND_EXEMPT_PUBLIC_IPS.has(ip));
 }
 
-async function refundOne(regionId, instanceId, bucket) {
-  // 双保险：即使某实例绕过队列构建阶段的 IP 判断，也绝不对黄金机/豁免实例发起 RefundInstance
+// ====== 退订单实例 ======
+async function refundOne(clients, regionId, instanceId, bucket) {
   if (GOLDEN_INSTANCE_IDS.has(instanceId) || REFUND_EXEMPT_INSTANCE_IDS.has(instanceId)) {
-    log(`\u{1F6D1} [${REGION_NAMES[regionId] || regionId}] ${instanceId} 是黄金机/豁免实例，绝不退订`, 'warn');
+    log(`🔒 [${REGION_INFO[regionId] || regionId}] ${instanceId} 是黄金机/豁免实例，绝不退订`, 'warn');
     return { ok: false, id: instanceId, skipped: true };
   }
   await bucket.take(1);
   const clientToken = `scheduled-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-  const regionName = REGION_NAMES[regionId] || regionId;
+  const regionName = REGION_INFO[regionId] || regionId;
   let attempt = 0;
   while (true) {
     try {
-      await bssClient.request('RefundInstance', {
+      await clients.bss.request('RefundInstance', {
         InstanceId: instanceId,
         ProductCode: 'ace_eweb',
         ProductType: '',
@@ -209,7 +192,7 @@ async function refundOne(regionId, instanceId, bucket) {
   }
 }
 
-async function runBoundedRefund(tasks) {
+async function runBoundedRefund(clients, tasks) {
   const bucket = makeTokenBucket(REFUND_QPS, REFUND_QPS);
   const total = { success: 0, skipped: 0, locked: 0, fail: 0 };
   if (!tasks.length) return total;
@@ -217,8 +200,8 @@ async function runBoundedRefund(tasks) {
   async function worker() {
     while (idx < tasks.length) {
       const task = tasks[idx++];
-      const r = await refundOne(task.rid, task.iid, bucket);
-      const rn2 = REGION_NAMES[task.rid] || task.rid;
+      const r = await refundOne(clients, task.rid, task.iid, bucket);
+      const rn2 = REGION_INFO[task.rid] || task.rid;
       if (r.skipped && r.locked) { total.locked++; log(`🔒 [${rn2}] ${r.id}: ${r.err} (跳过)`, 'warn'); }
       else if (r.skipped) { total.skipped++; log(`⚪ [${rn2}] ${r.id}: 已不存在/已退订，跳过`); }
       else if (r.ok) { total.success++; }
@@ -236,45 +219,184 @@ async function runBoundedRefund(tasks) {
   return total;
 }
 
-// ====== 主流程 ======
-async function main() {
-  log(`启动定时退订：目标地域 ${REGION_LIST.map(r => REGION_NAMES[r] || r).join(' / ')}`);
-
-  // 1. 查询所有实例
-  const byRegion = {};
-  for (const rid of REGION_LIST) {
-    const list = await listInstancesInRegion(rid);
-    byRegion[rid] = list;
-    log(`[${REGION_NAMES[rid] || rid}] 查到 ${list.length} 台实例`);
+// ====== 列出某凭证【指定地区】实例 ======
+async function listInstancesInRegion(clients, regionId) {
+  const instances = [];
+  let page = 1;
+  while (true) {
+    try {
+      const res = await clients.swas.request('DescribeInstances', {
+        RegionId: regionId, PageNumber: page, PageSize: 100,
+      }, { method: 'POST' });
+      const list = (res && res.Instances) || [];
+      instances.push(...list);
+      const total = (res && res.TotalCount) || list.length;
+      if (instances.length >= total) break;
+      page++;
+    } catch (e) {
+      log(`[${REGION_INFO[regionId] || regionId}] 查询实例列表失败: ${e.message || e}`, 'error');
+      break;
+    }
   }
+  return instances;
+}
 
-  // 2. 构建任务队列
-  const tasks = [];
-  Object.keys(byRegion).forEach(rid => {
-    const arr = byRegion[rid] || [];
-    if (!arr.length) { log(`[${REGION_NAMES[rid] || rid}] 无实例，跳过`, 'info'); return; }
-    let added = 0;
-    arr.forEach(it => {
-      if (isGolden(it)) { log(`\u{1F6D1} [${REGION_NAMES[rid] || rid}] 跳过黄金机 ${it.InstanceId}（${publicIpOf(it) || '无公网'}），绝不退订`, 'warn'); return; }
-      if (isRefundExempt(it)) { log(`\u{1F6E1} [${REGION_NAMES[rid] || rid}] 跳过退订豁免实例 ${it.InstanceId}（${publicIpOf(it) || '无公网'}）`, 'warn'); return; }
-      tasks.push({ rid, iid: it.InstanceId });
-      added++;
-    });
-    log(`[${REGION_NAMES[rid] || rid}] 共 ${arr.length} 台，待退订 ${added} 台（已剔除黄金机/豁免实例）`, 'info');
+// ====== Supabase ======
+async function supabaseGetAllUserData() {
+  const url = REST_BASE + '/user_data?select=username,data';
+  const res = await fetch(url, {
+    headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
   });
+  if (!res.ok) throw new Error('Supabase 读取失败: HTTP ' + res.status);
+  return res.json();
+}
 
-  if (!tasks.length) {
-    log('未发现任何实例，无需退订', 'success');
+// ====== 选择逻辑（对齐 scheduled_refund.py）======
+function asIdSet(raw) {
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(raw.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim()));
+}
+function buildRegions(data) {
+  const wanted = asIdSet(data.schedule_region_ids);
+  if (!wanted.size) return new Set(ACTIVE_REGIONS);
+  const sel = ACTIVE_REGIONS.filter(r => wanted.has(r));
+  if (!sel.length) {
+    log('  ⛔ 勾选地区与当前启用地区无交集，本次不执行任何退订', 'ERROR');
+    return new Set();
+  }
+  return new Set(sel);
+}
+function buildCredRegions(data, label) {
+  const map = data.schedule_cred_regions;
+  if (map && typeof map === 'object' && Object.prototype.hasOwnProperty.call(map, label)) {
+    const wanted = asIdSet(map[label]);
+    if (!wanted.size) return new Set(); // 显式空数组 → 跳过该凭证
+    const sel = ACTIVE_REGIONS.filter(r => wanted.has(r));
+    if (!sel.length) {
+      log(`  ⛔ 凭证「${label}」勾选地区与启用地区无交集，跳过该凭证`, 'ERROR');
+      return new Set();
+    }
+    return new Set(sel);
+  }
+  // 显式选择模式（schedule_ak_ids 非空）：缺 schedule_cred_regions → 跳过，绝不回退并集
+  if (asIdSet(data.schedule_ak_ids).size) {
+    log(`  ⏭️ 凭证「${label}」在显式选择模式下未配置地区，跳过（避免误退全部地区）`, 'WARN');
+    return new Set();
+  }
+  return buildRegions(data); // 老数据全量
+}
+function buildCredentials(data) {
+  const profiles = Array.isArray(data.ak_profiles) ? data.ak_profiles : [];
+  const wanted = asIdSet(data.schedule_ak_ids);
+  const pick = wanted.size
+    ? profiles.filter(p => {
+        const id = String(p.id != null ? p.id : '').trim();
+        const nm = String(p.name != null ? p.name : '').trim();
+        return (id && wanted.has(id)) || (nm && wanted.has(nm));
+      })
+    : profiles;
+  const creds = [];
+  const seen = new Set();
+  for (const p of pick) {
+    const ak = String(p.ak_id || '').trim();
+    const sk = String(p.ak_secret || '').trim();
+    if (!ak || !sk) continue;
+    if (seen.has(ak)) continue;
+    seen.add(ak);
+    creds.push({ label: p.name || '?', ak, sk });
+  }
+  if (!creds.length && wanted.size) {
+    log('  ⛔ 已勾选凭证但在 ak_profiles 里没找到可用 AK/SK，本次不执行任何退订', 'ERROR');
+    return [];
+  }
+  return creds;
+}
+
+// ====== 北京时间 ======
+function beijingParts() {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  const m = {};
+  fmt.formatToParts(new Date()).forEach(p => { m[p.type] = p.value; });
+  return {
+    y: m.year, mo: m.month, d: m.day,
+    h: parseInt(m.hour, 10), mi: parseInt(m.minute, 10), s: parseInt(m.second, 10)
+  };
+}
+
+// ====== 处理单个用户 ======
+async function processUser(row) {
+  const username = row.username;
+  const data = row.data || {};
+  if (!data.schedule_enabled) return;
+  const hour = data.schedule_hour, minute = data.schedule_minute;
+  if (hour == null || minute == null) {
+    log(`用户 ${username}: 未配置定时时间，跳过`, 'WARN');
     return;
   }
-  log(`🔄 有界并发退订 ${tasks.length} 台（并发≤${REFUND_CONCURRENCY}，速率≤${REFUND_QPS}/秒，限流自动退避重试）...`, 'warn');
+  if (!(parseInt(hour, 10) === 23 && 35 <= parseInt(minute, 10) && parseInt(minute, 10) <= 59)) {
+    log(`用户 ${username}: 定时时间不在允许范围(23:35–23:59)，跳过`, 'WARN');
+    return;
+  }
+  const bj = beijingParts();
+  if (!(bj.h === 23 && bj.mi >= 35)) return;          // 仅在 23:35–23:59 窗口内执行
+  if (bj.mi < parseInt(minute, 10)) return;            // 窗口内但还没到设定分钟
 
-  // 3. 执行退订
-  const total = await runBoundedRefund(tasks);
+  const creds = buildCredentials(data);
+  if (!creds.length) { log(`用户 ${username}: 缺少可用凭证，跳过`, 'WARN'); return; }
 
-  log(`━━━━━━━━━━━━━━━━━━━━━━`);
-  log(`退订完成：成功 ${total.success} 台，跳过 ${total.skipped} 台，锁定 ${total.locked} 台，失败 ${total.fail} 台`, total.fail === 0 ? 'success' : 'warn');
-  if (total.fail > 0) process.exit(1);
+  log(`▶ 用户 ${username} 北京时间 ${String(bj.h).padStart(2,'0')}:${String(bj.mi).padStart(2,'0')} 触发定时退订（设定 ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}），共 ${creds.length} 个凭证`, 'WARN');
+
+  let grand = { success: 0, skipped: 0, locked: 0, fail: 0 };
+  for (const c of creds) {
+    const regions = buildCredRegions(data, c.label);
+    if (!regions.size) {
+      log(`  ⏭️ 凭证「${c.label}」无可执行地区（未勾选地区或与启用地区无交集），跳过`, 'WARN');
+      continue;
+    }
+    log(`  📍 凭证「${c.label}」本次退订地区（${regions.size} 个）：${[...regions].map(r => (REGION_INFO[r]||r)+'('+r+')').join('、')}`, 'INFO');
+    const clients = makeClients(c.ak, c.sk);
+    const tasks = [];
+    for (const rid of regions) {
+      const list = await listInstancesInRegion(clients, rid);
+      log(`[${REGION_INFO[rid] || rid}] 查到 ${list.length} 台实例`);
+      for (const it of list) {
+        if (isGolden(it)) { log(`🔒 [${REGION_INFO[rid] || rid}] 跳过黄金机 ${it.InstanceId}，绝不退订`, 'warn'); continue; }
+        if (isRefundExempt(it)) { log(`🛡️ [${REGION_INFO[rid] || rid}] 跳过豁免实例 ${it.InstanceId}`, 'warn'); continue; }
+        tasks.push({ rid, iid: it.InstanceId });
+      }
+    }
+    if (!tasks.length) { log(`  ✅ 凭证「${c.label}」无待退订实例`, 'SUCCESS'); continue; }
+    log(`🔄 凭证「${c.label}」有界并发退订 ${tasks.length} 台（并发≤${REFUND_CONCURRENCY}，速率≤${REFUND_QPS}/秒）...`, 'warn');
+    const t = await runBoundedRefund(clients, tasks);
+    for (const k of Object.keys(grand)) grand[k] += t[k];
+  }
+  const fail = grand.fail;
+  log(`🏁 用户 ${username} 全部凭证退订完成：成功 ${grand.success} 跳过 ${grand.skipped} 锁定 ${grand.locked} 失败 ${grand.fail}`, fail === 0 ? 'success' : 'warn');
+  if (fail > 0) process.exitCode = 1;
+}
+
+// ====== 主流程 ======
+async function main() {
+  log(`启动定时退订（读取 Supabase 配置，按「凭证 + 地区」勾选执行）；启用地域：${ACTIVE_REGIONS.map(r => REGION_INFO[r] || r).join(' / ')}`);
+  let rows;
+  try {
+    rows = await supabaseGetAllUserData();
+  } catch (e) {
+    log('读取 Supabase 失败，无法执行任何退订：' + (e.message || e), 'error');
+    process.exit(1);
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    log('未发现任何用户数据，无需退订', 'success');
+    return;
+  }
+  for (const row of rows) {
+    try { await processUser(row); }
+    catch (e) { log(`用户 ${row.username} 处理异常: ${e.stack || e}`, 'error'); }
+  }
 }
 
 main().catch(e => {

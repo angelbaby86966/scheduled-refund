@@ -611,7 +611,17 @@ def build_cred_regions(data, label):
             return {}
         return selected
 
-    # 回退：全局 schedule_region_ids（v114 老数据 / 未单独配置的凭证）
+    # ⚠️ 关键修复（2026-11-01）：显式选择模式下（用户在面板里勾选了具体凭证，
+    # schedule_ak_ids 非空），某凭证若在 schedule_cred_regions 里没有独立条目，
+    # 必须**跳过该凭证**，绝不能回退到「全局 schedule_region_ids 并集」——
+    # 否则会把用户刻意取消勾选的地区也一起退掉（54 的北京、56 的杭州被误退的根因：
+    # 并集被套用到每个凭证，等于无视勾选、全地域退订）。
+    if _as_id_set(data.get("schedule_ak_ids")):
+        log(f"  ⏭️ 凭证「{label}」在显式选择模式下未配置 schedule_cred_regions，"
+            f"跳过（避免误退全部地区）", "WARN")
+        return {}
+
+    # 回退：全局 schedule_region_ids（仅 v114 老数据 / 未显式勾选任何凭证时）
     return build_regions(data)
 
 

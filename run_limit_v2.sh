@@ -57,24 +57,27 @@ fi
 # -----------------------------------------------------------------------------
 # 获取需要限速的网卡（排除 lo/docker/br/veth/tun/ifb 及带 @ / : / . 的虚拟接口）
 get_up_interfaces() {
-  local static_ppp all intf
+  local static_ppp all intf out=""
   static_ppp=$(/usr/sbin/ip link show 2>/dev/null | awk -F': ' '$2 ~ /(static|ppp)/ {print $2}' | sed 's/^[ \t]*//; s/[ \t]*$//')
   if [ -n "$static_ppp" ] && ! echo "$static_ppp" | grep -q '@'; then
-    echo "$static_ppp" | while IFS= read -r intf; do
+    while IFS= read -r intf; do
       case "$intf" in
         ifb_*|lo|docker*|virbr*|br_*|tun*|veth*) continue;;
-        *) echo "$intf";;
+        *) out="${out}${intf}"$'\n';;
       esac
-    done
-    return 0
+    done <<< "$static_ppp"
+    if [ -n "$out" ]; then
+      printf '%s' "$out"
+      return 0
+    fi
   fi
   all=$(/usr/sbin/ip link show 2>/dev/null | awk -F': ' '$0 !~ "lo|DOWN" && $0 ~ "state UP" {print $2}')
-  echo "$all" | while IFS= read -r intf; do
+  while IFS= read -r intf; do
     case "$intf" in
       *@*|*:*|*.*|ifb_*|lo|docker*|virbr*|br_*|tun*|veth*) continue;;
       *) echo "$intf";;
     esac
-  done
+  done <<< "$all"
 }
 
 # -----------------------------------------------------------------------------

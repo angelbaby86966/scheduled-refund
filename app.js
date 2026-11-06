@@ -2054,6 +2054,25 @@ function onCmdRegionChange(regionId) {
   }
 }
 
+// 解析「排除实例」文本框 → 返回 Set（批量命令执行时跳过这些实例）
+function getCmdExcludeIds() {
+  var ta = document.getElementById('cmdExcludeIds');
+  var set = new Set();
+  if (!ta || !ta.value) return set;
+  var raw = ta.value.split(/[\s,;，；]+/);
+  for (var i = 0; i < raw.length; i++) {
+    var id = (raw[i] || '').trim();
+    if (id) set.add(id);
+  }
+  return set;
+}
+
+// 实时更新「排除实例」识别数量
+function updateCmdExcludeCount() {
+  var el = document.getElementById('cmdExcludeCount');
+  if (el) el.textContent = '已识别 ' + getCmdExcludeIds().size + ' 个';
+}
+
 async function batchExecuteAllCommands() {
   log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
   log('💻 开始批量执行命令...（每批最多 100 台，超出自动分批）', 'info');
@@ -2077,6 +2096,12 @@ async function batchExecuteAllCommands() {
     if (Object.keys(regionSelections).length === 0) {
       log('❌ 没有选中任何要执行的地域（全部被设为“不执行”或未同步命令）', 'error');
       return;
+    }
+
+    // 排除实例：这些 ID 在批量命令执行时会被跳过
+    var excludeSet = getCmdExcludeIds();
+    if (excludeSet.size > 0) {
+      log('🚫 排除实例已设置 ' + excludeSet.size + ' 个，这些实例将跳过批量命令', 'warn');
     }
 
     // 全选地域 + 完整加载实例（自动翻页）
@@ -2114,21 +2139,25 @@ async function batchExecuteAllCommands() {
     }));
     renderInstances();
 
-    // 📊 统计待执行
+    // 📊 统计待执行（扣除被排除的实例）
     var grandTotal = 0;
     var summaryLines = [];
     var selRids = Object.keys(regionSelections);
     for (var gi = 0; gi < selRids.length; gi++) {
       var gRid = selRids[gi];
-      var n = ((state.regionData[gRid] || {}).instances || []).length;
-      grandTotal += n;
-      if (n > 0) summaryLines.push('  ' + REGION_INFO[gRid] + ': ' + n + ' 台');
+      var insts = ((state.regionData[gRid] || {}).instances || []);
+      var total = insts.length;
+      var execN = insts.filter(function(inst) { return !excludeSet.has(inst.InstanceId); }).length;
+      var exN = total - execN;
+      grandTotal += execN;
+      if (exN > 0) summaryLines.push('  🚫 ' + REGION_INFO[gRid] + ': 排除 ' + exN + ' 台');
+      if (execN > 0) summaryLines.push('  ✅ ' + REGION_INFO[gRid] + ': 执行 ' + execN + ' 台');
     }
     log('📊 待执行: ' + grandTotal + ' 台', 'info');
     summaryLines.forEach(function(l) { log(l, 'info'); });
 
     if (grandTotal === 0) {
-      log('⚠️ 没有找到任何实例', 'warn');
+      log('⚠️ 没有可执行的实例' + (excludeSet.size > 0 ? '（可能全部被「排除实例」过滤了）' : ''), 'warn');
       return;
     }
 
@@ -2150,7 +2179,12 @@ async function batchExecuteAllCommands() {
         var instances = (rd && rd.instances) || [];
         if (instances.length === 0) { log('⚠️ [' + REGION_INFO[rid3] + '] 无实例，跳过', 'warn'); return; }
 
-        var instanceIds = instances.map(function(inst) { return inst.InstanceId; });
+        var instanceIds = instances.map(function(inst) { return inst.InstanceId; })
+          .filter(function(id) { return !excludeSet.has(id); });
+        if (instanceIds.length === 0) {
+          log('⚠️ [' + REGION_INFO[rid3] + '] 排除后无实例可执行，跳过', 'warn');
+          return;
+        }
         var regionSuccess = 0, regionFail = 0;
         var batchCount = Math.ceil(instanceIds.length / BATCH_SIZE);
         if (batchCount > 1) {

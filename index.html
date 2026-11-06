@@ -164,6 +164,17 @@
                 <div class="fw-region-grid" id="cmdRegionGrid" data-page-node-id="Q6VfjnwRjYHWNd5IBheHIb">
                   <p style="grid-column:1/-1; text-align:center; color:#999; padding:20px;" data-page-node-id="PpDlgyc6iUZexSKNW8aJvG">点击「同步阿里云命令」加载已有命令</p>
                 </div>
+
+                <!-- 排除实例（不执行批量命令） -->
+                <div class="cmd-exclude-bar" style="margin:14px 0; padding:12px 14px; background:#fff7f7; border:1px dashed #ff7875; border-radius:8px;">
+                  <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+                    <label for="cmdExcludeIds" style="font-weight:600; font-size:13px; color:#c0392b;">🚫 排除实例（不执行批量命令）：</label>
+                    <span id="cmdExcludeCount" style="font-size:12px; color:#888;">已识别 0 个</span>
+                  </div>
+                  <textarea id="cmdExcludeIds" class="input" rows="3" oninput="updateCmdExcludeCount()" style="width:100%; font-family:monospace; font-size:13px; resize:vertical;" placeholder="每行一个实例ID，或用逗号/空格分隔。例如：&#10;swas-abc123&#10;471f225ffb574625b40217307cbbf590"></textarea>
+                  <div style="font-size:12px; color:#999; margin-top:6px;">这些实例 ID 在点击「批量执行命令」时会被跳过（无论属于哪个地域）。留空则全部执行。</div>
+                </div>
+
                 <div class="action-bar" style="justify-content:center; padding:16px 0;" data-page-node-id="Cnr3CEbtjUMqIL6lKpcsJC">
                   <button class="btn btn-primary" style="font-size:16px; padding:12px 32px;" onclick="batchExecuteAllCommands()" data-page-node-id="fP6VvKBxIZyFlAUplsgQFF">
                     🚀 批量执行命令

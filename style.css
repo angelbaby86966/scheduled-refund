@@ -1175,6 +1175,47 @@ body {
   margin-bottom: 16px;
 }
 
+.order-image-bar {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 14px;
+  background: #fafcff;
+  border: 1px solid #e6eefc;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.order-image-bar .oib-title {
+  font-weight: 600;
+  color: #333;
+  line-height: 32px;
+}
+
+.order-image-bar .oib-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #333;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 20px;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.order-image-bar .oib-radio:hover {
+  border-color: var(--primary);
+}
+
+.order-image-bar .oib-radio input {
+  margin: 0;
+  cursor: pointer;
+}
+
 .plan-spec {
   display: flex;
   gap: 12px;

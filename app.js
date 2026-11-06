@@ -3539,6 +3539,118 @@ var LOCKED_PLAN_ID = 'swas.s.c2m1s30b1.linux';
 var LOCKED_IMAGE_NAME = 'CentOS-7.9';
 var LOCKED_IMAGE_ID = 'bdde0344f65942f3adce35d421732c87';  // 锁定 CentOS-7.9，跳过镜像列表查询
 
+// ====== 下单镜像选择（套餐不变，仅镜像可切换） ======
+// ORDER_IMAGE_MODE: 'system' 锁定 CentOS-7.9 系统镜像；'custom' 用户自选自定义镜像
+var ORDER_IMAGE_MODE = 'system';
+// ORDER_CUSTOM_IMAGE: { ImageId, ImageName, regionId } —— 自定义镜像按地域绑定
+var ORDER_CUSTOM_IMAGE = null;
+
+// 当前卡片展示的镜像名（随选择更新）
+function getOrderImageLabel() {
+  if (ORDER_IMAGE_MODE === 'custom' && ORDER_CUSTOM_IMAGE) {
+    return ORDER_CUSTOM_IMAGE.ImageName + '（自定义）';
+  }
+  return LOCKED_IMAGE_NAME;
+}
+
+// 地域卡片里那行「套餐·镜像·价格」的内文
+function orderPlanLineText() {
+  return '<span class="plan-id">' + LOCKED_PLAN_ID + '</span> · ' + getOrderImageLabel() + ' · ¥' + ORDER_DEFAULT_PRICE + '/月';
+}
+
+// 按地域返回实际下单用的镜像；自定义模式下地域不匹配返回 null（该地域跳过）
+function getOrderImageForRegion(regionId) {
+  if (ORDER_IMAGE_MODE === 'custom') {
+    if (!ORDER_CUSTOM_IMAGE) {
+      log('⚠️ 已选「自定义镜像」但未选择具体镜像，请先加载并选择', 'warn');
+      return null;
+    }
+    if (ORDER_CUSTOM_IMAGE.regionId !== regionId) {
+      log('⚠️ 自定义镜像仅存在于 ' + REGION_INFO[ORDER_CUSTOM_IMAGE.regionId] + '，' + REGION_INFO[regionId] + ' 自动跳过', 'warn');
+      return null;
+    }
+    return { ImageId: ORDER_CUSTOM_IMAGE.ImageId, ImageName: ORDER_CUSTOM_IMAGE.ImageName };
+  }
+  return { ImageId: LOCKED_IMAGE_ID, ImageName: LOCKED_IMAGE_NAME };
+}
+
+// 切换镜像模式（系统 / 自定义）
+function onOrderImageModeChange(mode) {
+  ORDER_IMAGE_MODE = mode;
+  var wrap = document.getElementById('orderCustomImageWrap');
+  if (wrap) wrap.style.display = (mode === 'custom') ? 'block' : 'none';
+  if (mode !== 'custom') {
+    ORDER_CUSTOM_IMAGE = null;
+    var sel = document.getElementById('orderCustomImageSelect');
+    if (sel) sel.innerHTML = '<option value="">— 请先加载并选择镜像 —</option>';
+  }
+  updateOrderImageLabels();
+}
+
+// 加载所选地域的自定义镜像列表
+async function loadOrderCustomImages() {
+  if (!AliyunClient.hasCredentials()) {
+    log('❌ 未设置阿里云凭证，无法加载镜像', 'error');
+    showCredentialDialog();
+    return;
+  }
+  var regionSel = document.getElementById('orderCustomRegion');
+  var region = regionSel ? regionSel.value : '';
+  if (!region) { alert('请先选择地域'); return; }
+  var sel = document.getElementById('orderCustomImageSelect');
+  sel.innerHTML = '<option value="">⏳ 加载中...</option>';
+  try {
+    var r = await AliyunClient.callCentralApi('ListImages', { RegionId: region });
+    var imgs = [];
+    if (r.Images && r.Images.Image) imgs = r.Images.Image;
+    else if (Array.isArray(r.Images)) imgs = r.Images;
+    else if (r.Image) imgs = r.Image;
+    else if (Array.isArray(r.image)) imgs = r.image;
+    // 后端若未按 ImageType 过滤，前端再兜底一次：只保留自定义镜像
+    if (Array.isArray(imgs) && imgs.length) {
+      imgs = imgs.filter(function (im) { return !im.ImageType || /custom/i.test(im.ImageType); });
+    }
+    if (!imgs.length) {
+      sel.innerHTML = '<option value="">该地域暂无自定义镜像</option>';
+      log('ℹ️ ' + REGION_INFO[region] + ' 暂无自定义镜像，请先去「黄金镜像克隆」打镜像', 'info');
+      return;
+    }
+    sel.innerHTML = '<option value="">— 选择自定义镜像 —</option>' + imgs.map(function (im) {
+      return '<option value="' + (im.ImageId || '') + '">' + (im.ImageName || im.ImageId) + ' (' + (im.ImageId || '') + ')</option>';
+    }).join('');
+    log('✅ ' + REGION_INFO[region] + ' 找到 ' + imgs.length + ' 个自定义镜像', 'success');
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+    log('❌ 加载自定义镜像失败: ' + e.message, 'error');
+  }
+}
+
+// 选中某个自定义镜像
+function onOrderCustomImagePick() {
+  var regionSel = document.getElementById('orderCustomRegion');
+  var region = regionSel ? regionSel.value : '';
+  var sel = document.getElementById('orderCustomImageSelect');
+  if (sel && sel.value) {
+    var opt = sel.options[sel.selectedIndex];
+    ORDER_CUSTOM_IMAGE = {
+      ImageId: sel.value,
+      ImageName: (opt && opt.text) ? opt.text.split(' (')[0] : sel.value,
+      regionId: region
+    };
+    log('🖼️ 已选自定义镜像：' + ORDER_CUSTOM_IMAGE.ImageName + ' @ ' + REGION_INFO[region], 'info');
+  } else {
+    ORDER_CUSTOM_IMAGE = null;
+  }
+  updateOrderImageLabels();
+}
+
+// 刷新所有地域卡片的镜像文案（不重置数量）
+function updateOrderImageLabels() {
+  var txt = orderPlanLineText();
+  var nodes = document.querySelectorAll('#orderRegionGrid .region-plan');
+  for (var i = 0; i < nodes.length; i++) { nodes[i].innerHTML = txt; }
+}
+
 // 当前订单结果（待支付的订单ID列表）
 var state = state || {};
 state.orderResults = [];
@@ -3601,13 +3713,22 @@ function initOrderGrid() {
     return '<div class="order-region-item" id="order-item-' + rid + '">' +
       '<div class="region-name">📍 ' + REGION_INFO[rid] + '</div>' +
       '<div class="region-plan" id="order-plan-' + rid + '" style="color:#52c41a">' +
-        '<span class="plan-id">' + LOCKED_PLAN_ID + '</span> · ' + LOCKED_IMAGE_NAME + ' · ¥' + ORDER_DEFAULT_PRICE + '/月</div>' +
+        orderPlanLineText() + '</div>' +
       '<div class="region-input"><label>数量:</label>' +
         '<input type="number" class="input input-sm" min="0" max="100" value="0" data-region="' + rid + '" oninput="updateOrderSummary()" /></div>' +
       '</div>';
   }).join('');
 
   container.innerHTML = items;
+
+  // 填充「自定义镜像」地域下拉
+  var rsel = document.getElementById('orderCustomRegion');
+  if (rsel) {
+    rsel.innerHTML = regionIds.map(function(rid) {
+      return '<option value="' + rid + '">' + REGION_INFO[rid] + '</option>';
+    }).join('');
+  }
+
   if (summary) summary.style.display = 'block';
   updateOrderSummary();
 }
@@ -3630,10 +3751,13 @@ function updateOrderSummary() {
   if (priceEl) priceEl.textContent = '¥' + totalPrice.toFixed(2);
 }
 
-// 为某个地域选出最适合下单的镜像（现在直接锁定 CentOS-7.9，不再调接口查 91 个镜像）
+// 为某个地域选出最适合下单的镜像（系统镜像锁定 CentOS-7.9；自定义镜像按所选切换）
 async function resolveImageForRegion(regionId) {
-  log('🖼️  ' + REGION_INFO[regionId] + ' 使用锁定镜像：' + LOCKED_IMAGE_NAME + ' (' + LOCKED_IMAGE_ID + ')', 'info');
-  return { ImageId: LOCKED_IMAGE_ID, ImageName: LOCKED_IMAGE_NAME };
+  var img = getOrderImageForRegion(regionId);
+  if (img) {
+    log('🖼️  ' + REGION_INFO[regionId] + ' 使用镜像：' + img.ImageName + ' (' + img.ImageId + ')', 'info');
+  }
+  return img;
 }
 
 // ====== 批量下单核心：调用阿里云 CreateOrder API ======
@@ -3652,6 +3776,24 @@ async function batchCreateInstances() {
   if (regionOrders.length === 0) {
     log('⚠️ 请先输入至少一个地域的下单数量', 'warn');
     return;
+  }
+
+  // 自定义镜像模式：仅允许镜像所在地域下单，其余地域自动跳过
+  if (ORDER_IMAGE_MODE === 'custom') {
+    if (!ORDER_CUSTOM_IMAGE) {
+      log('❌ 已选「自定义镜像」但未选择具体镜像，无法下单', 'error');
+      return;
+    }
+    var imgRegion = ORDER_CUSTOM_IMAGE.regionId;
+    var excluded = regionOrders.filter(function(o) { return o.regionId !== imgRegion; });
+    excluded.forEach(function(o) {
+      log('⚠️ ' + o.regionName + ' 已跳过：自定义镜像仅存在于 ' + REGION_INFO[imgRegion], 'warn');
+    });
+    regionOrders = regionOrders.filter(function(o) { return o.regionId === imgRegion; });
+    if (regionOrders.length === 0) {
+      log('⚠️ 没有与自定义镜像（' + REGION_INFO[imgRegion] + '）同地域的下单数量', 'warn');
+      return;
+    }
   }
 
   // 检查凭证

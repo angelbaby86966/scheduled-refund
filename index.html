@@ -323,24 +323,6 @@
                   <button class="btn btn-sm" onclick="loadOrderPlans()" data-page-node-id="aHtaZq3ctc0yzQUFGGn1Yb">🔄 刷新套餐</button>
                 </div>
 
-                <!-- 镜像选择（套餐不变，仅镜像可切换） -->
-                <div class="order-image-bar" id="orderImageBar">
-                  <div class="oib-title">系统镜像：</div>
-                  <label class="oib-radio"><input type="radio" name="orderImageMode" value="system" checked onchange="onOrderImageModeChange('system')" /> 🐧 CentOS 7.9（系统镜像）</label>
-                  <label class="oib-radio"><input type="radio" name="orderImageMode" value="custom" onchange="onOrderImageModeChange('custom')" /> 🖼️ 自定义镜像</label>
-                  <div id="orderCustomImageWrap" style="display:none; margin-top:10px; padding:10px 12px; background:#f7f9ff; border:1px dashed #adc6ff; border-radius:8px;">
-                    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                      <span style="font-size:13px; color:#555;">地域：</span>
-                      <select id="orderCustomRegion" class="input input-sm" style="max-width:160px;"></select>
-                      <button class="btn btn-sm" onclick="loadOrderCustomImages()">🔄 加载该地域自定义镜像</button>
-                      <select id="orderCustomImageSelect" class="input input-sm" style="max-width:320px;" onchange="onOrderCustomImagePick()">
-                        <option value="">— 请先加载并选择镜像 —</option>
-                      </select>
-                    </div>
-                    <div style="font-size:12px; color:#888; margin-top:6px;">⚠️ 自定义镜像按地域绑定，仅能用于所选地域下单；切换地域请重新加载镜像。</div>
-                  </div>
-                </div>
-
                 <!-- 各区域数量输入 -->
                 <div class="order-region-grid" id="orderRegionGrid" data-page-node-id="WWItouYb5Hcb4viEomSPAe">
                   <div class="empty-state" data-page-node-id="SAMg6QHwPw6sDKrHgB2mtm">请先设置凭证并刷新套餐</div>

@@ -238,11 +238,18 @@
                   <div id="cancelCredList" style="max-height:220px; overflow:auto; border:1px solid #e1e4e8; border-radius:6px; padding:8px; background:#fafbfc;" data-page-node-id="d5Hg1Mk8ZwQa3Xt7BnR2V">
                     <div style="color:#999; font-size:12px; padding:6px;" data-page-node-id="m3Tf6Bq9XwZr2Kn7YdV5J">凭证加载中…</div>
                   </div>
-                  <small style="color:#888" data-page-node-id="p8Ln4Wq2XbJm6Rt1ZcK9T">⚠️ 每个凭证右侧点「📍 地区」可<strong>单独选择该凭证要退订的地区</strong>；未选地区的凭证会被跳过、其云主机完全不动。勾选凭证后仅对<strong>勾选的凭证 + 各自勾选的地区</strong>执行退订，其余账号/地区一律不碰；此操作不可逆。</small>
+                  <!-- ⚠️ 排除实例：粘贴不想退订的实例ID，立即/定时退订都会跳过这些ID（v116 去掉了每凭证地区选择，改用此文本框） -->
+                  <div class="exclude-box" id="cancelExcludeWrap" style="margin-top:8px; padding:10px 12px; border:1px dashed #ff7875; border-radius:8px; background:#fff7f7;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                      <span style="font-size:13px; color:#c0392b; font-weight:600;">🚫 排除实例（不执行退订）：</span>
+                      <span id="cancelExcludeCount" style="font-size:12px; color:#888;">已识别 0 个</span>
+                    </div>
+                    <textarea id="cancelExcludeIds" class="input" rows="3" style="width:100%; font-size:13px; resize:vertical;" placeholder="每行一个实例ID，或用逗号/空格分隔。例如：&#10;swas-abc123&#10;471f225ffb574625b40217307cbbf590" oninput="updateCancelExcludeCount()"></textarea>
+                    <div style="font-size:12px; color:#888; margin-top:6px;">这些实例 ID 在点击「立即退订 / 保存定时任务」时会被跳过（无论属于哪个地域/凭证）。留空则全部执行。</div>
+                  </div>
+                  <small style="color:#888" data-page-node-id="p8Ln4Wq2XbJm6Rt1ZcK9T">⚠️ 退订将对<strong>勾选的凭证 × 全部启用地区</strong>执行（此前「每个凭证单独选地区」已去掉）。粘贴在上方「排除实例」里的 ID 不会被退订；未勾选的账号一律不碰；此操作不可逆。</small>
                 </div>
 
-                <!-- 📍 地区选择已改为「每个凭证各自选地区」（v115）：见下方 #cancelCredList 内每个凭证右侧的「📍 地区」按钮，点开可单独勾选该凭证要退订的地区 -->
-                <div class="form-group" id="cancelRegionGroup" style="display:none"></div>
                 <div class="action-bar" data-page-node-id="JuNMhwL5C5CfNPYAzYJsvu">
                   <button class="btn btn-danger" id="cancelBtn" onclick="executeCancel()" data-page-node-id="D1iCPfSCuWsJOICISfgjBK">🗑️ 立即退订</button>
                   <button class="btn btn-outline" onclick="renderScheduledTasks()" data-page-node-id="m09DHv7EMS1zmKNKLn5KCM">📋 定时任务</button>

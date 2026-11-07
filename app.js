@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v116 已加载 - 退订去掉每凭证地区选择（默认全部启用地区），新增「排除实例」文本框：粘贴的实例ID在退订时跳过', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v117 已加载 - 退订去掉每凭证地区选择（默认全部启用地区），新增「排除实例」文本框：粘贴的实例ID在退订时跳过', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -2463,8 +2463,27 @@ function toExcludeMap(ids) {
   return m;
 }
 
-/** 更新「排除实例」文本框的计数 */
+/** 把「定时退订·排除实例」文本框内容存到 localStorage（输入即存，刷新/重开页面仍在） */
+function saveCancelExcludeDraft() {
+  try {
+    var ta = document.getElementById('cancelExcludeIds');
+    if (ta) localStorage.setItem('swas_cancel_exclude_draft', ta.value || '');
+  } catch (e) { /* localStorage 不可用时静默忽略 */ }
+}
+
+/** 页面加载时恢复定时退订「排除实例」上一次输入的内容 */
+function loadCancelExcludeDraft() {
+  try {
+    var saved = localStorage.getItem('swas_cancel_exclude_draft');
+    var ta = document.getElementById('cancelExcludeIds');
+    if (ta && saved !== null) ta.value = saved;
+  } catch (e) { /* 忽略 */ }
+  updateCancelExcludeCount();
+}
+
+/** 更新「排除实例」文本框的计数（同时落盘草稿） */
 function updateCancelExcludeCount() {
+  saveCancelExcludeDraft();
   var el = document.getElementById('cancelExcludeCount');
   if (!el) return;
   var n = getCancelExcludeIds().length;
@@ -3984,7 +4003,8 @@ async function init() {
   updateAdminUI();
 
   initOrderGrid();
-  loadCmdExcludeDraft(); // 恢复上一次保存的「排除实例」内容
+  loadCmdExcludeDraft(); // 恢复上一次保存的「排除实例」内容（批量命令）
+  loadCancelExcludeDraft(); // 恢复定时退订「排除实例」上一次输入内容
   initScheduleTimePicker();
   checkConfirm();
   renderScheduledTasks();

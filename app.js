@@ -2067,14 +2067,34 @@ function getCmdExcludeIds() {
   return set;
 }
 
-// 实时更新「排除实例」识别数量
+// 实时更新「排除实例」识别数量，并把当前内容写入 localStorage 草稿（执行后/刷新后仍在）
 function updateCmdExcludeCount() {
   var el = document.getElementById('cmdExcludeCount');
+  saveCmdExcludeDraft();
   if (el) el.textContent = '已识别 ' + getCmdExcludeIds().size + ' 个';
 }
 
+// 把「排除实例」文本框内容存到 localStorage（执行后自动保留，下次打开页面仍在）
+function saveCmdExcludeDraft() {
+  try {
+    var ta = document.getElementById('cmdExcludeIds');
+    if (ta) localStorage.setItem('swas_cmd_exclude_draft', ta.value || '');
+  } catch (e) { /* localStorage 不可用时静默忽略 */ }
+}
+
+// 页面加载时恢复上一次保存的「排除实例」内容
+function loadCmdExcludeDraft() {
+  try {
+    var saved = localStorage.getItem('swas_cmd_exclude_draft');
+    var ta = document.getElementById('cmdExcludeIds');
+    if (ta && saved !== null) ta.value = saved;
+  } catch (e) { /* 忽略 */ }
+  updateCmdExcludeCount();
+}
+
 async function batchExecuteAllCommands() {
-  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+  saveCmdExcludeDraft(); // 执行时先把「排除实例」内容落盘，确保刷新后仍在
+  log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
   log('💻 开始批量执行命令...（每批最多 100 台，超出自动分批）', 'info');
 
   try {
@@ -3964,6 +3984,7 @@ async function init() {
   updateAdminUI();
 
   initOrderGrid();
+  loadCmdExcludeDraft(); // 恢复上一次保存的「排除实例」内容
   initScheduleTimePicker();
   checkConfirm();
   renderScheduledTasks();

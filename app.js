@@ -2487,8 +2487,21 @@ function updateCancelExcludeCount() {
   var el = document.getElementById('cancelExcludeCount');
   if (!el) return;
   var n = getCancelExcludeIds().length;
-  el.textContent = '已识别 ' + n + ' 个';
+  // 可见反馈：让用户确认输入已被自动保存，避免误以为丢了
+  el.textContent = n > 0 ? ('已识别 ' + n + ' 个 · ✅ 已自动保存') : '已识别 0 个';
   el.style.color = n > 0 ? '#c0392b' : '#888';
+}
+
+/** 多重兜底：键盘输入 / 粘贴 / 失焦 / 离开页面，任何方式都落盘草稿 */
+function bindCancelExcludeDraft() {
+  try {
+    var ta = document.getElementById('cancelExcludeIds');
+    if (!ta) return;
+    var save = function () { try { saveCancelExcludeDraft(); } catch (e) {} };
+    ['input', 'change', 'blur'].forEach(function (evt) { ta.addEventListener(evt, save); });
+    ta.addEventListener('paste', function () { setTimeout(save, 0); });
+    window.addEventListener('beforeunload', save);
+  } catch (e) { /* 忽略 */ }
 }
 
 // 地区选择已移除（v116）：每个勾选凭证的退订范围 = 全部启用地区
@@ -4005,6 +4018,7 @@ async function init() {
   initOrderGrid();
   loadCmdExcludeDraft(); // 恢复上一次保存的「排除实例」内容（批量命令）
   loadCancelExcludeDraft(); // 恢复定时退订「排除实例」上一次输入内容
+  bindCancelExcludeDraft(); // 多重兜底：输入/粘贴/失焦/离开页面都自动保存
   initScheduleTimePicker();
   checkConfirm();
   renderScheduledTasks();
@@ -4046,6 +4060,20 @@ async function init() {
       }
     }
   }
+
+  // ★ 排除实例：本地草稿为空时，从云端定时任务配置回填（换电脑 / 清缓存也不丢）
+  try {
+    var _exTa = document.getElementById('cancelExcludeIds');
+    if (_exTa && !(_exTa.value || '').trim() && window.CloudStore && currentUser && currentUser.user) {
+      var _exUd = await CloudStore.getUserData(currentUser.user);
+      var _exIds = (_exUd && Array.isArray(_exUd.schedule_exclude_instance_ids)) ? _exUd.schedule_exclude_instance_ids : [];
+      if (_exIds.length) {
+        _exTa.value = _exIds.join('\n');
+        updateCancelExcludeCount();
+        log('♻️ 已从云端定时任务恢复「排除实例」' + _exIds.length + ' 个', 'info');
+      }
+    }
+  } catch (e) { console.warn('[init] 排除实例云端回填失败:', e.message); }
 
   // v6: 从云端拉取多凭证 profile（如果用户已经在其他设备保存过多凭证）
   try {

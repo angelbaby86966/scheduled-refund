@@ -11,8 +11,8 @@
 | 触发器① | `refund-trigger`：`0 35 15 * * *` = 北京 **23:35**，`enable=true` |
 | 触发器② | `refund-trigger-fallback`：`0 50 15 * * *` = 北京 **23:50**，`payload={"immediate":true}`，`enable=true` |
 | DRY_RUN | `false`（每日真退订） |
-| 排除实例 | 读 Supabase `user_data.schedule_exclude_instance_ids`（全局合并）**＋** 函数环境变量 `EXCLUDE_INSTANCE_IDS`（前端排除文本框 7 个 ID 固化兜底）；三层拦截 + fail-closed |
-| 函数描述 | `定时退订(张瑞瑶61) 排除实例保护 v2026-11-09（凭证按 Supabase 档案，DRY_RUN=false）` |
+| 排除实例 | **权威名单 = Supabase `user_data.schedule_exclude_instance_ids`**（全局合并、实时跟随前端文本框）；三层拦截 + fail-closed。`EXCLUDE_INSTANCE_IDS` 只是部署快照，**仅诊断、不参与放行** |
+| 函数描述 | `定时退订(张瑞瑶61) 排除实例保护 v2026-11-09b（凭证按 Supabase 档案，DRY_RUN=false）` |
 
 ## 凭证方案（2026-11-09 全量换为「张瑞瑶61」）
 
@@ -24,6 +24,8 @@
   **这套凭证本次没有改动** —— 换掉会改变退订目标账号，属于另一件事。
 - FC 环境变量共 7 项：`DRY_RUN`、`SUPABASE_URL`、`SUPABASE_ANON_KEY`、
   `ALIYUN_AK`、`ALIYUN_SK`、`EXCLUDE_INSTANCE_IDS`、`EXCLUDE_PROTECT_VERSION`。
+  其中 `EXCLUDE_INSTANCE_IDS` 是部署时从文本框抓的快照（7 个 ID），只用于日志核对，
+  **不参与放行**；`EXCLUDE_PROTECT_VERSION` 当前为 `2026-11-09-fc-python-v2`。
 
 ## 2026-11-09 事故根因（纠正此前两份错误结论）
 
@@ -53,26 +55,35 @@
 | Supabase Edge Function | `supabase/functions/aliyun-proxy/index.ts` | ✅ 已部署到两个项目；真实排除 ID 调用返回 `exclude-list-protected` |
 | 阿里云 FC | `fc/refund/fc_main.py` | ✅ **2026-11-09 已直连部署并线上验证** |
 
-**fail-closed**：任何一套读不到 / 解析不了保护名单时，该套拒绝执行任何退订，
-而不是「当名单为空继续退」。FC 另有 `EXCLUDE_INSTANCE_IDS` 环境变量固化文本框内容，
-即使 Supabase 字段被误删、改格式，这 7 台依然不会被退。
+**fail-closed（三套统一规则，11:50 回归体检后定稿）**：
+
+1. Supabase 读取失败 / 字段类型脏 → 该套**拒绝执行任何退订**；
+2. **全体用户都缺 `schedule_exclude_instance_ids` 字段**（配置被误删）→ 同样拒绝执行，
+   绝不当成「空名单继续退」；
+3. 只要有用户带该字段（哪怕是空数组 = 用户主动清空）→ 以全局合并结果为准，
+   前端改文本框**立即生效**，无需重新部署；
+4. FC 的 `EXCLUDE_INSTANCE_IDS` 是部署快照，**只用于日志核对，不参与放行** ——
+   若与 Supabase 名单取并集，用户在前端删掉某台后 FC 仍按旧快照保护，
+   会与 Actions / Edge / 前端三套行为不一致（那台永远退不掉）。
 
 ## 部署与验证
 
 - 部署：`ops/deploy_fc_refund.py`（由 `.github/workflows/deploy-fc-refund.yml` 手动触发，
   `mode=deploy`）。脚本会：探测函数 → 校验 runtime/handler → 上传 `fc_main.py` →
   回读并合并环境变量（带上原 `DRY_RUN` / Supabase 配置，避免全量替换丢字段）→
-  从 Supabase 实时读取排除文本框名单写入 `EXCLUDE_INSTANCE_IDS`。
+  从 Supabase 实时读取排除文本框名单写入 `EXCLUDE_INSTANCE_IDS` 快照（仅诊断）。
   凭证轮换后重跑一次 workflow 即可同步。
 - 绝不要再引用 `fc/refund/index.js`：那是 2026-11-09 上午误判 runtime 时生成的 Node 版历史产物，
   已标注废弃，**不适用于本函数**。
-- **本地断言**：7 组全通过（fail-closed / 三种格式兼容 / 全局合并 / ENV 兜底 /
-  列举层剔除 / 退订前二次过滤 / BSS 调用最底层硬拦截 / main 拒绝执行），全程 mock 无真实请求。
+- **本地断言**：体检 v2 共 **20 组**（FC 11 组 + Actions 9 组）全通过，
+  覆盖 fail-closed / 三格式 / 全局合并 / 快照不参与放行 / 底层硬拦截 / 列举层 /
+  退订前过滤 / 分页终止 / 受保护实例不空转 / 文本框实时跟随 / 字段误删拒绝 /
+  handler 日志可见 / IMMEDIATE 残留；全程 mock，零真实请求。
 - **线上回读**：`get_function_code` 下载的代码与仓库 `fc/refund/fc_main.py` 逐字节一致；
-  环境变量 7 项齐全，`ALIYUN_AK=LTAI5t96***`，`EXCLUDE_INSTANCE_IDS` 7 个。
-- **线上 invoke 验证**（空 payload、北京时间 11:35 不在窗口）：
-  日志 `🛡️ 排除实例保护名单已加载：7 个（其中文本框兜底 7 个）`，`error=None`，
-  **零 `RefundInstance` 请求、零退订**。
+  环境变量 7 项齐全，`ALIYUN_AK=LTAI5t96***`，`EXCLUDE_INSTANCE_IDS` 7 个（仅快照）。
+- **线上 invoke 验证**（空 payload、非时间窗）：
+  日志 `🛡️ 排除实例保护名单已加载：7 个（来源：前端排除文本框 / Supabase 实时）`，
+  `error=None`，**零 `RefundInstance` 请求、零退订**。
 
 ## 运行方式（与 GitHub Actions / Edge Function 并行）
 
@@ -88,3 +99,30 @@
 - 函数环境变量里是主账号 AK/SK，建议定期轮换；轮换后务必重跑
   `deploy-fc-refund.yml`（mode=deploy），让 Secrets 与 FC 环境变量保持一致。
 - 三套执行器并存是长期隐患：以后任何保护逻辑都要同步三处，极易漏。
+
+## 回归体检（2026-11-09 11:50，用户：「确定不会有啥 bug 吧」）
+
+直连 FC 下载线上代码逐段审查 + mock 动态复现，查出并修掉 5 个缺陷：
+
+| # | 缺陷 | 影响 | 修复 |
+|---|---|---|---|
+| 1 | `list_instances()` 用 `len(out) >= TotalCount` 判断翻页，out 是**过滤后**数量 | 账号里只剩排除机时会多翻页；极端情况下 API 超页返回首页会死循环 | 改为按原始 `insts` 条数 / `page * PAGE_SIZE` 判断（FC + Actions） |
+| 2 | `drain_credential()` 只判断 `all_instances` 非空，targets 过滤在之后 | **保留排除机时每天必现**：连跑 12 轮「列全部地域→全被过滤→sleep」，白打 API 并误报「仍有实例」 | targets 为空立即 break（FC + Actions） |
+| 3 | FC 把 `EXCLUDE_INSTANCE_IDS` 快照与 Supabase 名单取**并集** | 用户在前端删掉某台后 FC 仍按旧快照保护，那台永远退不掉，与另三套不一致 | 快照改为仅诊断；权威名单只有 Supabase，改文本框立即生效 |
+| 4 | 主名单失败时 `sys.exit(1)`，`SystemExit` 穿透 handler 的 `except Exception` | FC 控制台只看到「函数失败」，看不到任何原因日志 | 改 `raise RuntimeError`，handler 返回 `ok=false + error + logs` |
+| 5 | 「触发执行的用户数」用 `schedule_last_executed_date != 今天` 估算 | 不在时间窗时误报「触发 3 个用户」，实际一台没退 | 改为中性扫描数，实际触发看上方 ▶ 行 |
+
+顺带补齐三套一致性：Actions 与 Edge 原先在**全体用户都缺排除字段**时会当成空名单继续退，
+现在与 FC 一样 fail-closed 拒绝；Edge 还会对脏类型抛错而非静默忽略。
+
+**未改动 / 已确认无问题**：前端浏览器端补跑在列举时就过滤排除实例且分页按 `TotalCount>100`
+（无空转、无多翻页）；Edge `listAll()` 分页同样按 total 计算页数；Edge 定时 / 批量 /
+单实例 / 探测四条退款路径全部经过 `assertNotExcluded()`；FC 容器复用 `IMMEDIATE` 残留已修。
+
+**仍需注意的既有行为（非本次引入）**：
+- `refund-trigger-fallback`（23:50，payload `immediate=true`）会跳过时间窗闸门，
+  对**所有** `schedule_enabled` 用户执行，因此用户设定的 23:36 / 23:51 实际由 23:50 兜底统一执行，
+  设定分钟不精确。排除保护对该路径同样生效。
+- FC 默认禁用河源 / 武汉 / 乌兰察布 3 个地域，Edge 的地域表更宽；地域范围三套不完全一致。
+- 三套并发对同一实例退订时 ClientToken 可能不同，但首次成功后实例释放，
+  后续调用返回 `ResourceNotExists` 视为跳过，不会重复退款。

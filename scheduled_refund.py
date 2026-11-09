@@ -77,19 +77,28 @@ def normalize_exclude_ids(raw):
 
 def load_exclude_ids(rows):
     # 从全部 user_data 行合并排除名单；返回 (集合, 数据是否健康)
+    # 与 FC / Edge 三套统一：全体用户都缺少 schedule_exclude_instance_ids 字段
+    # 视为配置被误删（而不是「名单为空继续退」），同样 fail-closed 拒绝执行。
     global EXCLUDE_IDS, EXCLUDE_LOADED
-    merged, bad = set(), 0
+    merged, bad, has_field = set(), 0, False
     for row in rows or []:
         data = row.get("data") or {}
         raw = data.get("schedule_exclude_instance_ids")
         if raw is None:
             continue
+        has_field = True
         if not isinstance(raw, (list, tuple, str, dict)):
             bad += 1
             continue
         merged |= normalize_exclude_ids(raw)
     EXCLUDE_IDS = merged
-    EXCLUDE_LOADED = (bad == 0)
+    if bad or not has_field:
+        if not has_field and not bad:
+            log("⛔ 所有用户都缺少 schedule_exclude_instance_ids 字段（疑似配置被误删），"
+                "拒绝执行任何退订", "ERROR")
+        EXCLUDE_LOADED = False
+    else:
+        EXCLUDE_LOADED = True
     return merged, EXCLUDE_LOADED
 
 
@@ -425,6 +434,7 @@ def list_instances(ak, sk, region_id):
     while True:
         data = rpc(ak, sk, swas_endpoint(region_id), "ListInstances", "2020-06-01",
                    {"PageNumber": page, "PageSize": 100})
+        # 终止条件基于原始 insts / 已取页数，不能用过滤后的 out（会被排除实例拉小）
         if data.get("Code") and data.get("Code") not in ("200", "Success", None):
             raise RuntimeError(f"ListInstances 失败: {data.get('Message') or data.get('Code')}")
         insts = data.get("Instances") or []
@@ -443,7 +453,7 @@ def list_instances(ak, sk, region_id):
                 continue
             out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0
-        if not insts or len(out) >= total:
+        if not insts or len(insts) < 100 or page * 100 >= total:
             break
         page += 1
     return out
@@ -818,6 +828,10 @@ def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
         dropped = len(all_instances) - len(targets)
         if dropped:
             log(f"\U0001f6d1 已剔除 {dropped} 台黄金机/豁免/排除实例，绝不退订", "WARN")
+        # 只剩受保护实例时立即结束，避免连跑 12 轮空列举 + 误报「仍有实例」
+        if not targets:
+            log(f"  ✅ 凭证「{label}」第 {rnd} 轮：仅剩受保护实例，无可退订目标，结束", "SUCCESS")
+            break
         round_success = 0
         regions_seen = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:

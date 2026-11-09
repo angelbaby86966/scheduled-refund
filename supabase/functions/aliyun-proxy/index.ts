@@ -60,10 +60,24 @@ async function fetchExcludeIds(): Promise<Set<string>> {
   const rows: any[] = await resp.json();
   if (!Array.isArray(rows)) throw new Error("排除名单返回格式异常（拒绝执行任何退订）");
   const ids = new Set<string>();
+  let hasField = false;
   for (const r of rows) {
     const raw = r?.data?.schedule_exclude_instance_ids;
     if (raw === undefined || raw === null) continue;
+    hasField = true;
+    // 与 FC / Actions 三套统一：脏类型不能静默当空名单（否则会漏保护该用户配置的实例）
+    const t = typeof raw;
+    if (t !== "string" && !Array.isArray(raw) && !(raw && t === "object")) {
+      throw new Error("schedule_exclude_instance_ids 类型异常（拒绝执行任何退订）");
+    }
+    if (Array.isArray(raw) && raw.some((x: any) => typeof x !== "string")) {
+      throw new Error("schedule_exclude_instance_ids 数组含非字符串（拒绝执行任何退订）");
+    }
     for (const id of normalizeExclude(raw)) ids.add(id);
+  }
+  // 全体用户都缺该字段 = 配置被误删，不能当「名单为空继续退」
+  if (!hasField) {
+    throw new Error("所有用户都缺少 schedule_exclude_instance_ids 字段（疑似配置被误删），拒绝执行任何退订");
   }
   EXCLUDE_CACHE = ids;
   EXCLUDE_CACHE_AT = Date.now();

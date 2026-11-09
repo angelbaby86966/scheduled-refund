@@ -257,10 +257,13 @@ def log(msg, level="INFO"):
 # 三套云端执行器统一策略：全局合并所有用户的排除名单，三层拦截
 #   （列举时剔除 → 退订前再过滤 → BSS RefundInstance 调用最底层硬拦截），
 # 并 fail-closed：名单读取 / 解析失败时拒绝执行任何退订，绝不「当名单为空继续退」。
-# 另支持 FC 环境变量 EXCLUDE_INSTANCE_IDS：部署时把文本框内容固化一份作为兜底，
-# 即使 Supabase 里的字段被误删、改格式，这些实例依然不会被退。
+# FC 环境变量 EXCLUDE_INSTANCE_IDS 是**部署时的文本框快照，仅用于核对/诊断，绝不参与放行**：
+# 若把它与 Supabase 名单取并集，用户在前端删掉某台后 FC 仍按旧快照保护，
+# 会与 Actions / Edge / 前端三套行为不一致（那台永远退不掉）。
+# 权威名单只有一个：Supabase user_data（前端每次保存都会写该字段）。
 EXCLUDE_IDS = set()
 EXCLUDE_LOADED = False
+PAGE_SIZE = 100
 
 
 def _normalize_exclude(raw, out):
@@ -289,28 +292,43 @@ def _normalize_exclude(raw, out):
 
 
 def load_exclude_ids(rows):
-    """全局合并 Supabase 所有用户 + FC 环境变量兜底名单。返回 (ids, ok)。"""
+    """权威名单 = Supabase（前端排除文本框，实时）。返回 (ids, ok)。
+
+    三套执行器统一规则（2026-11-09 回归体检后定稿）：
+      1. 只要任一用户带 schedule_exclude_instance_ids 字段（值可为空数组 = 用户主动清空），
+         就以全局合并结果为准 —— 前端改文本框立即生效；
+      2. 全体用户都缺该字段（配置被误删 / 数据异常）→ 拒绝执行任何退订；
+      3. 字段类型脏 / Supabase 读取失败 → 拒绝执行任何退订；
+      4. FC 环境变量 EXCLUDE_INSTANCE_IDS 只是部署快照，仅用于日志核对，不参与放行。
+    """
     global EXCLUDE_IDS, EXCLUDE_LOADED
-    merged, env_ids = set(), set()
+    merged, snapshot = set(), set()
+    has_field = False
     dirty = False
     for row in rows or []:
         data = (row or {}).get("data") or {}
         if not isinstance(data, dict):
             continue
-        if not _normalize_exclude(data.get("schedule_exclude_instance_ids"), merged):
+        raw = data.get("schedule_exclude_instance_ids")
+        if raw is not None:
+            has_field = True
+        if not _normalize_exclude(raw, merged):
             log("⛔ schedule_exclude_instance_ids 类型异常，拒绝执行任何退订", "ERROR")
             dirty = True
             break
-    if not _normalize_exclude(os.environ.get("EXCLUDE_INSTANCE_IDS", ""), env_ids):
-        log("⛔ EXCLUDE_INSTANCE_IDS 环境变量格式异常，拒绝执行任何退订", "ERROR")
+    if not _normalize_exclude(os.environ.get("EXCLUDE_INSTANCE_IDS", ""), snapshot):
+        log("⛔ EXCLUDE_INSTANCE_IDS 快照格式异常，拒绝执行任何退订", "ERROR")
         dirty = True
-    merged |= env_ids
+    if not dirty and not has_field:
+        log(f"⛔ 所有用户都缺少 schedule_exclude_instance_ids 字段（疑似配置被误删；"
+            f"部署快照含 {len(snapshot)} 个 ID），拒绝执行任何退订", "ERROR")
+        dirty = True
     if dirty:
         EXCLUDE_IDS, EXCLUDE_LOADED = set(), False
         return EXCLUDE_IDS, False
     EXCLUDE_IDS, EXCLUDE_LOADED = merged, True
     log(f"🛡️ 排除实例保护名单已加载：{len(merged)} 个"
-        f"（其中文本框兜底 {len(env_ids)} 个）", "SUCCESS")
+        f"（来源：前端排除文本框 / Supabase 实时；部署快照 {len(snapshot)} 个仅作核对）", "SUCCESS")
     return EXCLUDE_IDS, True
 
 
@@ -460,7 +478,7 @@ def list_instances(ak, sk, region_id):
     page = 1
     while True:
         data = rpc(ak, sk, swas_endpoint(region_id), "ListInstances", "2020-06-01",
-                   {"PageNumber": page, "PageSize": 100})
+                   {"PageNumber": page, "PageSize": PAGE_SIZE})
         if data.get("Code") and data.get("Code") not in ("200", "Success", None):
             raise RuntimeError(f"ListInstances 失败: {data.get('Message') or data.get('Code')}")
         insts = data.get("Instances") or []
@@ -479,7 +497,10 @@ def list_instances(ak, sk, region_id):
                 continue
             out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0
-        if not insts or len(out) >= total:
+        # ⚠️ 终止条件必须基于【原始返回条数 / 已取页数】，不能基于过滤后的 out：
+        # 黄金机 / 豁免 / 排除实例被剔除后 out 会小于 TotalCount，
+        # 旧写法 len(out) >= total 会一直翻页（多打请求，极端情况下超页返回首页会死循环）。
+        if not insts or len(insts) < PAGE_SIZE or page * PAGE_SIZE >= total:
             break
         page += 1
     return out
@@ -859,6 +880,12 @@ def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
         dropped = len(all_instances) - len(targets)
         if dropped:
             log(f"\U0001f6d1 已剔除 {dropped} 台黄金机/豁免/排除实例，绝不退订", "WARN")
+        # ⚠️ 只剩受保护实例时立即结束：旧写法只判断 all_instances 非空，
+        # 会连跑 12 轮「列全部地域 → 全被过滤 → sleep 0.8s」，白打 API 并误报
+        # 「达到最大轮数仍有实例」。账号里保留排除机时这个场景每天必现。
+        if not targets:
+            log(f"  ✅ 凭证「{label}」第 {rnd} 轮：仅剩受保护实例，无可退订目标，结束", "SUCCESS")
+            break
         round_success = 0
         regions_seen = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
@@ -988,12 +1015,14 @@ def main():
         rows = supabase_get_all_user_data()
     except Exception as e:
         log(f"读取 user_data 失败: {e}", "ERROR")
-        sys.exit(1)
+        # 用 RuntimeError 而非 sys.exit：SystemExit 不是 Exception 子类，会穿透 handler 的
+        # try/except，导致 FC 控制台只看到「函数失败」而看不到任何原因日志。
+        raise RuntimeError("读取 Supabase 失败，拒绝执行任何退订（fail-closed）") from e
     log(f"共读取 {len(rows)} 个用户配置", "INFO")
     _ids, _ok = load_exclude_ids(rows)
     if not _ok:
         log("⛔ 排除名单加载失败，本次拒绝执行任何退订（fail-closed）", "ERROR")
-        sys.exit(1)
+        raise RuntimeError("排除名单不可用，拒绝执行任何退订（fail-closed）")
 
     due_count = 0
     for row in rows:
@@ -1008,7 +1037,9 @@ def main():
             uname = row.get("username", "?")
             log(f"用户 {uname} 处理异常: {e}", "ERROR")
 
-    log(f"===== 本次任务结束，触发执行的用户数: {due_count} =====", "WARN")
+    # 旧文案「触发执行的用户数」用 schedule_last_executed_date != 今天 估算，
+    # 不在时间窗时会误报成 3，实际一台都没退。改为中性的扫描数，实际触发看上方 ▶ 行。
+    log(f"===== 本次任务结束，已扫描 {len(rows)} 个用户配置（实际触发退订见上方 ▶ 行） =====", "WARN")
     # 写回已退订状态（有新增才写；由 Actions 工作流 commit+push 持久化到下一轮）
     save_refunded_state()
 
@@ -1053,4 +1084,4 @@ def handler(event, context):
     if len(logs) > 12000:
         logs = "...(前面已截断)...\n" + logs[-12000:]
     logs = logs.replace("\n", " ⏎ ").replace("\r", " ")
-    return {"ok": True, "error": err, "logs": logs}
+    return {"ok": err is None, "error": err, "logs": logs}

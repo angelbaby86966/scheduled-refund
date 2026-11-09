@@ -11,8 +11,9 @@
 本脚本现在做三件事：
   1) 用仓库 Secrets 的 ALIYUN_AK / ALIYUN_SK（2026-11-09 起为「张瑞瑶61」）探测函数；
   2) 上传修补版 fc_main.py（排除实例保护三层拦截 + fail-closed + IMMEDIATE 残留修复）；
-  3) 同步函数环境变量：新 AK/SK、从 Supabase 实时读取的「排除文本框」名单，
-     让这 7 台即使 Supabase 字段被误删也有一份固化兜底。
+  3) 同步函数环境变量：新 AK/SK，以及从 Supabase 实时读取的「排除文本框」名单快照。
+     ⚠️ 该快照只用于日志核对/诊断，**不参与放行**：三套执行器一律以 Supabase
+     实时名单为准，否则用户在前端删掉某台后 FC 仍按旧快照保护，行为不一致。
 
 用法（由 .github/workflows/deploy-fc-refund.yml 调用）：
   python3 ops/deploy_fc_refund.py --mode probe           # 只探测函数所在地域/endpoint
@@ -43,7 +44,7 @@ TRIGGERS = ["refund-trigger", "refund-trigger-fallback"]
 SRC_FILE = "fc/refund/fc_main.py"
 CODE_ENTRY = "fc_main.py"
 DEFAULT_ANON_KEY = "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
-DESC = "定时退订(张瑞瑶61) 排除实例保护 v2026-11-09（凭证按 Supabase 档案，DRY_RUN=false）"
+DESC = "定时退订(张瑞瑶61) 排除实例保护 v2026-11-09b（凭证按 Supabase 档案，DRY_RUN=false）"
 
 # 只探测 FC 实际开通的主要地域；小地域的 fc-open 域名根本不解析，
 # 老版脚本逐台等 DNS 重试会白跑 10 分钟。
@@ -170,7 +171,7 @@ def merge_environment(client, ak, sk):
         "ALIYUN_AK": ak,
         "ALIYUN_SK": sk,
         "EXCLUDE_INSTANCE_IDS": ",".join(sorted(ids)),
-        "EXCLUDE_PROTECT_VERSION": "2026-11-09-fc-python-v1",
+        "EXCLUDE_PROTECT_VERSION": "2026-11-09-fc-python-v2",
     })
     log(f"环境变量合并完成：共 {len(env)} 项，文本框排除 ID {len(ids)} 个；"
         f"DRY_RUN={env.get('DRY_RUN')}")
@@ -228,8 +229,9 @@ def main():
     d = getattr(resp, "data", {}) or {}
     log(f"✅ FC 代码已更新：codeSize={d.get('codeSize')} checksum={d.get('codeChecksum')} "
         f"handler={d.get('handler')} runtime={d.get('runtime')}", "SUCCESS")
-    log(f"✅ 排除文本框 {n} 个实例 ID 已固化到函数环境变量 EXCLUDE_INSTANCE_IDS")
-    log("修补版三层拦截 + fail-closed；另修复 FC 容器复用导致 IMMEDIATE 残留的问题")
+    log(f"✅ 排除文本框 {n} 个实例 ID 已写入 EXCLUDE_INSTANCE_IDS（部署快照，仅供核对）")
+    log("修补版：三层拦截 + fail-closed + 分页/空转修复 + IMMEDIATE 残留修复；"
+        "权威名单始终是 Supabase 实时数据")
 
 
 if __name__ == "__main__":

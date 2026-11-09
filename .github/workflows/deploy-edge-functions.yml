@@ -29,5 +29,11 @@ jobs:
 
       - name: Deploy Edge Functions
         run: |
-          supabase functions deploy --project-ref $SUPABASE_PROJECT_ID
-          supabase functions deploy --project-ref $SUPABASE_PROJECT_ID_PROD
+          # 新版 Supabase CLI 在非交互环境要求显式确认，否则报
+          # "Confirmation required ... Re-run with --yes to confirm" 并直接失败（代码永远上不了线）
+          if [ -n "$SUPABASE_PROJECT_ID" ]; then
+            supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID" --yes
+          fi
+          if [ -n "$SUPABASE_PROJECT_ID_PROD" ] && [ "$SUPABASE_PROJECT_ID_PROD" != "$SUPABASE_PROJECT_ID" ]; then
+            supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID_PROD" --yes
+          fi

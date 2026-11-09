@@ -8,6 +8,7 @@
   2. 对每个用户，用其阿里云 AK/SK 列出全部地域的轻量应用服务器实例
   3. 调用 BSS OpenAPI `RefundInstance`（ProductCode=ace_eweb）退订，退款到原账户
   4. 退订成功后把 `schedule_last_executed_date` 写为当天（北京时间），防止同日重复
+  5. 读取 `schedule_exclude_instance_ids`，三层过滤 + fail-closed，排除实例绝不退订
 
 设计要点（与前端 app.js / aliyun-client-v2.js 完全一致）：
   - 阿里云签名：HMAC-SHA1，待签串 'POST&' + encode('/') + '&' + encode(canonical)
@@ -50,6 +51,51 @@ SUPABASE_ANON_KEY = os.environ.get(
     "SUPABASE_ANON_KEY", "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
 )
 REST_BASE = SUPABASE_URL.rstrip("/") + "/rest/v1"
+
+# ===================== 排除实例统一保护（2026-11-09 事故根治） =====================
+# 事故：前端把「排除实例」写入 user_data.schedule_exclude_instance_ids，但三套云端
+#       执行器（Actions / Edge Function / FC）全都不读该字段 → 定时退订把排除实例全退。
+# 方案：单一事实来源（Supabase） + 三层拦截 + fail-closed：
+#   ① list_instances() 列举时剔除；② drain_credential() 退订前二次过滤；
+#   ③ refund_instance() 最底层硬拦截：名单未成功加载时**一台都不退**。
+# 全局合并：任一用户配置的排除 ID 对所有凭证生效（实例 ID 全局唯一，合并只会更安全）。
+EXCLUDE_IDS = set()
+EXCLUDE_LOADED = False
+
+
+def normalize_exclude_ids(raw):
+    # 兼容数组 / 分隔字符串 / {id:true} 三种落库形态
+    if isinstance(raw, (list, tuple)):
+        return {x.strip() for x in raw if isinstance(x, str) and x.strip()}
+    if isinstance(raw, str):
+        return {x.strip() for x in raw.replace(";", ",").replace("，", ",")
+                .replace("；", ",").replace("\n", ",").split(",") if x.strip()}
+    if isinstance(raw, dict):
+        return {str(k).strip() for k, v in raw.items() if v and str(k).strip()}
+    return set()
+
+
+def load_exclude_ids(rows):
+    # 从全部 user_data 行合并排除名单；返回 (集合, 数据是否健康)
+    global EXCLUDE_IDS, EXCLUDE_LOADED
+    merged, bad = set(), 0
+    for row in rows or []:
+        data = row.get("data") or {}
+        raw = data.get("schedule_exclude_instance_ids")
+        if raw is None:
+            continue
+        if not isinstance(raw, (list, tuple, str, dict)):
+            bad += 1
+            continue
+        merged |= normalize_exclude_ids(raw)
+    EXCLUDE_IDS = merged
+    EXCLUDE_LOADED = (bad == 0)
+    return merged, EXCLUDE_LOADED
+
+
+def is_excluded(instance_id):
+    # 名单未成功加载时也返回 True —— 任何退订一律拒绝（fail-closed）
+    return (not EXCLUDE_LOADED) or (instance_id in EXCLUDE_IDS)
 
 # 支持的地域（与前端 REGION_INFO 一致）
 # ⚠️ 这里始终保留**全量 9 个地区**（代码不删，随时加回）；
@@ -392,6 +438,9 @@ def list_instances(ak, sk, region_id):
             if is_refund_exempt(iid, it.get("PublicIpAddress")):
                 log(f"\U0001f6e1 跳过退订豁免实例 {iid}（{it.get('PublicIpAddress') or '无公网'}）", "WARN")
                 continue
+            if is_excluded(iid):
+                log(f"\U0001f6d1 跳过排除实例 {iid}（定时退订保护名单）", "WARN")
+                continue
             out.append({"regionId": region_id, "instanceId": iid})
         total = data.get("TotalCount") or 0
         if not insts or len(out) >= total:
@@ -411,6 +460,12 @@ def refund_instance(ak, sk, region_id, instance_id, client_token=None):
     """调用 BSS RefundInstance（与前端 refundInstance 完全一致）。返回 (ok, kind, msg)。
     client_token 可传入以复用；默认按 region+instance 派生稳定 Token，跨执行幂等。
     """
+    # 🛡 最底层硬拦截：排除实例 / 名单未加载成功 → 绝不发 RefundInstance
+    if is_excluded(instance_id):
+        reason = ("排除名单未成功加载，拒绝退订（fail-closed）" if not EXCLUDE_LOADED
+                  else "命中「排除实例」保护名单")
+        log(f"\U0001f6e1 {instance_id}: {reason}", "WARN")
+        return False, "protected", reason
     if client_token is None:
         client_token = stable_client_token(region_id, instance_id)
     params = {
@@ -452,7 +507,7 @@ def refund_instance_retry(ak, sk, region_id, instance_id, max_retry=None):
         except Exception as e:
             ok, kind, msg = False, "fail", str(e)
         last_kind, last_msg = kind, msg
-        if kind in ("ok", "skipped", "locked"):
+        if kind in ("ok", "skipped", "locked", "protected"):
             return ok, kind, msg
         # 限流/服务瞬时不可用：退避重试（仍走令牌桶，复用同一 client_token）
         if attempt < max_retry and any(h in msg for h in _THROTTLE_HINTS):
@@ -758,10 +813,11 @@ def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
         # 绕过列出阶段的 IP 判断，也绝不会进入 RefundInstance 调用）。
         targets = [(it["regionId"], it["instanceId"]) for it in all_instances
                    if not is_golden(it["instanceId"])
-                   and not is_refund_exempt(it["instanceId"])]
+                   and not is_refund_exempt(it["instanceId"])
+                   and not is_excluded(it["instanceId"])]
         dropped = len(all_instances) - len(targets)
         if dropped:
-            log(f"\U0001f6d1 已剔除 {dropped} 台黄金机/豁免实例，绝不退订", "WARN")
+            log(f"\U0001f6d1 已剔除 {dropped} 台黄金机/豁免/排除实例，绝不退订", "WARN")
         round_success = 0
         regions_seen = {}
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
@@ -774,7 +830,10 @@ def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
                     ok, kind, msg = False, "fail", str(e)
                 region_name = REGION_INFO.get(rid, rid)
                 regions_seen[region_name] = regions_seen.get(region_name, 0) + 1
-                if kind == "skipped":
+                if kind == "protected":
+                    total["skipped"] += 1
+                    log(f"  🛡️ [{label}][{region_name}] {iid}: {msg}（跳过，不标记已退订）", "WARN")
+                elif kind == "skipped":
                     total["skipped"] += 1
                     mark_refunded(iid)  # 服务端已报已退订/不存在 → 终态，标记后永不再试
                     log(f"  ⚪ [{label}][{region_name}] {iid}: 已退订/不存在，跳过并标记", "INFO")
@@ -886,6 +945,12 @@ def main():
         log(f"读取 user_data 失败: {e}", "ERROR")
         sys.exit(1)
     log(f"共读取 {len(rows)} 个用户配置", "INFO")
+    # 🛡 先加载保护名单：读不到/数据脏 → 直接退出，一台都不退（fail-closed）
+    ex_ids, ex_ok = load_exclude_ids(rows)
+    if not ex_ok:
+        log("⛔ 排除名单含脏数据，本次拒绝执行任何退订（fail-closed）", "ERROR")
+        sys.exit(1)
+    log(f"🛡️ 排除实例保护名单已加载：{len(ex_ids)} 个（列举 / 退订前 / 退款调用三层过滤）", "INFO")
 
     due_count = 0
     for row in rows:

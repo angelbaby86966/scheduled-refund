@@ -35,6 +35,63 @@ const GOLDEN_PUBLIC_IPS = new Set([
   "47.101.145.6",
 ]);
 
+// ====== 排除实例统一保护（2026-11-09 事故根治）======
+// 单一事实来源：Supabase user_data.data.schedule_exclude_instance_ids。
+// 任何调用 BSS RefundInstance 的路径都必须过 assertNotExcluded()；
+// 名单读取失败一律抛错 → 一台都不退（fail-closed）。
+// 全局合并所有用户的排除 ID（实例 ID 全局唯一，合并只会更安全）。
+let EXCLUDE_CACHE: Set<string> | null = null;
+let EXCLUDE_CACHE_AT = 0;
+let EXCLUDE_PENDING: Promise<Set<string>> | null = null;
+const EXCLUDE_TTL_MS = 30_000;
+
+function normalizeExclude(raw: any): string[] {
+  if (Array.isArray(raw)) return raw.filter(x => typeof x === "string" && x.trim()).map((x: string) => x.trim());
+  if (typeof raw === "string") return raw.split(/[\s,;，；]+/).map(x => x.trim()).filter(Boolean);
+  if (raw && typeof raw === "object") return Object.keys(raw).filter(k => raw[k] && k.trim()).map(k => k.trim());
+  return [];
+}
+
+async function fetchExcludeIds(): Promise<Set<string>> {
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=data`, {
+    headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
+  });
+  if (!resp.ok) throw new Error(`排除名单读取失败: HTTP ${resp.status}（拒绝执行任何退订）`);
+  const rows: any[] = await resp.json();
+  if (!Array.isArray(rows)) throw new Error("排除名单返回格式异常（拒绝执行任何退订）");
+  const ids = new Set<string>();
+  for (const r of rows) {
+    const raw = r?.data?.schedule_exclude_instance_ids;
+    if (raw === undefined || raw === null) continue;
+    for (const id of normalizeExclude(raw)) ids.add(id);
+  }
+  EXCLUDE_CACHE = ids;
+  EXCLUDE_CACHE_AT = Date.now();
+  console.log(`[protect] 🛡️ 排除名单已加载 ${ids.size} 个实例 ID`);
+  return ids;
+}
+
+async function loadExcludeIds(): Promise<Set<string>> {
+  if (EXCLUDE_CACHE && Date.now() - EXCLUDE_CACHE_AT < EXCLUDE_TTL_MS) return EXCLUDE_CACHE;
+  // 50 台并发退订时合并成一次请求，避免同时打 Supabase 50 次
+  if (!EXCLUDE_PENDING) EXCLUDE_PENDING = fetchExcludeIds();
+  try {
+    return await EXCLUDE_PENDING;
+  } finally {
+    EXCLUDE_PENDING = null;
+  }
+}
+
+/** 所有退订路径的统一闸门；名单读取失败时抛错（fail-closed）。 */
+async function assertNotExcluded(iid: string): Promise<boolean> {
+  const ids = await loadExcludeIds();
+  if (ids.has(iid)) {
+    console.log(`[protect] 🛡️ 跳过排除实例 ${iid}，绝不退订`);
+    return false;
+  }
+  return true;
+}
+
 const REGION_INFO: Record<string, string> = {
   "cn-hangzhou": "杭州","cn-shanghai": "上海","cn-beijing": "北京",
   "cn-shenzhen": "深圳","cn-guangzhou": "广州","cn-nanjing": "南京",
@@ -209,12 +266,14 @@ async function listAll(ak:string,sk:string) {
   return all;
 }
 
-async function cancelOne(rid:string,iid:string,ak:string,sk:string) {
+async function cancelOne(rid:string,iid:string,ak:string,sk:string): Promise<string> {
   // 🛡 黄金机硬保护（防御性兜底；runFullCancel 已先过滤，这里再保险一层）
   if (GOLDEN_INSTANCE_IDS.has(iid)) {
     console.log(`[refund] 🛡 跳过黄金机 ${iid}（${rid}），绝不退订`);
-    return;
+    return "protected";
   }
+  // 🛡 排除实例统一闸门（2026-11-09 根治）：名单读不到会抛错 → 一台都不退
+  if (!await assertNotExcluded(iid)) return "protected";
   // 用 BSS RefundInstance 真正退订（能退款到原账户，不只是删除）
   // RefundInstance 是中心 endpoint，不分地域；地域信息仅用于日志
   // 自动尝试多个 ProductCode（swas / simpleappserver / swas-open）
@@ -229,7 +288,7 @@ async function cancelOne(rid:string,iid:string,ak:string,sk:string) {
         ImmediatelyRelease: "1",  // 1=立即释放；0=先停机按停机策略停
         ClientToken: crypto.randomUUID(),
       },ak,sk,BSS_VERSION);
-      return;  // 成功！
+      return "ok";  // 成功！
     } catch(e: any) {
       lastErr = e;
       const m = e?.message || String(e);
@@ -248,14 +307,14 @@ async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:s
   for (let i=0;i<insts.length;i+=C) {
     const slice = insts.slice(i,i+C);
     const rs = await Promise.all(slice.map(async x=>{
-      try { await cancelOne(x.regionId,x.instanceId,ak,sk); return "s"; }
+      try { const cr = await cancelOne(x.regionId,x.instanceId,ak,sk); return cr === "protected" ? "p" : "s"; }
       catch(e:any){
         const m=e?.message||"";
         console.log(`[refund] ${x.regionId}/${x.instanceId} 失败: ${m}`);
         if(isLock(m)) return "l"; if(isNF(m)) return "k"; return "f";
       }
     }));
-    for (const r of rs) { if(r==="s")s++; else if(r==="k")sk2++; else if(r==="l")l++; else f++; }
+    for (const r of rs) { if(r==="s")s++; else if(r==="k"||r==="p")sk2++; else if(r==="l")l++; else f++; }
     // BSS 限流 20/1s，保守间隔避免触发
     if (i+C<insts.length) await new Promise(r=>setTimeout(r,300));
   }
@@ -263,19 +322,23 @@ async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:s
 }
 
 async function runFullCancel(ak:string,sk:string) {
+  // 🛡 fail-closed：保护名单读不到就抛错，绝不进入退订流程
+  const excluded = await loadExcludeIds();
   const raw = await listAll(ak,sk);
-  // 🛡 黄金机硬保护：从待退订清单中剔除，绝不退订
+  // 🛡 黄金机 + 排除实例硬保护：从待退订清单中剔除，绝不退订
   const golden = raw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
+  const excludedList = raw.filter(x => excluded.has(x.instanceId));
   if (golden.length) console.log(`[refund] 🛡 已剔除 ${golden.length} 台黄金机，绝不退订: ${golden.map(x=>x.instanceId).join(", ")}`);
-  const all = raw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId));
+  if (excludedList.length) console.log(`[refund] 🛡 已剔除 ${excludedList.length} 台排除实例，绝不退订: ${excludedList.map(x=>x.instanceId).join(", ")}`);
+  const all = raw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId) && !excluded.has(x.instanceId));
   if (all.length===0) return {success:0,skipped:golden.length,locked:0,failed:0,message:"无实例", goldenSkipped: golden.length};
   const r1 = await batchCancel(all,ak,sk);
-  let res:any = {...r1, firstRoundInstances: all.length, goldenSkipped: golden.length};
+  let res:any = {...r1, firstRoundInstances: all.length, goldenSkipped: golden.length, excludedSkipped: excludedList.length};
   if (r1.failed>0) {
     await new Promise(r=>setTimeout(r,10*60*1000));
     const remRaw = await listAll(ak,sk);
     const remGolden = remRaw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
-    const rem = remRaw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId));
+    const rem = remRaw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId) && !excluded.has(x.instanceId));
     if (rem.length>0) {
       const r2 = await batchCancel(rem,ak,sk);
       res = {success:r1.success+r2.success,skipped:r1.skipped+r2.skipped,locked:r1.locked+r2.locked,failed:r2.failed,firstRound:r1,secondRound:r2,goldenSkipped: golden.length+remGolden.length};
@@ -494,6 +557,10 @@ Deno.serve(async (req:Request)=>{
           console.log(`[refundInstance] 🛡 跳过黄金机 ${params.InstanceId}，绝不退订`);
           return json({success:false, skipped:true, reason:"golden-machine-protected", instanceId: params.InstanceId});
         }
+        // 🛡 排除实例保护：单实例退订同样受云端保护名单约束
+        if (!await assertNotExcluded(params.InstanceId)) {
+          return json({success:false, skipped:true, reason:"exclude-list-protected", instanceId: params.InstanceId});
+        }
 
         const TRIED_CODES = params.ProductCode
           ? [params.ProductCode]   // 用户指定就只试这个
@@ -536,6 +603,9 @@ Deno.serve(async (req:Request)=>{
         // 🛡 黄金机硬保护：诊断探测也不对黄金机下手（探测会停机）
         if (params?.InstanceId && (GOLDEN_INSTANCE_IDS.has(params.InstanceId) || (params.PublicIpAddress && GOLDEN_PUBLIC_IPS.has(params.PublicIpAddress)))) {
           return json({success:false, skipped:true, reason:"golden-machine-protected", instanceId: params.InstanceId});
+        }
+        if (params?.InstanceId && !await assertNotExcluded(params.InstanceId)) {
+          return json({success:false, skipped:true, reason:"exclude-list-protected", instanceId: params.InstanceId});
         }
         if (!params?.InstanceId) return json({error:"缺少 params.InstanceId"},400);
         const CODES = ["swas", "simpleappserver", "swas-open", "simpleAppserver", "SimpleApplicationServer", "simpleappserverpre"];

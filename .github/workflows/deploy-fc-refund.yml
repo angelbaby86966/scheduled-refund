@@ -1,0 +1,38 @@
+name: Deploy FC refund (exclude protection)
+
+# FC 是独立于仓库的第三套定时退订执行器，代码不会随 main 自动更新。
+# 修补版 fc/refund/index.js 改完后，手动跑一次本工作流把代码推到 FC。
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'probe=只探测 / deploy=上传修补版代码 / disable-trigger=停用 FC 定时触发器（止血兜底）'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - probe
+          - disable-trigger
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ALIYUN_AK: ${{ secrets.ALIYUN_AK }}
+      ALIYUN_SK: ${{ secrets.ALIYUN_SK }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install FC SDK
+        run: pip install --quiet aliyun-fc2==2.5.2
+      - name: Deploy / probe FC function
+        run: python3 ops/deploy_fc_refund.py --mode "${{ inputs.mode }}"

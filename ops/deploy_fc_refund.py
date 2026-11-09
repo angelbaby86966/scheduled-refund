@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把 fc/refund/index.js 部署到阿里云 FC 的 scheduled-refund-svc/refund 函数。
+"""把 fc/refund/fc_main.py 部署到阿里云 FC 的 scheduled-refund-svc/refund。
 
-用途（2026-11-09 事故根治）：FC 是独立于仓库的第三套定时退订执行器，代码不会随
-GitHub 自动更新。本脚本通过官方 aliyun-fc2 SDK 用仓库 Secrets 的 AK/SK 上传修补版代码，
-让 FC 也读取 schedule_exclude_instance_ids 并 fail-closed 保护排除实例。
+2026-11-09 二次根治（重要纠偏）：
+  FC 线上实际是 **python3.10 / handler=fc_main.handler**，不是 nodejs20。
+  旧版脚本会打包 Node 版 fc/refund/index.js 推上去，函数会直接跑不起来。
+  线上真实代码是 46KB 的 Python 全功能版，且**不读排除名单**，DRY_RUN=false，
+  23:35 主触发器 + 23:50 fallback 触发器都启用 —— 这才是 11-08 晚误退排除实例的真凶。
+
+本脚本现在做三件事：
+  1) 用仓库 Secrets 的 ALIYUN_AK / ALIYUN_SK（2026-11-09 起为「张瑞瑶61」）探测函数；
+  2) 上传修补版 fc_main.py（排除实例保护三层拦截 + fail-closed + IMMEDIATE 残留修复）；
+  3) 同步函数环境变量：新 AK/SK、从 Supabase 实时读取的「排除文本框」名单，
+     让这 7 台即使 Supabase 字段被误删也有一份固化兜底。
 
 用法（由 .github/workflows/deploy-fc-refund.yml 调用）：
   python3 ops/deploy_fc_refund.py --mode probe           # 只探测函数所在地域/endpoint
-  python3 ops/deploy_fc_refund.py --mode deploy          # 上传修补版代码
-  python3 ops/deploy_fc_refund.py --mode disable-trigger # 兜底：删除定时触发器（止血）
+  python3 ops/deploy_fc_refund.py --mode deploy          # 上传修补版代码 + 同步环境变量
+  python3 ops/deploy_fc_refund.py --mode disable-trigger # 兜底：删除两个定时触发器（止血）
 
 绝不打印 AK/SK 明文。
 """
@@ -31,8 +39,11 @@ import zipfile
 
 SERVICE = "scheduled-refund-svc"
 FUNCTION = "refund"
-TRIGGER = "refund-trigger"
-SRC_FILE = "fc/refund/index.js"
+TRIGGERS = ["refund-trigger", "refund-trigger-fallback"]
+SRC_FILE = "fc/refund/fc_main.py"
+CODE_ENTRY = "fc_main.py"
+DEFAULT_ANON_KEY = "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
+DESC = "定时退订(张瑞瑶61) 排除实例保护 v2026-11-09（凭证按 Supabase 档案，DRY_RUN=false）"
 
 # 只探测 FC 实际开通的主要地域；小地域的 fc-open 域名根本不解析，
 # 老版脚本逐台等 DNS 重试会白跑 10 分钟。
@@ -49,7 +60,7 @@ def pct(s):
 
 
 def sts_account_id(ak, sk):
-    """可选：通过 STS GetCallerIdentity 取主账号 UID，用于构造 <uid>.<region>.fc.aliyuncs.com。"""
+    """通过 STS GetCallerIdentity 取主账号 UID，用于构造 <uid>.<region>.fc.aliyuncs.com。"""
     params = {
         "Action": "GetCallerIdentity",
         "Version": "2015-04-01",
@@ -78,11 +89,11 @@ def sts_account_id(ak, sk):
 
 
 def build_code_zip(src_path):
-    """把单个 index.js 打成一个 zip（FC 要求 zipFile 为 zip 包 base64）。"""
+    """把 Python 入口打成 zip（FC 要求 zipFile 为 zip 包，入口文件名必须是 fc_main.py）。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(src_path, arcname="index.js")
-    out = "/tmp/fc_refund_code.zip"
+        z.write(src_path, arcname=CODE_ENTRY)
+    out = "/tmp/fc_refund_python_code.zip"
     with open(out, "wb") as f:
         f.write(buf.getvalue())
     return out
@@ -112,7 +123,7 @@ def find_function(ak, sk, fc2):
     for region, ep in reachable:
         try:
             client = fc2.Client(endpoint=ep, accessKeyID=ak,
-                                accessKeySecret=sk, Timeout=5)
+                                accessKeySecret=sk, Timeout=8)
             info = client.get_function(SERVICE, FUNCTION)
             log(f"✅ 找到函数：region={region} endpoint={ep}")
             return client, region, info
@@ -122,11 +133,48 @@ def find_function(ak, sk, fc2):
     raise RuntimeError(
         "所有可解析的 FC endpoint 都未找到 scheduled-refund-svc/refund。\n"
         "可能原因：① 仓库 Secrets 的 ALIYUN_AK/SK 已失效或无 FC 读权限；"
-        "② FC 服务/函数已被删除（心跳停在 2026-09-15，很可能已停跑）；"
-        "③ 函数在其它地域，可在脚本 REGIONS 常量里补充。\n"
-        "兜底：到 FC 控制台把 refund 函数代码替换为 "
-        "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@9e94c2ff9c226035a9a04088f02023d871dabb52/fc/refund/index.js "
-        "或直接停用 refund-trigger。")
+        "② FC 服务/函数已被删除；③ 函数在其它地域，可在脚本 REGIONS 常量里补充。\n"
+        "兜底：到 FC 控制台把 fc_main.py 替换为仓库 fc/refund/fc_main.py，"
+        "或停用 refund-trigger / refund-trigger-fallback。")
+
+
+def fetch_exclude_ids(anon_key, supabase_url):
+    """实时读取前端「排除实例」文本框内容（全局合并所有用户）。"""
+    url = supabase_url.rstrip("/") + "/rest/v1/user_data?select=username,data"
+    req = urllib.request.Request(url, headers={
+        "apikey": anon_key, "Authorization": "Bearer " + anon_key})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        rows = json.loads(r.read().decode())
+    ids = set()
+    for row in rows or []:
+        raw = ((row or {}).get("data") or {}).get("schedule_exclude_instance_ids")
+        if isinstance(raw, list):
+            ids |= {str(x).strip() for x in raw if isinstance(x, str) and x.strip()}
+        elif isinstance(raw, str):
+            ids |= {x.strip() for x in raw.replace("；", ",").replace("，", ",").split(",") if x.strip()}
+        elif isinstance(raw, dict):
+            ids |= {str(k).strip() for k in raw if str(k).strip()}
+    return ids
+
+
+def merge_environment(client, ak, sk):
+    """回读现有环境变量并合并新凭证 + 文本框兜底名单（FC 是全量替换，必须带原值）。"""
+    cur = getattr(client.get_function(SERVICE, FUNCTION), "data", {}) or {}
+    env = dict(cur.get("environmentVariables") or {})
+    anon = env.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_ANON_KEY") or DEFAULT_ANON_KEY
+    supa = env.get("SUPABASE_URL") or "https://opauwtkivhjxlijfqaix.supabase.co"
+    ids = fetch_exclude_ids(anon, supa)
+    if not ids:
+        raise RuntimeError("Supabase 未读到任何排除实例 ID，拒绝部署（避免上线一份没有兜底的版本）")
+    env.update({
+        "ALIYUN_AK": ak,
+        "ALIYUN_SK": sk,
+        "EXCLUDE_INSTANCE_IDS": ",".join(sorted(ids)),
+        "EXCLUDE_PROTECT_VERSION": "2026-11-09-fc-python-v1",
+    })
+    log(f"环境变量合并完成：共 {len(env)} 项，文本框排除 ID {len(ids)} 个；"
+        f"DRY_RUN={env.get('DRY_RUN')}")
+    return env, len(ids), cur
 
 
 def main():
@@ -150,14 +198,21 @@ def main():
     data = getattr(info, "data", {}) or {}
     log(f"函数当前配置：runtime={data.get('runtime')} handler={data.get('handler')} "
         f"codeSize={data.get('codeSize')}")
+    if data.get("runtime") != "python3.10" or data.get("handler") != "fc_main.handler":
+        raise RuntimeError("线上 runtime/handler 与 Python 修补版不匹配，拒绝部署（防止推错代码）")
 
     if args.mode == "probe":
         log("探测完成（未改动线上代码）", "SUCCESS")
         return
 
     if args.mode == "disable-trigger":
-        client.delete_trigger(SERVICE, FUNCTION, TRIGGER)
-        log(f"已删除触发器 {TRIGGER} —— FC 定时退订停止，由已修复的 Actions / Edge Function 接管", "SUCCESS")
+        for name in TRIGGERS:
+            try:
+                client.delete_trigger(SERVICE, FUNCTION, name)
+                log(f"已删除触发器 {name}", "SUCCESS")
+            except Exception as e:
+                log(f"删除触发器 {name} 失败（可能已不存在）：{type(e).__name__} {str(e)[:120]}", "WARN")
+        log("FC 两个定时触发器已停用，定时退订由已修复的 Actions / Edge Function 接管", "SUCCESS")
         return
 
     src = os.path.join(os.getcwd(), SRC_FILE)
@@ -165,14 +220,16 @@ def main():
         log(f"找不到源码 {src}", "ERROR")
         sys.exit(1)
     zip_path = build_code_zip(src)
-    log(f"代码包已生成：{os.path.getsize(zip_path)} 字节（单文件 index.js，零第三方依赖）")
+    log(f"代码包已生成：{os.path.getsize(zip_path)} 字节（入口 {CODE_ENTRY}，零第三方依赖）")
 
-    # 只传 codeZipFile：SDK 只序列化非空字段，不会清空 runtime / handler / 环境变量
-    resp = client.update_function(SERVICE, FUNCTION, codeZipFile=zip_path)
+    env, n, _cur = merge_environment(client, ak, sk)
+    resp = client.update_function(SERVICE, FUNCTION, codeZipFile=zip_path,
+                                  environmentVariables=env, description=DESC)
     d = getattr(resp, "data", {}) or {}
     log(f"✅ FC 代码已更新：codeSize={d.get('codeSize')} checksum={d.get('codeChecksum')} "
         f"handler={d.get('handler')} runtime={d.get('runtime')}", "SUCCESS")
-    log("修补版已读取 schedule_exclude_instance_ids，且名单读取失败时拒绝任何退订（fail-closed）")
+    log(f"✅ 排除文本框 {n} 个实例 ID 已固化到函数环境变量 EXCLUDE_INSTANCE_IDS")
+    log("修补版三层拦截 + fail-closed；另修复 FC 容器复用导致 IMMEDIATE 残留的问题")
 
 
 if __name__ == "__main__":

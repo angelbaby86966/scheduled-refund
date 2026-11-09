@@ -1,7 +1,10 @@
 name: Deploy FC refund (exclude protection)
 
 # FC 是独立于仓库的第三套定时退订执行器，代码不会随 main 自动更新。
-# 修补版 fc/refund/index.js 改完后，手动跑一次本工作流把代码推到 FC。
+# 线上 runtime=python3.10 / handler=fc_main.handler，源码是 fc/refund/fc_main.py。
+# （fc/refund/index.js 是误判 runtime 时的 Node 版历史产物，已废弃，切勿部署。）
+# 改完 fc_main.py 后手动跑一次本工作流：上传代码 + 同步新 AK/SK + 固化排除文本框名单。
+# 仓库 Secrets ALIYUN_AK / ALIYUN_SK 自 2026-11-09 起为「张瑞瑶61」。
 on:
   workflow_dispatch:
     inputs:

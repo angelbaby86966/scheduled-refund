@@ -1,5 +1,16 @@
 /**
- * 阿里云函数计算（FC）· 定时退订 refund 函数
+ * ⚠️ 已废弃 / DEPRECATED（2026-11-09）—— 请勿部署本文件！
+ *
+ * 本文件是上午误判 FC runtime 时生成的 Node 版历史产物。直连 FC API 实测确认：
+ * 线上函数 runtime=python3.10、handler=fc_main.handler、代码是 46KB 的 fc_main.py。
+ * 把本文件推上去会让函数直接跑不起来。
+ *
+ * 现行源码：fc/refund/fc_main.py
+ * 部署脚本：ops/deploy_fc_refund.py（.github/workflows/deploy-fc-refund.yml）
+ * 详见：FC定时退订配置.md
+ *
+ * ---------------------------------------------------------------------------
+ * 阿里云函数计算（FC）· 定时退订 refund 函数（历史存档）
  *
  * 2026-11-09 根治版：
  *   ① 与 Actions / Edge Function 共用同一份 Supabase 保护名单

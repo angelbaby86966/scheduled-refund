@@ -1,63 +1,90 @@
-# 阿里云函数计算（FC）定时退订 · 已上线
+# 阿里云函数计算（FC）定时退订 · 已上线（2026-11-09 根治版）
 
-> 目标：把"定时退订"放在阿里云自家免费额度内，关机 / 关浏览器 / 关机都照常跑，每天真定时、稳定。
+## 配置总览（以下均为 2026-11-09 直连 FC API 实测回读，非推测）
 
-## 配置总览
 | 项 | 值 |
 |---|---|
-| 服务 | `scheduled-refund-svc` |
-| 函数 | `refund`（runtime `nodejs20`，超时 600s，内存 256MB） |
-| 触发器 | `refund-trigger`（timer） |
-| Cron | `0 35 15 * * *` = **UTC 15:35 = 北京时间 23:35**，每天启用 |
-| 覆盖地域 | 9 个：杭州 / 北京 / 上海 / 深圳 / 成都 / 广州 / 河源 / 武汉(`cn-wuhan-lr`) / 乌兰察布(`cn-wulanchabu`) |
-| 退订逻辑 | 按地域 `ListInstances` 列出 → BSS `RefundInstance` 退订；非全额 / 已退 / 不存在自动跳过；限流自动退避重试 |
-| DRY_RUN | 已设为 `false`（每日真退订） |
-| 排除实例 | **统一读取 Supabase `user_data.schedule_exclude_instance_ids`**（2026-11-09 根治）；列举 / 退订前 / 退款调用三层过滤，名单读取失败一律拒绝退订 |
+| 服务 / 函数 | `scheduled-refund-svc` / `refund` |
+| runtime / handler | **`python3.10` / `fc_main.handler`**（不是 nodejs20！） |
+| 代码 | 单文件 `fc_main.py`，仓库源码 `fc/refund/fc_main.py` |
+| 地域 / endpoint | `cn-hangzhou` / `https://<主账号UID>.cn-hangzhou.fc.aliyuncs.com` |
+| 触发器① | `refund-trigger`：`0 35 15 * * *` = 北京 **23:35**，`enable=true` |
+| 触发器② | `refund-trigger-fallback`：`0 50 15 * * *` = 北京 **23:50**，`payload={"immediate":true}`，`enable=true` |
+| DRY_RUN | `false`（每日真退订） |
+| 排除实例 | 读 Supabase `user_data.schedule_exclude_instance_ids`（全局合并）**＋** 函数环境变量 `EXCLUDE_INSTANCE_IDS`（前端排除文本框 7 个 ID 固化兜底）；三层拦截 + fail-closed |
+| 函数描述 | `定时退订(张瑞瑶61) 排除实例保护 v2026-11-09（凭证按 Supabase 档案，DRY_RUN=false）` |
 
-## 凭证方案
-- **当前生效**：函数环境变量 `ALIYUN_AK` / `ALIYUN_SK`（用户授权，与主账号同源，GitHub Actions Secrets 同款）。
-- **安全备选（已建好，暂未启用）**：RAM 角色 `scheduled-refund-fc-role`（策略 `swas:*` + `AliyunBSSFullAccess`）。因函数计算平台对服务角色 STS 临时凭证有独立缓存（TTL 内不随策略变更刷新），实测未能即时生效，故先走环境变量 AK 方案。待平台凭证缓存刷新后，可改函数读 `ALIBABA_CLOUD_*` 并删除环境变量，切回零长期密钥。
+## 凭证方案（2026-11-09 全量换为「张瑞瑶61」）
 
-## 验证记录
-- DRY_RUN 手动 invoke：9 地域 `ListInstances` 全部成功返回（当前账号实例数为 0，与一直退订吻合），武汉 `cn-wuhan-lr` 正确，无 error。
-- 触发器已确认存在且 `enable=true`。
+- **部署 / 管理凭证**：GitHub Actions Secrets `ALIYUN_AK` / `ALIYUN_SK` **和** FC 函数环境变量
+  `ALIYUN_AK` / `ALIYUN_SK`，均已换成用户 2026-11-09 提供的「张瑞瑶61」一套。
+  STS `GetCallerIdentity` 验证有效（主账号 UID `1107***`）。
+- **运行时退订凭证**：FC 代码与 Actions / Edge Function 一样，从 Supabase `user_data` 的
+  `ak_profiles` 里按 `schedule_ak_ids` 勾选读取（当前勾选 张瑞瑶65/67/68/69）。
+  **这套凭证本次没有改动** —— 换掉会改变退订目标账号，属于另一件事。
+- FC 环境变量共 7 项：`DRY_RUN`、`SUPABASE_URL`、`SUPABASE_ANON_KEY`、
+  `ALIYUN_AK`、`ALIYUN_SK`、`EXCLUDE_INSTANCE_IDS`、`EXCLUDE_PROTECT_VERSION`。
 
-## 排除实例保护（2026-11-09 事故根治）
+## 2026-11-09 事故根因（纠正此前两份错误结论）
 
-事故：网页「排除实例」只写到 Supabase，云端三套执行器都不读该字段，导致 11-08 晚
-定时退订把用户配置的 7 台排除实例全部退掉（SWAS 释放后不可恢复）。
+网页「排除实例」文本框只把 ID 写进 Supabase，三套云端执行器原先都不读，
+导致 11-08 晚把 7 台排除实例全部退掉（SWAS 释放后不可恢复）。
 
-现在三套执行器共用同一份保护名单（全局合并所有用户的 `schedule_exclude_instance_ids`）：
+**此前文档/结论里两处判断是错的，已实测推翻：**
 
-| 执行器 | 代码位置 | 保护实现 |
+1. ~~FC 是 `nodejs20`、用 `fc/refund/index.js`~~ → 实际是 **python3.10 / fc_main.handler**，
+   线上代码是 46KB 的 Python 全功能版（含并发退订、ClientToken 幂等、已退状态机）。
+   按旧脚本推 Node 代码上去，函数会直接跑不起来。
+2. ~~FC 因 AK 失效而空转、昨晚是 Edge Function 动的手~~ → 旧的 `ALIYUN_AK` 失效只影响
+   **我们通过仓库 Secrets 探测/部署 FC 的通道**；FC 函数自己用 Supabase 里的用户凭证，
+   `DRY_RUN=false`、两个触发器都启用，**昨晚真正退订的就是 FC（23:35 主 + 23:50 兜底）**，
+   Edge Function 也可能参与。`_fc_heartbeat` 停在 9-15 不能作为 FC 停跑的证据。
+
+**顺带修掉的隐藏 bug**：FC 容器复用会让 `IMMEDIATE` 环境变量跨调用残留。
+23:50 fallback 触发器带 `{"immediate":true}` 调用过之后，同一容器里后续普通定时调用
+也会被误判成「立即退订」而跳过 23:35–23:59 时间窗闸门。现在 handler 每次入口先清空
+`IMMEDIATE`，再按本次 event 决定是否开启。
+
+## 三套执行器统一保护（现状）
+
+| 执行器 | 代码位置 | 状态 |
 |---|---|---|
-| GitHub Actions | `scheduled_refund.py` | `load_exclude_ids()` + `list_instances()` / `drain_credential()` / `refund_instance()` 三层 |
-| Supabase Edge Function | `supabase/functions/aliyun-proxy/index.ts` | `loadExcludeIds()` + `assertNotExcluded()` 覆盖批量 / 定时 / 单实例 / 探测全部入口 |
-| 阿里云 FC | `fc/refund/index.js` | `loadExcludeIds()` + `refundOne()` 最底层硬拦截 |
+| GitHub Actions | `scheduled_refund.py` | ✅ 已上线；空跑日志「排除实例保护名单已加载：7 个」 |
+| Supabase Edge Function | `supabase/functions/aliyun-proxy/index.ts` | ✅ 已部署到两个项目；真实排除 ID 调用返回 `exclude-list-protected` |
+| 阿里云 FC | `fc/refund/fc_main.py` | ✅ **2026-11-09 已直连部署并线上验证** |
 
-**fail-closed**：任何一套读不到保护名单（Supabase 故障 / 网络异常 / 脏数据）时，
-该套**拒绝执行任何退订**，而不是「当名单为空继续退」。这是防止再次误退的关键。
+**fail-closed**：任何一套读不到 / 解析不了保护名单时，该套拒绝执行任何退订，
+而不是「当名单为空继续退」。FC 另有 `EXCLUDE_INSTANCE_IDS` 环境变量固化文本框内容，
+即使 Supabase 字段被误删、改格式，这 7 台依然不会被退。
 
-部署：FC 代码不走仓库自动同步，需通过 `.github/workflows/deploy-fc-refund.yml`
-（使用仓库 Secrets `ALIYUN_AK` / `ALIYUN_SK`）手动触发一次部署；Edge Function 由
-`deploy-edge-functions.yml` 在 main 变更时自动部署。
+## 部署与验证
 
-### 2026-11-09 实测结论（FC 自动部署通道当前不可用，但无残留风险）
-- 用仓库 Secrets 调 STS `GetCallerIdentity` 返回
-  `404 Specified access key is not found` → **`ALIYUN_AK` 已被删除**，FC 环境变量若同源则同样失效，
-  FC 即使触发也调不通阿里云 API，无法退订任何实例；`_fc_heartbeat` 最后心跳停在 2026-09-15 亦吻合。
-- 昨晚真正执行退订的是 **Supabase Edge Function `RunScheduledCancel`**（cron-job.org 每分钟、
-  按 23:36 匹配），它用的是 `user_data` 里用户自己的 AK/SK，仍有效；该套已修复并线上验证通过。
-- 若日后轮换 AK/SK，重跑 `deploy-fc-refund.yml`（mode=deploy）即可把 `fc/refund/index.js` 推上 FC；
-  在那之前**建议在 FC 控制台停用 `refund-trigger`**，把定时退订统一收敛到已修复的两套。
-- 修补版固定版本（可直接粘贴到 FC 控制台）：
-  `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@9e94c2ff9c226035a9a04088f02023d871dabb52/fc/refund/index.js`
+- 部署：`ops/deploy_fc_refund.py`（由 `.github/workflows/deploy-fc-refund.yml` 手动触发，
+  `mode=deploy`）。脚本会：探测函数 → 校验 runtime/handler → 上传 `fc_main.py` →
+  回读并合并环境变量（带上原 `DRY_RUN` / Supabase 配置，避免全量替换丢字段）→
+  从 Supabase 实时读取排除文本框名单写入 `EXCLUDE_INSTANCE_IDS`。
+  凭证轮换后重跑一次 workflow 即可同步。
+- 绝不要再引用 `fc/refund/index.js`：那是 2026-11-09 上午误判 runtime 时生成的 Node 版历史产物，
+  已标注废弃，**不适用于本函数**。
+- **本地断言**：7 组全通过（fail-closed / 三种格式兼容 / 全局合并 / ENV 兜底 /
+  列举层剔除 / 退订前二次过滤 / BSS 调用最底层硬拦截 / main 拒绝执行），全程 mock 无真实请求。
+- **线上回读**：`get_function_code` 下载的代码与仓库 `fc/refund/fc_main.py` 逐字节一致；
+  环境变量 7 项齐全，`ALIYUN_AK=LTAI5t96***`，`EXCLUDE_INSTANCE_IDS` 7 个。
+- **线上 invoke 验证**（空 payload、北京时间 11:35 不在窗口）：
+  日志 `🛡️ 排除实例保护名单已加载：7 个（其中文本框兜底 7 个）`，`error=None`，
+  **零 `RefundInstance` 请求、零退订**。
 
-## 运行方式（与 GitHub Actions 并行）
-- FC 定时器：阿里云侧服务端，每天 23:35 自动触发。
-- GitHub Actions `scheduled-refund`：每天 23:35 自动触发（cron `35 15 * * *` UTC）。
-- 两者对**同一账号**实例退订，逻辑幂等（已退 / 不存在跳过），重复触发无副作用。如无必要，保留其一即可；两套并存也不冲突。
+## 运行方式（与 GitHub Actions / Edge Function 并行）
+
+- FC 定时器：每天 23:35 主触发 + 23:50 fallback 兜底。
+- GitHub Actions `scheduled-refund`：UTC `25-59/10 15 * * *` = 北京 23:25–23:59 每 10 分钟。
+- Edge Function：cron-job.org 每分钟按用户设定分钟匹配。
+- 三套对同一批实例退订，已退 / 不存在会跳过，ClientToken 幂等，重复触发无副作用。
 
 ## 安全提醒
-- 函数环境变量中存放的是**主账号** AK/SK，建议定期轮换（阿里云控制台「RAM → 安全凭证」）。
-- 不要手动在 FC 控制台点"测试/调用"函数去验证——那会立即真退订账号下现有实例；依赖每天 23:35 自动跑即可。
+
+- **禁止用 `{"immediate": true}` 手动调用 FC 函数**：会跳过时间窗闸门，立即真退订现有实例。
+  普通空 payload 调用在非窗口时段是安全的（本次已用这种方式验证）。
+- 函数环境变量里是主账号 AK/SK，建议定期轮换；轮换后务必重跑
+  `deploy-fc-refund.yml`（mode=deploy），让 Secrets 与 FC 环境变量保持一致。
+- 三套执行器并存是长期隐患：以后任何保护逻辑都要同步三处，极易漏。

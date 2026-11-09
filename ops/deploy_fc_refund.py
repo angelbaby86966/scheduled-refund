@@ -21,7 +21,9 @@ import hmac
 import io
 import json
 import os
+import socket
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -32,10 +34,10 @@ FUNCTION = "refund"
 TRIGGER = "refund-trigger"
 SRC_FILE = "fc/refund/index.js"
 
-REGIONS = [
-    "cn-hangzhou", "cn-shanghai", "cn-beijing", "cn-shenzhen", "cn-guangzhou",
-    "cn-chengdu", "cn-heyuan", "cn-wuhan-lr", "cn-wulanchabu", "cn-hongkong",
-]
+# 只探测 FC 实际开通的主要地域；小地域的 fc-open 域名根本不解析，
+# 老版脚本逐台等 DNS 重试会白跑 10 分钟。
+REGIONS = ["cn-hangzhou", "cn-shanghai", "cn-beijing", "cn-shenzhen",
+           "cn-guangzhou", "cn-chengdu"]
 
 
 def log(msg, level="INFO"):
@@ -66,8 +68,12 @@ def sts_account_id(ak, sk):
         with urllib.request.urlopen(url, timeout=10) as r:
             data = json.loads(r.read().decode())
         return str(data.get("AccountId") or "")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:300]
+        log(f"STS 返回 HTTP {e.code}（用于判断 AK/SK 是否有效）：{body}", "WARN")
+        return ""
     except Exception as e:
-        log(f"STS 取 AccountId 失败（不影响后续探测）：{type(e).__name__}", "WARN")
+        log(f"STS 取 AccountId 失败（不影响后续探测）：{type(e).__name__}: {e}", "WARN")
         return ""
 
 
@@ -87,28 +93,40 @@ def find_function(ak, sk, fc2):
     uid = sts_account_id(ak, sk)
     if uid:
         log(f"STS AccountId 已获取（{uid[:4]}***）")
-    tried = []
+    # 先用 DNS 过滤：解析不了的 host 直接跳过，避免 urllib3 5 次指数退避白等 30 秒
+    endpoints = []
     for region in REGIONS:
-        endpoints = [f"https://fc-open.{region}.aliyuncs.com"]
+        endpoints.append((region, f"https://fc-open.{region}.aliyuncs.com"))
         if uid:
-            endpoints.append(f"https://{uid}.{region}.fc.aliyuncs.com")
-        endpoints.append(f"https://{region}.fc.aliyuncs.com")
-        for ep in endpoints:
-            key = (region, ep)
-            if key in tried:
-                continue
-            tried.append(key)
-            try:
-                client = fc2.Client(endpoint=ep, accessKeyID=ak,
-                                    accessKeySecret=sk, Timeout=10)
-                info = client.get_function(SERVICE, FUNCTION)
-                log(f"✅ 找到函数：region={region} endpoint={ep}")
-                return client, region, info
-            except Exception as e:
-                msg = str(e)[:120].replace(ak, "***").replace(sk, "***")
-                log(f"  × {region} / {ep.split('//')[1]}: {type(e).__name__} {msg}", "DEBUG")
-    raise RuntimeError("所有地域 / endpoint 都未找到 scheduled-refund-svc/refund，"
-                       "请确认 AK/SK 有 FC 读权限，或到 FC 控制台手动粘贴代码")
+            endpoints.append((region, f"https://{uid}.{region}.fc.aliyuncs.com"))
+    reachable = []
+    for region, ep in endpoints:
+        host = ep.split("//")[1]
+        try:
+            socket.gethostbyname(host)
+            reachable.append((region, ep))
+        except socket.gaierror:
+            log(f"  × {region} / {host}: DNS 不解析，跳过", "DEBUG")
+    log(f"可解析的 FC endpoint：{len(reachable)} 个")
+
+    for region, ep in reachable:
+        try:
+            client = fc2.Client(endpoint=ep, accessKeyID=ak,
+                                accessKeySecret=sk, Timeout=5)
+            info = client.get_function(SERVICE, FUNCTION)
+            log(f"✅ 找到函数：region={region} endpoint={ep}")
+            return client, region, info
+        except Exception as e:
+            msg = str(e)[:300].replace(ak, "***").replace(sk, "***")
+            log(f"  × {region} / {ep.split('//')[1]}: {type(e).__name__} {msg}", "DEBUG")
+    raise RuntimeError(
+        "所有可解析的 FC endpoint 都未找到 scheduled-refund-svc/refund。\n"
+        "可能原因：① 仓库 Secrets 的 ALIYUN_AK/SK 已失效或无 FC 读权限；"
+        "② FC 服务/函数已被删除（心跳停在 2026-09-15，很可能已停跑）；"
+        "③ 函数在其它地域，可用 --regions 指定。\n"
+        "兜底：到 FC 控制台把 refund 函数代码替换为 "
+        "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@9e94c2ff9c226035a9a04088f02023d871dabb52/fc/refund/index.js "
+        "或直接停用 refund-trigger。")
 
 
 def main():

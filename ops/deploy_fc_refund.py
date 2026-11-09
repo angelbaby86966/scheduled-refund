@@ -123,7 +123,7 @@ def find_function(ak, sk, fc2):
         "所有可解析的 FC endpoint 都未找到 scheduled-refund-svc/refund。\n"
         "可能原因：① 仓库 Secrets 的 ALIYUN_AK/SK 已失效或无 FC 读权限；"
         "② FC 服务/函数已被删除（心跳停在 2026-09-15，很可能已停跑）；"
-        "③ 函数在其它地域，可用 --regions 指定。\n"
+        "③ 函数在其它地域，可在脚本 REGIONS 常量里补充。\n"
         "兜底：到 FC 控制台把 refund 函数代码替换为 "
         "https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@9e94c2ff9c226035a9a04088f02023d871dabb52/fc/refund/index.js "
         "或直接停用 refund-trigger。")

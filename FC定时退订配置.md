@@ -42,6 +42,17 @@
 （使用仓库 Secrets `ALIYUN_AK` / `ALIYUN_SK`）手动触发一次部署；Edge Function 由
 `deploy-edge-functions.yml` 在 main 变更时自动部署。
 
+### 2026-11-09 实测结论（FC 自动部署通道当前不可用，但无残留风险）
+- 用仓库 Secrets 调 STS `GetCallerIdentity` 返回
+  `404 Specified access key is not found` → **`ALIYUN_AK` 已被删除**，FC 环境变量若同源则同样失效，
+  FC 即使触发也调不通阿里云 API，无法退订任何实例；`_fc_heartbeat` 最后心跳停在 2026-09-15 亦吻合。
+- 昨晚真正执行退订的是 **Supabase Edge Function `RunScheduledCancel`**（cron-job.org 每分钟、
+  按 23:36 匹配），它用的是 `user_data` 里用户自己的 AK/SK，仍有效；该套已修复并线上验证通过。
+- 若日后轮换 AK/SK，重跑 `deploy-fc-refund.yml`（mode=deploy）即可把 `fc/refund/index.js` 推上 FC；
+  在那之前**建议在 FC 控制台停用 `refund-trigger`**，把定时退订统一收敛到已修复的两套。
+- 修补版固定版本（可直接粘贴到 FC 控制台）：
+  `https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@9e94c2ff9c226035a9a04088f02023d871dabb52/fc/refund/index.js`
+
 ## 运行方式（与 GitHub Actions 并行）
 - FC 定时器：阿里云侧服务端，每天 23:35 自动触发。
 - GitHub Actions `scheduled-refund`：每天 23:35 自动触发（cron `35 15 * * *` UTC）。

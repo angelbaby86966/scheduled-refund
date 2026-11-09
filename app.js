@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v117 已加载 - 退订去掉每凭证地区选择（默认全部启用地区），新增「排除实例」文本框：粘贴的实例ID在退订时跳过', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v118 已加载 - 「排除实例」已在云端三套定时执行器统一生效（读取 schedule_exclude_instance_ids + fail-closed 硬拦截）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -2727,7 +2727,7 @@ async function executeCancel() {
             + '（关电脑/关浏览器也会按时执行）', 'success');
           var _exN = (saved.schedule_exclude_instance_ids && saved.schedule_exclude_instance_ids.length) || 0;
           if (_exN > 0) {
-            log('🚫 已保存「排除实例」' + _exN + ' 个（立即退订会跳过；⚠️ 云端定时退订的 FC 函数 scheduled_refund.py 目前尚未读取该字段，需同步更新云端脚本后定时任务才会跳过这些实例）', 'warn');
+            log('🚫 已保存「排除实例」' + _exN + ' 个（立即退订 + 云端三套定时执行器均已生效；保护名单读取失败时定时任务会拒绝退订而不是误退）', 'success');
           }
         }
       } else {
@@ -3241,7 +3241,7 @@ async function renderScheduledTasks() {
         '<small style="color:#c0392b">🔑 参与退订的凭证：' + escHtml(credDesc)
           + (isAllCred ? '（未配置勾选=全部凭证）' : '（共 ' + data.schedule_ak_ids.length + ' 个，其余凭证不会被退订）') + '</small><br>' +
         regionHtml +
-        (excludeCardCount > 0 ? '<small style="color:#c0392b">🚫 排除实例：' + excludeCardCount + ' 个（立即执行会跳过；⚠️ 云端定时任务需 FC 脚本同步后才跳过）</small><br>' : '') +
+        (excludeCardCount > 0 ? '<small style="color:#16a34a">🚫 排除实例：' + excludeCardCount + ' 个（立即退订与云端定时退订均会跳过）</small><br>' : '') +
         lastInfo +
         '<small style="color:#666">执行窗口：每晚 23:35–23:59（其余时间不执行）。① 服务端调度器（cron/Edge Function）到点自动退订；② 浏览器打开/切回本页时若处于窗口且到点，会立即补跑。仅对上述勾选凭证 × 全部启用地区执行，退订=真正退款，不可逆。</small>' +
         '</div>' +

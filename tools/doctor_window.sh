@@ -251,8 +251,11 @@ do_probe() {
   echo "限速 cron      : $(cron_get | grep -cE 'limit_start|clear_limit') 条"
   echo "docker.socket  : $(systemctl is-active docker.socket 2>/dev/null || echo 'n/a')"
   echo "本工具 cron    : $(cron_get | grep -c "$MARK") 条   状态文件: $([ -f "$STATE" ] && cat "$STATE" | tr '\n' ' ' || echo 无)"
-  echo "名字含 doctor 的进程: $(pgrep -af doctor 2>/dev/null | grep -v 'doctor_window\|pgrep' | head -5 || echo '无')"
-  echo "名字含 doctor 的单元: $(systemctl list-units --all 2>/dev/null | grep -i doctor | head -5 || echo '无')"
+  # 只按「进程名/单元名」查真 doctor，避免把 curl 命令行里的 doctor_window 字样算进去
+  local dp du; dp=$(ps -eo comm= 2>/dev/null | grep -i '^doctor' | sort -u | head -5)
+  du=$(systemctl list-units --all --no-pager 2>/dev/null | grep -i doctor | head -5)
+  echo "名字含 doctor 的进程: ${dp:-无}"
+  echo "名字含 doctor 的单元: ${du:-无}"
   echo "===== 体检结束（未改动任何东西）====="
 }
 

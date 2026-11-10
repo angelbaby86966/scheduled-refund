@@ -97,7 +97,7 @@
             <button class="tab" data-tab="regionmgmt" onclick="switchTab('regionmgmt')" data-page-node-id="qR8mT2vXkLwBnD7sJhCe4f">🗺️ 地区管理</button>
             <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')" data-page-node-id="YUlHHsVe7zq1spcDSbZBpl">🖼️ 镜像克隆</button>
             <span class="tab-sep" aria-hidden="true"></span>
-            <button class="tab tab-ext" id="btnBatchCmd" type="button" onclick="openBatchCmdTool()" title="打开 SWAS 批量命令工具（OpenAPI 通道，不受控制台命令助手配额限制）">🚀 批量命令</button>
+            <button class="tab tab-ext" id="btnBatchCmd" type="button" onclick="openBatchCmdTool()" title="打开 SWAS 批量命令工具 · 多凭证批量版（可勾选多个凭证一起执行）">🚀 批量命令</button>
           </div>
 
           <!-- 防火墙面板 -->
@@ -1074,10 +1074,11 @@
     // 主路径：公网链接（换电脑 / 换网络 / 别人都能用）
     // 备选：本地 127.0.0.1 服务（离线时的兜底）
     (function() {
-      var PUBLIC_URL = 'https://init-full-deploy.app.workbuddy.host/';
+      // 面板入口统一指向「多凭证批量版」；PUBLIC_HEALTH 仍指向它实际调用的后端（CORS 已开放），仅用于在线状态探测
+      var PUBLIC_URL = 'https://swas-multi-cred.app.workbuddy.host/?sharecode=XNINRPY73P';
       var PUBLIC_HEALTH = 'https://init-full-deploy.app.workbuddy.host/api/health';
       var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
-      var TOOL_NAME = 'SWAS 批量命令工具';
+      var TOOL_NAME = 'SWAS 批量命令工具（多凭证批量版）';
 
       function showTip(html, ok) {
         var old = document.getElementById('batchCmdTip');

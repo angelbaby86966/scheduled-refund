@@ -114,7 +114,7 @@ do_pause() {
   printf 'PAUSED_AT=%s\nACTION=pause\n' "$(date '+%F %T')" > "$STATE"
   show_state
   log "===== 暂停完成（本脚本到此结束，无 cron、无后台进程）====="
-  log "  恢复命令: curl -fsSL '<本脚本URL>' | bash -s -- resume"
+  log "  恢复: 同一条 curl 命令末尾加 ' -s -- resume' 即可；存成文件则 bash 文件名 resume"
   [ "$(window_cnt)" != "0" ] && log "  ⚠️ 检测到定时窗口脚本(DOCTOR_WINDOW cron)，它的 18:20 兜底会把本次暂停恢复，需要长期暂停请先卸载定时版"
   return 0
 }

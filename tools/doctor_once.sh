@@ -28,12 +28,16 @@ ACTION="${1:-pause}"
 C="ipes"
 HOLD="# DOCTOR_HOLD "
 STATE_DIR="/var/lib/doctor-once"
-STATE="$STATE_DIR/state"
-BAK="$STATE_DIR/crontab.before"
 LOG="/var/log/doctor_once.log"
 
-mkdir -p "$STATE_DIR" 2>/dev/null || STATE_DIR=/tmp/doctor-once
-mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+# 非 root 环境可能写不了 /var，回退到 /tmp；路径回退后状态/备份要跟着重算
+mkdir -p "$STATE_DIR" 2>/dev/null || { STATE_DIR="/tmp/doctor-once"; mkdir -p "$STATE_DIR" 2>/dev/null || true; }
+STATE="$STATE_DIR/state"
+BAK="$STATE_DIR/crontab.before"
+if ! touch "$LOG" >/dev/null 2>&1; then
+  LOG="/tmp/doctor_once.log"
+  touch "$LOG" >/dev/null 2>&1 || LOG="/dev/null"
+fi
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null

@@ -1074,9 +1074,10 @@
     // 主路径：公网链接（换电脑 / 换网络 / 别人都能用）
     // 备选：本地 127.0.0.1 服务（离线时的兜底）
     (function() {
-      // 面板入口统一指向「多凭证批量版」；PUBLIC_HEALTH 仍指向它实际调用的后端（CORS 已开放），仅用于在线状态探测
-      var PUBLIC_URL = 'https://swas-multi-cred.app.workbuddy.host/?sharecode=XNINRPY73P';
-      var PUBLIC_HEALTH = 'https://init-full-deploy.app.workbuddy.host/api/health';
+      // 面板入口统一指向「多凭证批量版」（前后端同源部署，链接本身即完整地址）
+      // PUBLIC_HEALTH 探测同一服务的同源后端，需带网关 sharecode
+      var PUBLIC_URL = 'https://swas-batch-cmd.app.workbuddy.host/?sharecode=R3Y47IVJ52';
+      var PUBLIC_HEALTH = 'https://swas-batch-cmd.app.workbuddy.host/api/health?sharecode=R3Y47IVJ52';
       var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
       var TOOL_NAME = 'SWAS 批量命令工具（多凭证批量版）';
 

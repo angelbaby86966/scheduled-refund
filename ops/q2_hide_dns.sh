@@ -10,11 +10,20 @@
 #   - 顺带治理本机日志：docker 日志轮转 + 超大日志清空 + journald 限额
 #
 # 用法：
-#   bash q2_hide_dns.sh             安装并自检（失败自动回滚，不动 resolv.conf）
-#   bash q2_hide_dns.sh --check    只检查前置条件，不改任何东西
-#   bash q2_hide_dns.sh --status   查看当前状态
-#   bash q2_hide_dns.sh --rollback 完整还原（恢复原 resolv.conf + 停服务）
-#   bash q2_hide_dns.sh --version  输出版本指纹
+#   bash q2_hide_dns.sh                    安装保活 + DNS 隐藏并自检
+#   bash q2_hide_dns.sh --keepalive-only  只装看门狗保活，完全不碰 DNS
+#   bash q2_hide_dns.sh --check           只检查前置条件，不改任何东西
+#   bash q2_hide_dns.sh --status          查看当前状态（含保活）
+#   bash q2_hide_dns.sh --rollback        还原 DNS（保活保留不动）
+#   bash q2_hide_dns.sh --rollback-keepalive  单独移除看门狗保活
+#   bash q2_hide_dns.sh --version         输出版本指纹
+#
+# 看门狗保活（独立于 DNS 安装，装在最前面，DNS 失败也不影响）：
+#   · happ 路数 < 9  → docker restart 补拉回 9 路
+#   · happ 路数 >= 9 → 完全不动（★ 超过 9 路不杀、不重启）
+#   · docker 守护进程挂了 → systemctl/service 拉起
+#   · ipes 容器挂了 → docker start；容器被删 → 按现网烘焙参数完整重建
+#   · cron 每分钟 + @reboot；重置防抖默认 300s；日志 /var/log/q2_keepalive.log
 #
 # 可外置调整（随时改，不需要改脚本）：
 #   Q2_HIDE_MODE=all|suffix        默认 all：除白名单一律走 DoH（最彻底）
@@ -22,6 +31,10 @@
 #   Q2_IQY_SUFFIXES_FILE=/etc/q2/iqiyi_suffixes   后缀清单，每行一个
 #   Q2_DOH_URLS="https://dns.alidns.com/dns-query,https://doh.pub/dns-query"
 #   Q2_UPSTREAM=114.114.114.114    明文回退上游（DoH 全挂时 watchdog 用）
+#   Q2_KA_HAPP_N=9                 保活目标路数
+#   Q2_KA_DEBOUNCE=300             两次补拉之间的最小间隔（秒）
+#   Q2_KA_TAKEOVER=1               1=摘掉旧 ipes_health_check cron 避免互殴，0=保留
+#   Q2_KA_PATTERN='[h]app:vod'     容器内 happ 进程计数匹配串
 #
 # ⚠️ 边界：TLS SNI 里的域名需要服务端 ECH 才能加密，客户端单方面改不了；
 #          上行流量模型（大上行/海量连接/UDP 打洞）与本脚本无关，照旧可见。
@@ -29,8 +42,20 @@
 set -u
 export LC_ALL=C
 
-HIDE_DNS_VER="1.0.0-20261114"
+HIDE_DNS_VER="1.1.0-20261114"
+KA_VER="1.0.0-20261114"
 PYBIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
+
+# ── 看门狗保活（与 DNS 隐藏完全独立，安装顺序在 DNS 之前）──
+KA_PATH="/usr/local/bin/q2_keepalive.sh"
+KA_LOG="/var/log/q2_keepalive.log"
+KA_STAMP="/tmp/.q2_ka_last_reset"
+KA_N="${Q2_KA_HAPP_N:-9}"
+KA_DEBOUNCE="${Q2_KA_DEBOUNCE:-300}"
+KA_TAKEOVER="${Q2_KA_TAKEOVER:-1}"
+KA_PATTERN="${Q2_KA_PATTERN:-[h]app:vod}"
+KA_CONTAINER="${Q2_KA_CONTAINER:-ipes}"
+KA_CFG="${Q2_KA_CFG:-/opt/ipes/var/db/ipes/happ-conf/custom.yml}"
 
 SELF_PATH="/usr/local/bin/q2_hide_dns.sh"
 DOH_PY="/usr/local/bin/q2_doh_proxy.py"
@@ -248,6 +273,230 @@ install_cron() {
   ( crontab -l 2>/dev/null | grep -v 'q2_hide_dns.sh' || true; echo "${line}" ) | crontab - 2>/dev/null || true
 }
 
+# =============================================================================
+# 看门狗保活：happ < N 补拉到 N，happ >= N 不动；docker / 容器挂了自动拉起
+# 生成独立脚本 + 独立 cron，与 DNS 隐藏互不依赖
+# =============================================================================
+capture_ka_params() {
+  # 从现网容器烘焙重建参数：容器被删时按原镜像 / 挂载 / 网络逐条重建，不写死
+  KA_IMG=""; KA_NET="host"; KA_MARGS=""
+  if docker inspect "${KA_CONTAINER}" >/dev/null 2>&1; then
+    KA_IMG="$(docker inspect "${KA_CONTAINER}" --format '{{.Config.Image}}' 2>/dev/null || true)"
+    KA_NET="$(docker inspect "${KA_CONTAINER}" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
+    KA_MARGS="$(docker inspect "${KA_CONTAINER}" --format '{{range .Mounts}}-v {{.Source}}:{{.Destination}} {{end}}' 2>/dev/null || true)"
+  fi
+  KA_IMG="${Q2_KA_IMG:-${KA_IMG:-ccr.ccs.tencentyun.com/zyy_cloud/ipes-linux-amd64-youkai-latest:latest}}"
+  KA_NET="${Q2_KA_NET:-${KA_NET:-host}}"
+  KA_MARGS="${Q2_KA_MARGS:-${KA_MARGS:-}}"
+  log "保活烘焙：IMG=${KA_IMG} NET=${KA_NET} 挂载数=$(printf '%s' "${KA_MARGS}" | grep -o -- '-v ' | wc -l | tr -d ' ')"
+}
+
+write_keepalive() {
+  {
+    printf '#!/bin/bash\n'
+    printf '# q2 看门狗保活 v%s（由 q2_hide_dns.sh 生成，请勿手工修改）\n' "${KA_VER}"
+    printf '# 规则：happ < %s 补拉到 %s；happ >= %s 一律不动；docker / 容器挂了自动拉起\n' "${KA_N}" "${KA_N}" "${KA_N}"
+    printf 'set -u\n'
+    printf 'export LC_ALL=C\n'
+    printf 'C="%s"\n' "${KA_CONTAINER}"
+    printf 'N="%s"\n' "${KA_N}"
+    printf 'DEBOUNCE="%s"\n' "${KA_DEBOUNCE}"
+    printf 'PATTERN="%s"\n' "${KA_PATTERN}"
+    printf 'IMG="%s"\n' "${KA_IMG}"
+    printf 'NETMODE="%s"\n' "${KA_NET}"
+    printf 'MARGS="%s"\n' "${KA_MARGS}"
+    printf 'CFG="%s"\n' "${KA_CFG}"
+    printf 'LOG="%s"\n' "${KA_LOG}"
+    printf 'STAMP="%s"\n' "${KA_STAMP}"
+    cat <<'KAEOF'
+
+LOCK="/tmp/.q2_keepalive.lock"
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+
+# 计数口径与部署线验收一致：容器内 happ:vod 分片进程数
+happ_cnt() {
+  docker exec "$C" sh -c "ps -ef 2>/dev/null | grep -c '${PATTERN}'" 2>/dev/null | tr -d '\r\n'
+}
+container_running() {
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$C"
+}
+num() {
+  case "${1:-0}" in ''|*[!0-9]*) printf '0';; *) printf '%s' "$1";; esac
+}
+
+# 防抖：重置后 DEBOUNCE 秒内不重复重启，避免 OOM 频发时每分钟断流
+debounce_ok() {
+  [ -f "$STAMP" ] || return 0
+  local last now age
+  # 读文件内容而非 stat -c %Y（后者是 GNU 专用，非 GNU 环境会静默退化成"允许重启"）
+  last=$(num "$(cat "$STAMP" 2>/dev/null | tr -d '[:space:]')")
+  now=$(date +%s)
+  age=$(( now - last ))
+  [ "$age" -ge "$DEBOUNCE" ]
+}
+mark() { date +%s > "$STAMP" 2>/dev/null || true; }
+
+# S1 docker 守护进程自愈（CentOS 7：systemctl 优先，回落 service）
+s1_docker() {
+  if docker info >/dev/null 2>&1; then return 0; fi
+  log "S1 docker 不可用，尝试拉起"
+  systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 12); do
+    if docker info >/dev/null 2>&1; then
+      log "S1 docker 已恢复（第 ${i} 次探测，约 $((i*5))s）"
+      return 0
+    fi
+    sleep 5
+  done
+  log "S1 docker 拉起失败（等待 60s 仍不可用）"
+  return 1
+}
+
+# S2 容器自愈：在跑→跳过；停了→docker start（保 SN 不变）；被删→按烘焙参数完整重建
+s2_container() {
+  if container_running; then return 0; fi
+  log "S2 容器 ${C} 未运行，尝试拉起"
+  if docker inspect "$C" >/dev/null 2>&1; then
+    if docker start "$C" >/dev/null 2>&1; then
+      log "S2 docker start 成功（保留原 SN）"
+      sleep 15
+      return 0
+    fi
+    log "S2 docker start 失败，改为完整重建"
+    docker rm -f "$C" >/dev/null 2>&1 || true
+  else
+    log "S2 容器不存在，按烘焙参数完整重建"
+  fi
+  local out rc
+  # shellcheck disable=SC2086  # MARGS 需要分词展开成多条 -v
+  out=$(docker run -d --restart=always --name="$C" --network="$NETMODE" $MARGS \
+        -v "$CFG:/app/ipes/var/db/ipes/happ-conf/custom.yml" \
+        "$IMG" sh -c '/app/ipes/bin/ipes start && tail -f /dev/null' 2>&1)
+  rc=$?
+  log "S2 容器重建 rc=${rc} out=${out}"
+  [ "$rc" = "0" ] || return 1
+  sleep 20
+  container_running
+}
+
+# S3 happ 路数：★ 只补低，不管高
+s3_happ() {
+  local cnt c i
+  cnt=$(num "$(happ_cnt)")
+  if [ "$cnt" -ge "$N" ]; then
+    log "S3 happ=${cnt} >= ${N}，无需动作（超过 ${N} 路按规则不处理）"
+    return 0
+  fi
+  log "S3 happ=${cnt} < ${N}，准备补拉"
+  if ! debounce_ok; then
+    log "S3 距上次重置不足 ${DEBOUNCE}s，本轮跳过（防反复断流）"
+    return 0
+  fi
+  # 二次确认：debounce 检查与 restart 之间可能已被另一实例修好，避免重复断流
+  c=$(num "$(happ_cnt)")
+  if [ "$c" -ge "$N" ]; then
+    log "S3 二次确认 happ=${c} >= ${N}，取消本轮 restart"
+    return 0
+  fi
+  # 采用部署线验证过的路径：docker restart 会按 custom.yml 的 9 行 args 重新拉起全部分片
+  log "S3 执行 docker restart ${C} 拉回 ${N} 路"
+  docker restart "$C" >/dev/null 2>&1 || log "S3 docker restart 返回非 0"
+  mark
+  for i in $(seq 1 18); do
+    sleep 5
+    c=$(num "$(happ_cnt)")
+    if [ "$c" -ge "$N" ]; then
+      log "S3 已恢复 happ=${c}（第 ${i} 次验证，约 $((i*5))s）"
+      return 0
+    fi
+  done
+  c=$(num "$(happ_cnt)")
+  log "S3 等待 90s 后 happ=${c} 仍未达 ${N}，保留现场等下轮"
+  return 1
+}
+
+main() {
+  touch "$LOG" 2>/dev/null; chmod 644 "$LOG" 2>/dev/null
+  # 单实例互斥：cron 每分钟 + 手动触发可能撞在同一秒，两个进程同时看到掉路会重复 restart
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK" || exit 0
+    if ! flock -n 9; then
+      log "已有看门狗实例在运行，本轮退出（避免并发 restart）"
+      exit 0
+    fi
+  fi
+  # 1G 机器磁盘紧张，日志超 1MB 只保留最近 500 行（wc -c 比 stat -c %s 可移植）
+  local sz
+  sz=$(num "$(wc -c < "$LOG" 2>/dev/null | tr -d '[:space:]')")
+  if [ "$sz" -gt 1048576 ]; then
+    tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+  fi
+  if ! s1_docker; then log "主流程中止：docker 不可用（S1 已尝试自愈）"; exit 1; fi
+  if ! s2_container; then log "主流程中止：容器不可用（S2 已尝试 start / 重建），下轮继续"; exit 1; fi
+  s3_happ || true
+  exit 0
+}
+main "$@"
+KAEOF
+  } > "${KA_PATH}"
+  chmod 755 "${KA_PATH}"
+}
+
+install_keepalive() {
+  log "===== 安装看门狗保活 v${KA_VER} ====="
+  if [ "$(id -u)" != "0" ]; then log "⚠️ 非 root，跳过保活安装"; return 1; fi
+  if ! command -v docker >/dev/null 2>&1; then log "⚠️ docker 命令不存在，跳过保活安装（不阻塞后续）"; return 1; fi
+  if ! command -v crontab >/dev/null 2>&1; then log "⚠️ crontab 不存在，跳过保活安装"; return 1; fi
+
+  capture_ka_params
+  write_keepalive
+  if ! bash -n "${KA_PATH}"; then
+    log "❌ 保活脚本语法校验失败，未写 cron（DNS 流程继续）"
+    return 1
+  fi
+  touch "${KA_LOG}" 2>/dev/null; chmod 644 "${KA_LOG}" 2>/dev/null
+
+  local current filtered
+  current="$(crontab -l 2>/dev/null || true)"
+  filtered="$(printf '%s\n' "${current}" | grep -v 'q2_keepalive.sh' || true)"
+  if [ "${KA_TAKEOVER}" = "1" ]; then
+    # 旧保活是「happ != 9 就重启」的双向守恒，且 @reboot 带 bin/ipes stop 会停业务；
+    # 两套并存会互相 restart，必须摘掉（Q2_KA_TAKEOVER=0 可保留）
+    filtered="$(printf '%s\n' "${filtered}" \
+      | grep -vE 'ipes_health_check|bin/ipes[[:space:]]+stop' || true)"
+    log "已接管：移除旧 ipes_health_check / @reboot 停业务 cron（Q2_KA_TAKEOVER=0 可保留）"
+  fi
+  filtered="$(printf '%s\n' "${filtered}" | sed '/^[[:space:]]*$/d' || true)"
+  {
+    if [ -n "${filtered}" ]; then printf '%s\n' "${filtered}"; fi
+    printf '* * * * * %s >/dev/null 2>&1\n' "${KA_PATH}"
+    printf '@reboot sleep 120 && %s >/dev/null 2>&1\n' "${KA_PATH}"
+  } | crontab - 2>/dev/null || { log "❌ crontab 写入失败，保活未生效"; return 1; }
+
+  systemctl enable crond >/dev/null 2>&1 || true
+  systemctl start crond >/dev/null 2>&1 || true
+  ok "看门狗已装：${KA_PATH}（cron 每分钟 + @reboot）"
+  log "规则：happ < ${KA_N} 补拉到 ${KA_N}；happ >= ${KA_N} 完全不动；docker / 容器挂了自动拉起"
+  log "防抖：${KA_DEBOUNCE}s  日志：${KA_LOG}"
+  return 0
+}
+
+remove_keepalive() {
+  [ "$(id -u)" = "0" ] || die "需要 root 运行"
+  local current filtered
+  current="$(crontab -l 2>/dev/null || true)"
+  filtered="$(printf '%s\n' "${current}" | grep -v 'q2_keepalive.sh' | sed '/^[[:space:]]*$/d' || true)"
+  if [ -n "${filtered}" ]; then
+    printf '%s\n' "${filtered}" | crontab - 2>/dev/null || true
+  else
+    printf '' | crontab - 2>/dev/null || true
+  fi
+  rm -f "${KA_PATH}" "${KA_STAMP}"
+  ok "看门狗已移除（日志 ${KA_LOG} 保留）"
+}
+
 tidy_logs() {
   # docker 日志轮转：只写配置，不重启 docker（避免打断 9 路 happ；下次重启生效）
   if [ -f /etc/docker/daemon.json ]; then
@@ -305,6 +554,9 @@ precheck() {
 
 do_install() {
   precheck
+  # ★ 保活独立于 DNS 安装，且刻意放在最前面：
+  #   后面哪怕 yum 装 dnsmasq OOM 被杀、或 DoH 自检失败 die 退出，保活也已经生效。
+  install_keepalive || log "⚠️ 看门狗安装未成功（不阻塞后续 DNS 流程）"
   mkdir -p "${STATE_DIR}"
 
   if ! command -v dnsmasq >/dev/null 2>&1; then
@@ -387,6 +639,13 @@ do_status() {
   echo "通用解析    : $(dns_probe 53 "${PROBE_ANY}" 2>/dev/null || echo 'FAIL')"
   echo "配置        : $([ -f "${DNSMASQ_CONF}" ] && echo "${DNSMASQ_CONF}" || echo '未安装')"
   echo "后缀清单    : $([ -f "${SUFFIX_FILE}" ] && echo "${SUFFIX_FILE} ($(wc -l < "${SUFFIX_FILE}") 行)" || echo '无')"
+  echo "--- 看门狗保活 ---"
+  echo "保活版本    : ${KA_VER}"
+  echo "保活脚本    : $([ -x "${KA_PATH}" ] && echo "${KA_PATH}" || echo '未安装')"
+  echo "保活 cron   : $(crontab -l 2>/dev/null | grep -c 'q2_keepalive.sh') 条"
+  echo "路数规则    : < ${KA_N} 补拉；>= ${KA_N} 不动（超出不杀）"
+  echo "防抖/日志   : ${KA_DEBOUNCE}s / ${KA_LOG}"
+  echo "最近动作    : $(tail -n 1 "${KA_LOG}" 2>/dev/null || echo '无')"
 }
 
 do_rollback() {
@@ -403,11 +662,13 @@ do_rollback() {
 }
 
 case "${1:-}" in
-  --check)    precheck ;;
-  --status)   do_status ;;
-  --rollback) do_rollback ;;
-  --watchdog) do_watchdog ;;
-  --version)  echo "${HIDE_DNS_VER}" ;;
-  *)          do_install ;;
+  --check)               precheck ;;
+  --status)              do_status ;;
+  --rollback)            do_rollback ;;
+  --watchdog)            do_watchdog ;;
+  --version)             echo "${HIDE_DNS_VER} / keepalive ${KA_VER}" ;;
+  --keepalive-only)      install_keepalive ;;
+  --rollback-keepalive)  remove_keepalive ;;
+  *)                     do_install ;;
 esac
 exit 0

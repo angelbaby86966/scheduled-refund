@@ -458,6 +458,13 @@
     });
   }
 
+  function getProfileSecret(name) {
+    var profiles = listProfilesLocal();
+    var p = profiles.find(function(x) { return x.name === name; });
+    if (!p) return null;
+    return { name: p.name, ak_id: p.ak_id, ak_secret: p.ak_secret };
+  }
+
   function getActiveProfile() {
     var profiles = listProfilesLocal();
     var active = localStorage.getItem(activeProfileKey());
@@ -610,6 +617,7 @@
     getAccessKeyId: getAccessKeyIdPublic,
     getAccessKeySecret: getAccessKeySecretPublic,
     listProfiles: listProfiles,
+    getProfileSecret: getProfileSecret,
     getActiveProfile: getActiveProfile,
     useProfile: useProfile,
     saveProfile: saveProfile,

@@ -314,7 +314,7 @@
             <div class="card" data-page-node-id="SQydkRwREnIwStYx8gqOvr">
               <div class="card-header" data-page-node-id="9yqGsJg2gyVwdwBLa5CJKH">
                 <h3 data-page-node-id="m5HybNRF7HlmgD3goYTJUw">🛒 批量下单（生成待支付订单）</h3>
-                <p class="card-desc" data-page-node-id="MmsDXp1ZOf2PF35av1imRa">按地域输入数量，生成待支付订单。不会自动扣费，需前往阿里云手动支付。默认 ¥40/月 配置。</p>
+                <p class="card-desc" data-page-node-id="MmsDXp1ZOf2PF35av1imRa">按地域输入数量，生成待支付订单。不会自动扣费，需前往阿里云手动支付。默认 ¥40/月 配置。可勾选多个凭证同时下单，各地域数量按每个凭证分别生效。</p>
               </div>
               <div class="card-body" data-page-node-id="tnTgKzMhlFDHDJd3ItpiiQ">
                 <!-- 套餐信息展示 -->
@@ -337,10 +337,15 @@
 
                 <!-- 汇总 -->
                 <div class="order-summary" id="orderSummary" style="display:none" data-page-node-id="2Hmss3R6LBYd2YIUIGOf9P">
-                  预计生成 <strong id="orderTotalCount" data-page-node-id="nDA2klYRsgDRC9XiEDE3bR">0</strong> 台待支付订单，费用约 <strong id="orderTotalPrice" data-page-node-id="kByqyv5W5mmDqG5k3GKDWr">¥0</strong>/月
+                  对 <strong id="orderCredCountText">0</strong> 个凭证，预计生成 <strong id="orderTotalCount" data-page-node-id="nDA2klYRsgDRC9XiEDE3bR">0</strong> 台待支付订单，费用约 <strong id="orderTotalPrice" data-page-node-id="kByqyv5W5mmDqG5k3GKDWr">¥0</strong>/月
                 </div>
+                <div id="orderCredWarn" style="display:none; margin:8px 0; padding:8px 12px; background:#fffbe6; border:1px solid #ffe58f; border-radius:6px; color:#ad6800; font-size:13px;"></div>
 
-                <div class="action-bar" style="justify-content:center; padding:20px 0;" data-page-node-id="4WBYT0CloYDHw6FU4i0aSd">
+                <div class="action-bar" style="display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:wrap; padding:20px 0;" data-page-node-id="4WBYT0CloYDHw6FU4i0aSd">
+                  <div class="cred-multi-wrap">
+                    <button type="button" id="orderCredBtn" class="cred-multi-btn" onclick="toggleOrderCredDropdown()" title="选择本次下单使用的阿里云凭证（可多选，多账号同时下单）">— 选择凭证（多选）—</button>
+                    <div id="orderCredDropdown" class="cred-multi-dropdown" style="display:none;"></div>
+                  </div>
                   <button class="btn btn-primary" style="font-size:16px; padding:12px 40px;" onclick="batchCreateInstances()" data-page-node-id="vqAqcbaiAvepvSHbNTHAEO">
                     🚀 生成待支付订单
                   </button>
@@ -793,9 +798,9 @@
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
   </script>
-  <script src="aliyun-client-v2.js?v=18"></script>
+  <script src="aliyun-client-v2.js?v=19"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=119"></script>
+  <script src="app.js?v=120"></script>
   <script src="one-click-deploy.js?v=17"></script>
   <script src="image-clone.js?v=21&r=39"></script>
   <script>

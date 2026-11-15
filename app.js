@@ -1014,6 +1014,7 @@ function credMultiToggle(inst, cb) {
     var lbl = dd.querySelector('.cred-multi-item[data-name="' + cssEscape(name) + '"]');
     if (lbl) lbl.classList.toggle('checked', cb.checked);
   }
+  if (typeof inst.onChange === 'function') { try { inst.onChange(inst); } catch(e) { console.warn('[credMulti] onChange', e); } }
 }
 
 function toggleCredMultiDropdown(inst) {
@@ -1031,6 +1032,9 @@ function credMultiGetSelected(inst) {
 var ccCredMulti = makeCredMultiSelect('ccCredBtn', 'ccCredDropdown');
 var fwCredMulti = makeCredMultiSelect('fwCredBtn', 'fwCredDropdown');
 var fwApplyCredMulti = makeCredMultiSelect('fwApplyCredBtn', 'fwApplyCredDropdown');
+var orderCredMulti = makeCredMultiSelect('orderCredBtn', 'orderCredDropdown');
+function toggleOrderCredDropdown() { toggleCredMultiDropdown(orderCredMulti); }
+orderCredMulti.onChange = function(){ if (typeof updateOrderSummary === 'function') updateOrderSummary(); };
 function toggleCcCredDropdown() { toggleCredMultiDropdown(ccCredMulti); }
 function toggleFwCredDropdown() { toggleCredMultiDropdown(fwCredMulti); }
 function toggleFwApplyCredDropdown() { toggleCredMultiDropdown(fwApplyCredMulti); }
@@ -1041,7 +1045,8 @@ document.addEventListener('click', function(e) {
     document.getElementById('batchCredDropdown'),
     document.getElementById(ccCredMulti.ddId),
     document.getElementById(fwCredMulti.ddId),
-    document.getElementById(fwApplyCredMulti.ddId)
+    document.getElementById(fwApplyCredMulti.ddId),
+    document.getElementById(orderCredMulti.ddId)
   ];
   dds.forEach(function(dd) {
     if (!dd || dd.style.display !== 'block') return;
@@ -1540,6 +1545,7 @@ function switchTab(tabName) {
   document.querySelector('.tab[data-tab="' + tabName + '"]').classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
   if (tabName === 'firewall') renderCredMultiFor(fwApplyCredMulti);  // 进入防火墙面板渲染凭证多选
+  if (tabName === 'order') { renderCredMultiFor(orderCredMulti); updateOrderSummary(); }  // 进入批量下单面板渲染凭证多选并刷新汇总
   if (tabName === 'regionmgmt') renderRegionMgmtTable();  // 进入地区管理页重绘表格（页面加载时不渲染，避免空白）
   if (tabName === 'cancel') { renderCancelCredSelect(); }  // 进入退订面板时渲染「参与退订的凭证」（每个凭证行内含各自的地区选择）
 }
@@ -3671,7 +3677,29 @@ function initOrderGrid() {
   container.innerHTML = items;
 
   if (summary) summary.style.display = 'block';
+  renderCredMultiFor(orderCredMulti);
   updateOrderSummary();
+}
+
+// 解析本次下单实际有效的凭证（过滤掉缺 AK/SK 的），供汇总与下单共用，保证两处口径一致
+// 返回有效凭证数组，数组上附带 skipped（被跳过的凭证名）与 versionError 标记
+function resolveSelectedCreds() {
+  var creds = [];
+  creds.skipped = [];
+  creds.versionError = false;
+  // N7 能力检测：浏览器缓存了旧版 aliyun-client-v2.js 时 getProfileSecret 会缺失
+  if (!window.AliyunClient || typeof window.AliyunClient.getProfileSecret !== 'function') {
+    log('❌ 凭证组件版本过旧，请强制刷新页面（Ctrl+F5）后重试', 'error');
+    creds.versionError = true;
+    return creds;
+  }
+  var names = (typeof credMultiGetSelected === 'function') ? credMultiGetSelected(orderCredMulti) : [];
+  names.forEach(function (nm) {
+    var s = window.AliyunClient.getProfileSecret(nm);
+    if (s && s.ak_id && s.ak_secret) creds.push(s);
+    else creds.skipped.push(nm);
+  });
+  return creds;
 }
 
 function updateOrderSummary() {
@@ -3686,10 +3714,29 @@ function updateOrderSummary() {
       totalPrice += count * ORDER_DEFAULT_PRICE;
     }
   }
+  var resolved = resolveSelectedCreds();
+  var credN = resolved.length;
   var countEl = document.getElementById('orderTotalCount');
   var priceEl = document.getElementById('orderTotalPrice');
-  if (countEl) countEl.textContent = totalCount;
-  if (priceEl) priceEl.textContent = '¥' + totalPrice.toFixed(2);
+  var credCountEl = document.getElementById('orderCredCountText');
+  if (countEl) countEl.textContent = totalCount * credN;
+  if (priceEl) priceEl.textContent = '¥' + (totalPrice * credN).toFixed(2);
+  if (credCountEl) credCountEl.textContent = credN;
+  // 缺 AK/SK 被跳过的凭证：面板可见提示（不只是 log）
+  var warnEl = document.getElementById('orderCredWarn');
+  if (warnEl) {
+    var skipped = resolved.skipped || [];
+    if (resolved.versionError) {
+      warnEl.textContent = '❌ 凭证组件版本过旧，请强制刷新页面（Ctrl+F5）后重试';
+      warnEl.style.display = 'block';
+    } else if (skipped.length > 0) {
+      warnEl.textContent = '⚠️ ' + skipped.length + ' 个凭证缺少 AK/SK 已跳过：' + skipped.join('、');
+      warnEl.style.display = 'block';
+    } else {
+      warnEl.textContent = '';
+      warnEl.style.display = 'none';
+    }
+  }
 }
 
 // 为某个地域选出最适合下单的镜像（系统镜像锁定 CentOS-7.9；自定义镜像按所选切换）
@@ -3719,15 +3766,51 @@ async function batchCreateInstances() {
     return;
   }
 
-  // 检查凭证
-  if (!AliyunClient.hasCredentials()) {
-    log('❌ 未设置阿里云凭证，无法下单', 'error');
+  // 凭证解析统一走共用函数 resolveSelectedCreds()，保证汇总与下单口径一致（不再只看激活凭证）
+  var resolved = resolveSelectedCreds();
+  if (resolved.versionError) return; // resolveSelectedCreds 已给出明确报错
+  var creds = resolved;
+  // 下单瞬间同步汇总与「缺 SK 已跳过」提示，保证页面数字与实际 jobs 完全一致
+  updateOrderSummary();
+  if (creds.skipped && creds.skipped.length) {
+    log('⚠️ 已跳过缺少 AK/SK 的凭证：' + creds.skipped.join('、'), 'warn');
+  }
+  var selectedNames = (typeof credMultiGetSelected === 'function') ? credMultiGetSelected(orderCredMulti) : [];
+  if (creds.length === 0) {
+    if (selectedNames.length === 0) {
+      log('❌ 请先在「选择凭证」里至少勾选 1 个凭证，无法下单', 'error');
+    } else {
+      log('❌ 勾选的 ' + selectedNames.length + ' 个凭证均缺少 AK/SK，无法下单', 'error');
+    }
     showCredentialDialog();
     return;
   }
 
+  // B1：自定义镜像为账号私有资源，不能被多凭证共用
+  // hasCustomImage 判定排除哨兵值，避免 __none__ / __loading__ 误报
+  var hasCustomImage = regionOrders.some(function (o) {
+    var sel = document.getElementById('order-img-' + o.regionId);
+    var v = sel ? sel.value : '';
+    return v && v !== 'system' && v !== '__none__' && v !== '__loading__';
+  });
+  if (creds.length > 1 && hasCustomImage) {
+    log('❌ 多账号同时下单仅支持系统镜像 CentOS-7.9；自定义镜像为账号私有资源，如需使用请按单个账号分别下单', 'error');
+    return;
+  }
+  // 单凭证 + 自定义镜像 + 所选凭证不是当前激活凭证：镜像列表来自激活账号，需提示
+  if (creds.length === 1 && hasCustomImage) {
+    var activeProfile = null;
+    try {
+      activeProfile = (window.AliyunClient && AliyunClient.getActiveProfile) ? AliyunClient.getActiveProfile() : null;
+    } catch (e) {}
+    if (activeProfile && activeProfile.name && creds[0].name !== activeProfile.name) {
+      log('⚠️ 镜像列表来自当前激活凭证账号，请确认该镜像在所选账号下可用', 'warn');
+    }
+  }
+
   var totalInstances = regionOrders.reduce(function(s, r) { return s + r.count; }, 0);
-  log('🚀 开始批量下单：共 ' + totalInstances + ' 台，跨 ' + regionOrders.length + ' 个地域', 'info');
+  log('🚀 开始批量下单：' + creds.length + ' 个凭证 × ' + regionOrders.length + ' 个地域 = ' + (totalInstances * creds.length) + ' 台待支付订单', 'info');
+  log('🧾 本次凭证：' + creds.map(function(c){ return c.name; }).join('、'), 'info');
 
   var orderResultEl = document.getElementById('orderResult');
   var orderResultListEl = document.getElementById('orderResultList');
@@ -3741,10 +3824,10 @@ async function batchCreateInstances() {
   log('📦 准备下单地区列表：' + regionOrders.map(function(o){return o.regionName+'×'+o.count;}).join('、'), 'info');
 
   // 实际下单处理函数（独立 try-catch，单个地区失败不影响其他地区；内置 3 次重试）
-  async function processOrder(order, orderIndex) {
-    log('📍 [' + (orderIndex+1) + '/' + regionOrders.length + '] ' + order.regionName + '：下单 ' + order.count + ' 台...', 'info');
+  async function processOrder(order, orderIndex, cred, credIndex) {
+    log('📍 [' + cred.name + '] [' + (orderIndex+1) + '/' + regionOrders.length + '] ' + order.regionName + '：下单 ' + order.count + ' 台...', 'info');
     try {
-      // 🔍 先查该地域可用镜像（按地域缓存 30 分钟）
+      // 读取该地域当前选中的镜像
       var imgPick = await resolveImageForRegion(order.regionId);
       if (!imgPick) {
         throw new Error('该地域无可用镜像，跳过');
@@ -3752,20 +3835,8 @@ async function batchCreateInstances() {
       console.log('%c[app.js] 下单走 Edge Function 代理 (hardcoded URL)', 'background:#ff5722;color:white;padding:2px 6px;font-weight:bold;');
       // 🔒 硬编码 URL，不再依赖 window.WB_SUPABASE_FUNCTIONS 全局变量（避免任何缓存导致全局变量未定义）
       var PROXY_URL = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/aliyun-proxy';
-      var akId = (window.AliyunClient && AliyunClient.getCredentialsInfo) ? AliyunClient.getCredentialsInfo().accessKeyId : '';
-      var akSecret = '';
-      try {
-        // 从 localStorage 拿 SK
-        var u = (function(){ try { return JSON.parse(sessionStorage.getItem('wb_logged_in_v2') || localStorage.getItem('wb_logged_in_v2') || '{}').user || 'default'; } catch(e){ return 'default'; } })();
-        var skKeyName = (u !== 'default' ? 'wb_' + u + '_ak_secret' : 'wb_default_ak_secret');
-        akSecret = localStorage.getItem(skKeyName) || '';
-        // 也尝试从 CloudStore 缓存拿
-        if (!akSecret && window.CloudStore && CloudStore.getUserDataSync) {
-          var ud = CloudStore.getUserDataSync(u);
-          if (ud && ud.ak_secret) akSecret = ud.ak_secret;
-        }
-      } catch(e) { console.warn('[app.js] 读 SK 失败', e); }
-
+      var akId = cred.ak_id;
+      var akSecret = cred.ak_secret;
       if (!akId || !akSecret) {
         throw new Error('请先设置阿里云 AK/SK 凭证');
       }
@@ -3784,7 +3855,7 @@ async function batchCreateInstances() {
       };
 
       // 幂等令牌：同一地区同一次批量任务用同一个 ClientToken，重试时不会重复下单
-      var clientToken = 'wb-' + order.regionId + '-' + order.count + '-' + Date.now();
+      var clientToken = 'wb-' + credIndex + '-' + String(cred.ak_id).replace(/[^A-Za-z0-9]/g, '').slice(0, 8) + '-' + order.regionId + '-' + order.count + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
       // 🔄 重试：网络抖动 / Edge Function 偶发超时 / signal aborted 时自动重试
       // 🔧 v112：中断类错误立即重试（AbortError 多为瞬时中断，干等 2s 无收益）
@@ -3795,7 +3866,7 @@ async function batchCreateInstances() {
         var attemptStart = Date.now();
         try {
           if (attempt > 1) {
-            log('⏳ ' + order.regionName + ' 第 ' + attempt + ' 次尝试...', 'warn');
+            log('⏳ [' + cred.name + '] ' + order.regionName + ' 第 ' + attempt + ' 次尝试...', 'warn');
           }
           var resp = await fetchWithTimeout(PROXY_URL, {
             method: 'POST',
@@ -3818,8 +3889,9 @@ async function batchCreateInstances() {
           if (!resultJson.success) throw new Error(resultJson.error || '下单失败');
 
           if (response && response.OrderId) {
-            log('✅ ' + order.regionName + ' 订单已创建：' + response.OrderId + '（' + order.count + ' 台，已生成待支付订单）', 'success');
+            log('✅ [' + cred.name + '] ' + order.regionName + ' 订单已创建：' + response.OrderId + '（' + order.count + ' 台，已生成待支付订单）', 'success');
             state.orderResults.push({
+              credName: cred.name,
               region: order.regionName,
               regionId: order.regionId,
               count: order.count,
@@ -3848,13 +3920,14 @@ async function batchCreateInstances() {
           // 中断类：首次仅等 300ms（瞬时故障，越早重试越容易命中已建好的连接）
           // 其余（限流/服务端错误）：1.5s / 3s 退避
           var waitMs = isAbort ? (attempt === 1 ? 300 : 1200) : Math.min(attempt * 1500, 3000);
-          log('⚠️ ' + order.regionName + ' 第 ' + attempt + ' 次失败：' + friendly + '，' + (waitMs / 1000).toFixed(1) + 's 后重试...', 'warn');
+          log('⚠️ [' + cred.name + '] ' + order.regionName + ' 第 ' + attempt + ' 次失败：' + friendly + '，' + (waitMs / 1000).toFixed(1) + 's 后重试...', 'warn');
           await new Promise(function(r){ setTimeout(r, waitMs); });
         }
       }
     } catch (err) {
-      log('❌ ' + order.regionName + ' 下单失败：' + err.message, 'error');
+      log('❌ [' + cred.name + '] ' + order.regionName + ' 下单失败：' + err.message, 'error');
       state.orderResults.push({
+        credName: cred.name,
         region: order.regionName,
         regionId: order.regionId,
         count: order.count,
@@ -3864,9 +3937,15 @@ async function batchCreateInstances() {
     }
   }
 
-  // ⚡ 各地区并行下单（保持提速），但「先预热连接 + 错峰发起」
+  // ⚡ 多凭证 × 多地域扁平化并发（保持提速），但「先预热连接 + 错峰发起」
   // 🔧 v112：实测 9 地域若在同一毫秒并发，首个请求易撞上 Edge Function 冷启动/代理抖动而被中断
-  log('🚀 ' + regionOrders.length + ' 个地区并行下单：' + regionOrders.map(function(o){ return o.regionName + '×' + o.count; }).join('、'), 'info');
+  var jobs = [];
+  creds.forEach(function(cred, ci) {
+    regionOrders.forEach(function(order, ri) {
+      jobs.push({ cred: cred, credIndex: ci, order: order, orderIndex: ri });
+    });
+  });
+  log('🚀 ' + creds.length + ' 个凭证 × ' + regionOrders.length + ' 个地域 = ' + jobs.length + ' 个下单任务（每批最多 6 个串行推进）', 'info');
 
   // 🔥 预热：轻量探针唤醒 Edge Function + 建好 TLS 连接（实测 0.7~1.1s）；失败不阻塞下单
   var ORDER_PROXY_URL = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/aliyun-proxy';
@@ -3882,14 +3961,20 @@ async function batchCreateInstances() {
     console.warn('[app.js] 预热失败（不阻塞下单）', warmErr && warmErr.message);
   }
 
-  // 错峰发起：第 n 个地域延后 n×200ms（9 地域总错峰 1.6s），避开瞬时并发冲击
-  var STAGGER_MS = 200;
-  await Promise.all(regionOrders.map(function(order, idx){
-    return (async function(){
-      if (idx > 0) await new Promise(function(r){ setTimeout(r, idx * STAGGER_MS); });
-      return processOrder(order, idx);
-    })();
-  }));
+  // 并发闸：jobs 分批串行，每批最多 6 个，批内保留 200ms 错峰，把「在途数」压到 6 以内
+  var ORDER_CONCURRENCY = 6;
+  var ORDER_STAGGER_MS = 200;
+  var batchCount = Math.ceil(jobs.length / ORDER_CONCURRENCY);
+  log('🚀 共 ' + jobs.length + ' 个任务，分 ' + batchCount + ' 批、每批最多 ' + ORDER_CONCURRENCY + ' 个', 'info');
+  for (var b = 0; b < jobs.length; b += ORDER_CONCURRENCY) {
+    var batch = jobs.slice(b, b + ORDER_CONCURRENCY);
+    await Promise.all(batch.map(function (job, k) {
+      return (async function () {
+        if (k > 0) await new Promise(function (r) { setTimeout(r, k * ORDER_STAGGER_MS); });
+        return processOrder(job.order, job.orderIndex, job.cred, job.credIndex);
+      })();
+    }));
+  }
 
   // 渲染订单结果
   renderOrderResults();
@@ -3907,15 +3992,15 @@ function renderOrderResults() {
     if (r.status === 'pending_payment') {
       return '<div style="padding:12px;background:#fff7e6;border:1px solid #ffd591;border-radius:6px;margin-bottom:8px;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;">' +
-          '<div><strong>📋 ' + r.region + ' · ' + r.count + ' 台</strong><br/>' +
-          '<span style="font-size:12px;color:#666;">订单ID: ' + r.orderId + '</span><br/>' +
+          '<div><strong>📋 ' + (r.credName ? escHtml(r.credName) + ' · ' : '') + escHtml(r.region) + ' · ' + r.count + ' 台</strong><br/>' +
+          '<span style="font-size:12px;color:#666;">订单ID: ' + escHtml(r.orderId) + '</span><br/>' +
           '<span style="font-size:13px;color:#fa8c16;">💰 总价 ¥' + r.price + '/月</span></div>' +
-          '<button class="btn btn-sm btn-primary" onclick="goToPay(\'' + r.orderId + '\')">💳 去支付</button>' +
+          '<button class="btn btn-sm btn-primary" onclick="goToPay(\'' + escHtml(r.orderId) + '\')">💳 去支付</button>' +
         '</div></div>';
     } else {
       return '<div style="padding:12px;background:#fff1f0;border:1px solid #ffa39e;border-radius:6px;margin-bottom:8px;">' +
-        '<strong>❌ ' + r.region + ' · ' + r.count + ' 台</strong><br/>' +
-        '<span style="font-size:12px;color:#cf1322;">错误: ' + (r.error || '未知错误') + '</span></div>';
+        '<strong>❌ ' + (r.credName ? escHtml(r.credName) + ' · ' : '') + escHtml(r.region) + ' · ' + r.count + ' 台</strong><br/>' +
+        '<span style="font-size:12px;color:#cf1322;">错误: ' + escHtml(r.error || '未知错误') + '</span></div>';
     }
   }).join('');
 

@@ -38,7 +38,13 @@
           throw new Error('Supabase ' + resp.status + ': ' + txt.substring(0, 200));
         });
       }
-      return resp.json();
+      // DELETE / PATCH 等写操作常返回 204 且响应体为空，直接 resp.json() 会抛
+      // "Unexpected end of JSON input"。统一按文本读取：空体视为成功，非空体按 JSON 解析。
+      return resp.text().then(function(txt) {
+        if (!txt || !txt.trim()) return {};
+        try { return JSON.parse(txt); }
+        catch (e) { throw new Error('Supabase 返回非 JSON 内容：' + txt.substring(0, 120)); }
+      });
     });
   }
 
@@ -111,10 +117,17 @@
   function deleteUser(username) {
     return restRequest('DELETE', 'app_users', '?username=eq.' + encodeURIComponent(username))
       .then(function() {
-        if (usersCache && usersCache.users) {
-          delete usersCache.users[username];
-          try { localStorage.setItem('wb_users_cache', JSON.stringify(usersCache)); } catch(e) {}
+        // 匿名 publishable key 可能被 RLS 静默拦住：HTTP 204 但一行都没删。
+        // 因此删完必须清缓存并重新查一次云端，确认目标真的消失，不能只看 HTTP 状态。
+        usersCache = null;
+        try { localStorage.removeItem('wb_users_cache'); } catch(e) {}
+        return getAllUsers();
+      })
+      .then(function(db) {
+        if (db.users && db.users[username]) {
+          throw new Error('云端仍未删除【' + username + '】：当前前端密钥没有 app_users 删除权限（RLS 拦截）。请到 Supabase 控制台 SQL Editor 执行 DELETE FROM public.app_users WHERE username = \'' + username + '\';');
         }
+        return db;
       });
   }
 

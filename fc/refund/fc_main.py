@@ -51,8 +51,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 之前默认指向旧项目 vgddxxgjcogxcpiycsej，而前端把 schedule_enabled/AK/SK
 # 写在 opauwtkivhjxlijfqaix —— 脚本读旧库永远读不到定时任务，导致「关浏览器就不退」。
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://opauwtkivhjxlijfqaix.supabase.co")
-SUPABASE_ANON_KEY = os.environ.get(
-    "SUPABASE_ANON_KEY", "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
+# ⚠️ 2026-11-16 加固：定时退订执行器改用**服务端强凭据**（service_role）。
+# 前端改走 wb-auth 服务端网关后，anon 对 user_data 的访问会被收紧；
+# 执行器必须用 service_role（具 BYPASSRLS）才能继续读表。
+# 优先级：SUPABASE_SERVICE_ROLE_KEY → SUPABASE_ANON_KEY → 旧 publishable 兜底。
+# 向后兼容：变量名沿用 SUPABASE_ANON_KEY，下方所有引用点无需改动。
+SUPABASE_ANON_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
+    or "sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd"
 )
 REST_BASE = SUPABASE_URL.rstrip("/") + "/rest/v1"
 
@@ -252,23 +259,32 @@ def log(msg, level="INFO"):
 
 
 
-# ===================== 排除实例保护（2026-11-09 事故根治） =====================
+# ===================== 排除实例保护（按账号独立，2026-11-16） =====================
 # 前端「排除实例」文本框内容保存在 user_data.data.schedule_exclude_instance_ids。
-# 三套云端执行器统一策略：全局合并所有用户的排除名单，三层拦截
-#   （列举时剔除 → 退订前再过滤 → BSS RefundInstance 调用最底层硬拦截），
-# 并 fail-closed：名单读取 / 解析失败时拒绝执行任何退订，绝不「当名单为空继续退」。
-# FC 环境变量 EXCLUDE_INSTANCE_IDS 是**部署时的文本框快照，仅用于核对/诊断，绝不参与放行**：
-# 若把它与 Supabase 名单取并集，用户在前端删掉某台后 FC 仍按旧快照保护，
-# 会与 Actions / Edge / 前端三套行为不一致（那台永远退不掉）。
+# 三层拦截保持不变：列举时剔除 → 退订前再过滤 → BSS RefundInstance 调用最底层硬拦截。
+#
+# 2026-11-16 改造（账号之间互不干扰）：
+#   原实现把【所有用户】的排除名单合并成一个全局集合 → 账号 A 的排除清单会影响账号 B 的
+#   退订范围；且任一账号字段缺失/脏数据就触发**全局 fail-closed**，一个账号的配置问题
+#   直接停掉所有账号的定时退订（实测 chu / xiaoshi 两行就缺该字段）。
+#   现改为【每个账号用自己那一行的排除名单】：
+#     · 单个账号字段缺失 → 该账号视作"没配排除清单"，只影响它自己；
+#     · 单个账号字段类型脏 → 只有该账号 fail-closed（不退它），其他账号照常执行；
+#     · 读表整体失败 → 全局 fail-closed，一台不退。
+#
+# FC 环境变量 EXCLUDE_INSTANCE_IDS 仍只是**部署时的文本框快照，仅用于核对/诊断**，
+# 绝不参与放行（否则用户在前端删掉某台后 FC 仍按旧快照保护，与另两套行为不一致）。
 # 权威名单只有一个：Supabase user_data（前端每次保存都会写该字段）。
-EXCLUDE_IDS = set()
-EXCLUDE_LOADED = False
+EXCLUDE_BY_USER = {}          # username -> set(instance_id)
+EXCLUDE_DIRTY_USERS = set()    # 该账号排除字段类型异常 → 仅该账号 fail-closed
+EXCLUDE_LOADED = False         # 名单整体是否成功读取（读表失败 → 全局 fail-closed）
+CURRENT_USER = ""              # 当前正在处理的账号（供 is_excluded 取该账号的名册）
 PAGE_SIZE = 100
 
 
 def _normalize_exclude(raw, out):
     """兼容前端可能写入的三种格式：数组 / 逗号分隔字符串 / 以 ID 为键的对象。
-    返回 False 表示遇到脏数据（名单不可信 → fail-closed）。"""
+    返回 False 表示遇到脏数据（该账号名单不可信 → 该账号 fail-closed）。"""
     if raw is None:
         return True
     if isinstance(raw, list):
@@ -292,49 +308,55 @@ def _normalize_exclude(raw, out):
 
 
 def load_exclude_ids(rows):
-    """权威名单 = Supabase（前端排除文本框，实时）。返回 (ids, ok)。
+    """按账号加载各自的排除名单。返回 ok（False = 全局 fail-closed）。
 
-    三套执行器统一规则（2026-11-09 回归体检后定稿）：
-      1. 只要任一用户带 schedule_exclude_instance_ids 字段（值可为空数组 = 用户主动清空），
-         就以全局合并结果为准 —— 前端改文本框立即生效；
-      2. 全体用户都缺该字段（配置被误删 / 数据异常）→ 拒绝执行任何退订；
-      3. 字段类型脏 / Supabase 读取失败 → 拒绝执行任何退订；
-      4. FC 环境变量 EXCLUDE_INSTANCE_IDS 只是部署快照，仅用于日志核对，不参与放行。
+    与 2026-11-09「全局合并」版的关键差异：
+      · 每个账号只用自己的名单 → 账号之间互不影响；
+      · 单个账号字段缺失/脏数据，只让**该账号** fail-closed，不牵连其他账号。
     """
-    global EXCLUDE_IDS, EXCLUDE_LOADED
-    merged, snapshot = set(), set()
-    has_field = False
-    dirty = False
-    for row in rows or []:
+    global EXCLUDE_BY_USER, EXCLUDE_DIRTY_USERS, EXCLUDE_LOADED
+    snapshot = set()
+    if rows is None:
+        EXCLUDE_BY_USER, EXCLUDE_DIRTY_USERS, EXCLUDE_LOADED = {}, set(), False
+        return False
+    if not _normalize_exclude(os.environ.get("EXCLUDE_INSTANCE_IDS", ""), snapshot):
+        log("⛔ EXCLUDE_INSTANCE_IDS 快照格式异常，拒绝执行任何退订", "ERROR")
+        EXCLUDE_BY_USER, EXCLUDE_DIRTY_USERS, EXCLUDE_LOADED = {}, set(), False
+        return False
+    by_user, dirty = {}, set()
+    for row in rows:
+        username = (row or {}).get("username") or ""
         data = (row or {}).get("data") or {}
         if not isinstance(data, dict):
             continue
         raw = data.get("schedule_exclude_instance_ids")
-        if raw is not None:
-            has_field = True
-        if not _normalize_exclude(raw, merged):
-            log("⛔ schedule_exclude_instance_ids 类型异常，拒绝执行任何退订", "ERROR")
-            dirty = True
-            break
-    if not _normalize_exclude(os.environ.get("EXCLUDE_INSTANCE_IDS", ""), snapshot):
-        log("⛔ EXCLUDE_INSTANCE_IDS 快照格式异常，拒绝执行任何退订", "ERROR")
-        dirty = True
-    if not dirty and not has_field:
-        log(f"⛔ 所有用户都缺少 schedule_exclude_instance_ids 字段（疑似配置被误删；"
-            f"部署快照含 {len(snapshot)} 个 ID），拒绝执行任何退订", "ERROR")
-        dirty = True
+        if raw is None:
+            # 该账号没有该字段 = 该账号没配排除清单。**不牵连其他账号**。
+            by_user[username] = set()
+            continue
+        ids = set()
+        if not _normalize_exclude(raw, ids):
+            dirty.add(username)
+            by_user[username] = set()
+            continue
+        by_user[username] = ids
+    EXCLUDE_BY_USER, EXCLUDE_DIRTY_USERS, EXCLUDE_LOADED = by_user, dirty, True
+    total = sum(len(v) for v in by_user.values())
     if dirty:
-        EXCLUDE_IDS, EXCLUDE_LOADED = set(), False
-        return EXCLUDE_IDS, False
-    EXCLUDE_IDS, EXCLUDE_LOADED = merged, True
-    log(f"🛡️ 排除实例保护名单已加载：{len(merged)} 个"
-        f"（来源：前端排除文本框 / Supabase 实时；部署快照 {len(snapshot)} 个仅作核对）", "SUCCESS")
-    return EXCLUDE_IDS, True
+        log(f"⚠️ 以下账号的 schedule_exclude_instance_ids 类型异常，仅这些账号 fail-closed"
+            f"（其余账号照常执行）：{', '.join(sorted(dirty))}", "ERROR")
+    log(f"🛡️ 排除实例保护名单已按账号加载：{len(by_user)} 个账号 / 共 {total} 个 ID"
+        f"（账号之间互不影响；部署快照 {len(snapshot)} 个仅作核对）", "SUCCESS")
+    return True
 
 
 def is_excluded(instance_id):
-    """名单未加载时一律视为「被排除」（fail-closed），绝不误退。"""
-    return (not EXCLUDE_LOADED) or (str(instance_id).strip() in EXCLUDE_IDS)
+    """当前账号是否被排除。名单未加载成功 → 一律视为排除（fail-closed，绝不误退）。"""
+    if not EXCLUDE_LOADED:
+        return True
+    if CURRENT_USER in EXCLUDE_DIRTY_USERS:
+        return True
+    return str(instance_id).strip() in EXCLUDE_BY_USER.get(CURRENT_USER, set())
 
 
 def beijing_now():
@@ -592,18 +614,54 @@ def supabase_get_all_user_data():
         return json.loads(resp.read().decode("utf-8"))
 
 
-def supabase_patch_schedule_date(username, full_data, today_str):
-    url = REST_BASE + "/user_data?username=eq." + urllib.parse.quote(username)
+def supabase_get_user_data(username):
+    """读取该账号**当前最新**的 data（写回前的读-改-写第一步）。"""
+    url = (REST_BASE + "/user_data?username=eq." + urllib.parse.quote(username)
+           + "&select=data")
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+    })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        rows = json.loads(resp.read().decode("utf-8"))
+    if not rows:
+        return None
+    data = rows[0].get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def supabase_patch_schedule_date(username, today_str):
+    """更新该账号的 schedule_last_executed_date（读-改-写）。
+
+    ⚠️ PostgREST 对 jsonb 列的 PATCH 是**顶层替换**而不是深度合并
+       （实测：PATCH {"data":{"x":1}} 会把 {"data":{"probe":true}} 变成
+       {"data":{"x":1}}，probe 直接消失）。所以「只 PATCH 一个字段」会
+       **清空该用户的全部其它配置**（ak_profiles / schedule_enabled /
+       排除名单…）——绝对不能这么做。
+    ⚠️ 也不能用「执行器启动时读到的旧快照」整体写回：用户在执行期间新加的
+       排除实例 / 勾选范围会被旧快照冲掉 → 下一轮可能误退（互相干扰）。
+    ✅ 正确做法：写回前先读该行**最新** data，只改这一个键，再整体写回。
+    """
+    try:
+        latest = supabase_get_user_data(username)
+    except Exception as e:
+        log(f"  读取 {username} 最新配置失败，跳过写回（不影响退订结果）: {e}", "WARN")
+        return
+    if latest is None:
+        log(f"  未找到 {username} 的配置行，跳过写回", "WARN")
+        return
+    data = dict(latest)
+    data["schedule_last_executed_date"] = today_str
     body = json.dumps({
-        "username": username,
-        "data": full_data,
+        "data": data,
         "updated_at": int(time.time() * 1000),
     }).encode("utf-8")
+    url = REST_BASE + "/user_data?username=eq." + urllib.parse.quote(username)
     req = urllib.request.Request(url, data=body, method="PATCH", headers={
         "apikey": SUPABASE_ANON_KEY,
         "Authorization": "Bearer " + SUPABASE_ANON_KEY,
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "return=minimal",
     })
     try:
         urllib.request.urlopen(req, timeout=30)
@@ -929,8 +987,10 @@ def drain_credential(username, label, ak, sk, max_rounds=12, regions=None):
 
 
 def process_user(row):
+    global CURRENT_USER
     username = row.get("username")
     data = row.get("data") or {}
+    CURRENT_USER = username or ""
     if not data.get("schedule_enabled"):
         return
     hour = data.get("schedule_hour")
@@ -994,7 +1054,7 @@ def process_user(row):
 
     # 记录最后执行日期（仅用于监控，不再作为「每天只跑一次」的闸门）
     if executed_any:
-        supabase_patch_schedule_date(username, {**data, "schedule_last_executed_date": beijing_date_str()}, beijing_date_str())
+        supabase_patch_schedule_date(username, beijing_date_str())
 
 
 def main():
@@ -1023,7 +1083,6 @@ def main():
     if not _ok:
         log("⛔ 排除名单加载失败，本次拒绝执行任何退订（fail-closed）", "ERROR")
         raise RuntimeError("排除名单不可用，拒绝执行任何退订（fail-closed）")
-
     due_count = 0
     for row in rows:
         try:

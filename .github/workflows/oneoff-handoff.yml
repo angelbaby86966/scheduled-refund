@@ -1,39 +1,82 @@
-name: oneoff-handoff
-# 一次性凭据交接（RSA 密文通道）
+name: oneoff-ops
+# 统一运维入口（ops-deploy 分支专用）
 #
-# 背景：GITHUB_TOKEN 无权读写 repo Secrets（permissions 里根本没有 secrets 键），
-#       而 service_role 明文又绝不能落到 public 仓库里。
-# 方案：本地生成 RSA-4096 密钥对 → 公钥内嵌本 workflow（明文无害）→
-#       workflow 用公钥加密凭据 → 只把密文打进日志 → 本地私钥解密 → 用本地 PAT 写 Secret。
-#       全程没有任何明文离开加密边界。
+# 为什么复用这一个文件：GitHub 对非默认分支上新 workflow 文件的注册不稳定
+# （实测同一分支上最小可用文件也不注册），而已注册文件按 ref 覆盖内容后
+# dispatch 会正确解析 ref 上的最新内容。因此所有一次性运维都收敛到这个文件。
 #
-# 本次同时清理上次探测遗留的 probe_tmp secret key（探测时删除步骤失败）。
+# modes:
+#   handoff    - 清理遗留 probe_tmp secret key + 密文交接强凭据（RSA 公钥在下方）
+#   deploy-edge- 部署 Edge Functions（wb-auth / aliyun-proxy）
+#   deploy-fc  - 部署阿里云 FC 定时退订执行器
+#   cleanup    - 清理本分支上的一次性探针 workflow 文件
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'handoff / deploy-edge / deploy-fc / cleanup'
+        required: true
+        default: 'deploy-edge'
+        type: choice
+        options:
+          - deploy-edge
+          - deploy-fc
+          - handoff
+          - cleanup
 permissions:
   contents: read
 jobs:
-  handoff:
+  ops:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     env:
-      SUPA_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      WB_AUTH_SECRET: ${{ secrets.WB_AUTH_SECRET }}
+      ALIYUN_AK: ${{ secrets.ALIYUN_AK }}
+      ALIYUN_SK: ${{ secrets.ALIYUN_SK }}
+      MODE: ${{ inputs.mode }}
     steps:
-      - name: 清理 probe_tmp + 密文交接强凭据
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # ============ 清理遗留的 probe_tmp secret key（id 而非 name）============
+      - name: 清理遗留的 probe_tmp secret key
+        if: inputs.mode == 'handoff' || inputs.mode == 'cleanup'
         run: |
           set -eu
           REF=opauwtkivhjxlijfqaix
           API=https://api.supabase.com/v1/projects/$REF
+          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" > /tmp/keys.json
+          KID=$(python3 -c "
+          import json
+          d = json.load(open('/tmp/keys.json'))
+          items = d if isinstance(d, list) else d.get('api_keys', [])
+          for k in items:
+              if k.get('name') == 'probe_tmp':
+                  print(k.get('id') or '')
+                  break
+          ")
+          if [ -n "$KID" ]; then
+            curl -sS -o /tmp/del.json -w '  DELETE http=%{http_code}\n' --max-time 40 \
+              -X DELETE "$API/api-keys/$KID" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN"
+            head -c 200 /tmp/del.json; echo
+          else
+            echo "  probe_tmp 不存在，跳过"
+          fi
+          rm -f /tmp/keys.json /tmp/del.json
 
-          echo "== 1. 删除探测期遗留的 probe_tmp secret key =="
-          curl -sS -o /tmp/del.json -w '  DELETE probe_tmp HTTP=%{http_code}\n' --max-time 40 \
-            -X DELETE "$API/api-keys/probe_tmp" -H "Authorization: Bearer $SUPA_TOKEN"
-          head -c 200 /tmp/del.json; echo
-
-          echo "== 2. 拉取 api-keys =="
-          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys.json
-
-          echo "== 3. 提取强凭据（明文不打印）=="
+      # ============ 密文交接强凭据 ============
+      - name: 密文交接 service_role
+        if: inputs.mode == 'handoff'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          API=https://api.supabase.com/v1/projects/$REF
+          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" > /tmp/keys.json
           python3 - <<'PY'
           import json
           d = json.load(open('/tmp/keys.json'))
@@ -52,8 +95,6 @@ jobs:
           open('/tmp/sec.key', 'w').write(sec)
           print('  提取完成（明文未落日志）')
           PY
-
-          echo "== 4. 用内嵌公钥加密 → 输出密文 =="
           cat > /tmp/pub.pem <<'PUBEOF'
           -----BEGIN PUBLIC KEY-----
           MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAk1xawhX4zqDZ9+6GKS/A
@@ -74,18 +115,74 @@ jobs:
           openssl pkeyutl -encrypt -pubin -inkey /tmp/pub.pem -in /tmp/sec.key -out /tmp/sec.enc
           echo "  SR_ENC_B64=$(base64 -w0 /tmp/sr.enc)"
           echo "  SEC_ENC_B64=$(base64 -w0 /tmp/sec.enc)"
+          rm -f /tmp/sr.key /tmp/sec.key /tmp/sr.enc /tmp/sec.enc /tmp/keys.json /tmp/pub.pem
 
-          echo "== 5. 确认 probe_tmp 已消失 =="
-          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys2.json
-          python3 - <<'PY'
-          import json
-          d = json.load(open('/tmp/keys2.json'))
-          items = d if isinstance(d, list) else d.get('api_keys', [])
-          names = ['%s/%s' % (k.get('type'), k.get('name')) for k in items]
-          print('  剩余 key:', names)
-          assert 'secret/probe_tmp' not in names, 'probe_tmp 仍存在！'
-          print('  probe_tmp 已确认删除')
-          PY
+      # ============ 部署 Edge Functions ============
+      - name: 下发 WB_AUTH_SECRET 到 Edge Function
+        if: inputs.mode == 'deploy-edge'
+        run: |
+          set -eu
+          printf 'WB_AUTH_SECRET=%s\n' "$WB_AUTH_SECRET" > /tmp/.env.wb
+          supabase secrets set --env-file /tmp/.env.wb --project-ref opauwtkivhjxlijfqaix
+          rm -f /tmp/.env.wb
 
-          rm -f /tmp/sr.key /tmp/sec.key /tmp/sr.enc /tmp/sec.enc /tmp/keys.json /tmp/keys2.json /tmp/del.json /tmp/pub.pem
-          echo "== 完成 =="
+      - name: 部署 wb-auth（--no-verify-jwt）
+        if: inputs.mode == 'deploy-edge'
+        run: |
+          supabase functions deploy wb-auth --project-ref opauwtkivhjxlijfqaix --no-verify-jwt
+
+      - name: 部署 aliyun-proxy
+        if: inputs.mode == 'deploy-edge'
+        run: |
+          supabase functions deploy aliyun-proxy --project-ref opauwtkivhjxlijfqaix
+
+      - name: 冒烟验证（只测必须被拒绝的路径）
+        if: inputs.mode == 'deploy-edge'
+        run: |
+          set -eu
+          URL=https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/wb-auth
+          echo "  1) 未知 action:"
+          curl -sS -o /tmp/r1 -w '    http=%{http_code}\n' --max-time 30 -X POST "$URL" \
+            -H 'content-type: application/json' -d '{"action":"nope"}'
+          head -c 160 /tmp/r1; echo
+          echo "  2) 空密码登录:"
+          curl -sS -o /tmp/r2 -w '    http=%{http_code}\n' --max-time 30 -X POST "$URL" \
+            -H 'content-type: application/json' -d '{"action":"login","username":"zhangruiyao","password":""}'
+          head -c 160 /tmp/r2; echo
+          echo "  3) 无票据读 user_data:"
+          curl -sS -o /tmp/r3 -w '    http=%{http_code}\n' --max-time 30 -X POST "$URL" \
+            -H 'content-type: application/json' -d '{"action":"get_user_data","username":"zhangruiyao"}'
+          head -c 160 /tmp/r3; echo
+          echo "  4) 伪造票据:"
+          curl -sS -o /tmp/r4 -w '    http=%{http_code}\n' --max-time 30 -X POST "$URL" \
+            -H 'content-type: application/json' \
+            -d '{"action":"get_user_data","username":"zhangruiyao","ticket":"eyJmYWtlIjoxfQ.forged"}'
+          head -c 160 /tmp/r4; echo
+          rm -f /tmp/r1 /tmp/r2 /tmp/r3 /tmp/r4
+
+      # ============ 部署 FC ============
+      - name: 部署阿里云 FC 定时退订执行器
+        if: inputs.mode == 'deploy-fc'
+        run: |
+          set -eu
+          pip install --quiet aliyun-fc2==2.5.2
+          python3 ops/deploy_fc_refund.py --mode deploy
+
+      # ============ 清理探针文件 ============
+      - name: 清理一次性探针 workflow
+        if: inputs.mode == 'cleanup'
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/probe-a.yml .github/workflows/probe-b.yml \
+                .github/workflows/probe-c.yml .github/workflows/probe-d.yml \
+                .github/workflows/oneoff-deploy-wb-auth.yml \
+                .github/workflows/oneoff-diag-rls.yml .github/workflows/oneoff-probe-keys.yml
+          git add -A .github/workflows
+          if git diff --cached --quiet; then
+            echo "无探针文件可清理"
+          else
+            git commit -m "chore: 清理一次性探针 workflow [skip ci]"
+            git push
+          fi

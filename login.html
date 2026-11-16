@@ -278,16 +278,15 @@
     container.innerHTML += '<div class="diag-item" id="cloudDiag">☁️ 云端连接: 检测中...</div>';
 
     if (window.CloudStore) {
-      CloudStore.getAllUsers().then(function(db) {
-        var userCount = Object.keys(db.users || {}).length;
+      // ⚠️ 2026-11-16：未登录时不能查用户列表（服务端要求管理员票据），
+      //    改用无需认证的 ping 探针判断网关是否在线。
+      CloudStore.ping().then(function() {
         var el = document.getElementById('cloudDiag');
         if (el) {
           el.className = 'diag-item ok';
-          el.textContent = '☁️ 云端连接: 正常 ✅ | 管理员(1) + 普通用户(' + userCount + ')';
+          el.textContent = '☁️ 云端连接: 正常 ✅（服务端鉴权网关在线）';
         }
-        // 显示导入框
-        var importBox = document.getElementById('importBox');
-        if (importBox) importBox.style.display = 'block';
+        container.innerHTML += '<div class="diag-item">用户库导入/导出已移至管理员工作台（前端不再下发任何账号口令）</div>';
       }).catch(function(err) {
         var el = document.getElementById('cloudDiag');
         if (el) {

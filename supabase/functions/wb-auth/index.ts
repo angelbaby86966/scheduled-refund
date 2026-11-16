@@ -264,7 +264,7 @@ async function handle(p: any) {
         };
       }
     }
-    return json({ ok: true, admin, users };
+    return json({ ok: true, admin, users });
   }
 
   // ---------- 新增用户（仅管理员） ----------

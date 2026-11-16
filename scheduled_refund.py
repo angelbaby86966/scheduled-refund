@@ -83,6 +83,7 @@ EXCLUDE_BY_USER = {}          # username -> set(instance_id)
 EXCLUDE_DIRTY_USERS = set()    # 该账号的排除字段类型异常 → 该账号 fail-closed
 EXCLUDE_LOADED = False         # 名单整体是否成功读取（读表失败 → 全局 fail-closed）
 CURRENT_USER = ""              # 当前正在处理的账号（供 is_excluded 取该账号的名册）
+ACTIVE_USERS = None            # 仍存在的登录账号集合；None = 读表失败 → 全局 fail-closed
 
 
 def normalize_exclude_ids(raw):
@@ -578,6 +579,35 @@ def supabase_get_all_user_data():
         return json.loads(resp.read().decode("utf-8"))
 
 
+def load_active_users():
+    """读取 app_users 里**仍存在的登录账号**集合。
+
+    为什么需要（2026-11-16 加固「账号之间互不干扰」）：
+      账号被注销时（app_users 里的行已删），user_data 里 TA 的定时退订配置
+      仍然留着 → 定时任务仍在替一个**没人能登录的账号**执行「花钱」的退订，
+      而且该账号自己根本没法登录去关掉这个排程。
+      实测线上就有一例：登录账号已删，但该行 schedule_enabled=true，
+      每晚仍在按该账号的 AK 执行退订。
+
+    返回：
+      set  → 正常读到（可能为空集，表示一个账号都不剩）
+      None  → **读取失败**（调用方必须 fail-closed：
+              绝不"读不到就当全部有效"，那等于放行已注销账号）
+    """
+    url = REST_BASE + "/app_users?select=username"
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+        return {r.get("username") for r in rows if r.get("username")}
+    except Exception as e:
+        log(f"读取 app_users 失败: {e}", "ERROR")
+        return None
+
+
 def supabase_get_user_data(username):
     """读取该账号**当前最新**的 data（写回前的读-改-写第一步）。"""
     url = (REST_BASE + "/user_data?username=eq." + urllib.parse.quote(username)
@@ -954,6 +984,15 @@ def process_user(row):
     username = row.get("username")
     data = row.get("data") or {}
     CURRENT_USER = username or ""
+    # 🛡 已注销的账号不执行定时退订（登录账号已从 app_users 删除）。
+    #    残留的 user_data 配置仍在，但没人能登录去关它 → 继续跑等于替一个
+    #    不存在的账号持续做「花钱」的退订操作。
+    if ACTIVE_USERS is None:
+        # 读表失败 → fail-closed（宁可不退，也不误退）
+        return
+    if username not in ACTIVE_USERS:
+        log(f"用户 {username}: 登录账号已注销（不在账号库），跳过定时退订", "WARN")
+        return
     if not data.get("schedule_enabled"):
         return
     hour = data.get("schedule_hour")
@@ -1035,6 +1074,14 @@ def main():
         log(f"读取 user_data 失败: {e}", "ERROR")
         sys.exit(1)
     log(f"共读取 {len(rows)} 个用户配置", "INFO")
+    # 🛡 读取仍存在的登录账号集合：账号已注销的，其残留排程不再执行。
+    #    读表失败 → 全局 fail-closed（绝不"读不到就当全部有效"）。
+    global ACTIVE_USERS
+    ACTIVE_USERS = load_active_users()
+    if ACTIVE_USERS is None:
+        log("⛔ 账号库读取失败，本次拒绝执行任何退订（fail-closed）", "ERROR")
+        sys.exit(1)
+    log(f"账号库有效账号数: {len(ACTIVE_USERS)}", "INFO")
     # 🛡 先加载保护名单：读不到 → 全局 fail-closed（退订本身是花钱操作，宁可不退也不误退）
     #    单个账号字段缺失/脏数据 → 只让该账号 fail-closed，不牵连其他账号（账号之间互不干扰）
     if not load_exclude_ids(rows):

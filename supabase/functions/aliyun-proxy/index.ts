@@ -924,11 +924,33 @@ Deno.serve(async (req:Request)=>{
         if (!resp.ok) throw new Error("读取用户凭证失败: HTTP " + resp.status);
         const rows: any[] = await resp.json();
 
+        // 🛡 读取仍存在的登录账号集合（app_users）：账号已注销的，其残留排程不再执行。
+        //    读表失败 → 抛错 fail-closed（绝不"读不到就当全部有效"，那等于放行已注销账号）。
+        const usersResp = await fetch(`${SUPABASE_URL}/rest/v1/app_users?select=username`, {
+          headers: sbHeaders(),
+        });
+        if (!usersResp.ok) throw new Error("读取账号库失败: HTTP " + usersResp.status);
+        const userRows: any[] = await usersResp.json();
+        const activeUsers = new Set<string>(
+          (Array.isArray(userRows) ? userRows : [])
+            .map((u: any) => String(u?.username || ""))
+            .filter((x: string) => !!x),
+        );
+        console.log(`[runScheduledCancel] 账号库有效账号数: ${activeUsers.size}`);
+
         const results: Record<string, any> = {};
         let triggered = 0, skipped = 0;
         for (const r of rows) {
           const d = r.data || {};
           if (!d.ak_id || !d.ak_secret) continue;
+          // 已注销账号：登录账号已从 app_users 删除，但 user_data 里残留的排程
+          // 仍会让定时任务替一个没人能登录的账号持续做「花钱」的退订 → 跳过。
+          if (!activeUsers.has(String(r.username || ""))) {
+            results[r.username] = {skipped: true, reason: "account_removed"};
+            skipped++;
+            console.log(`[runScheduledCancel] ⛔ ${r.username} 登录账号已注销，跳过定时退订`);
+            continue;
+          }
           if (!d.schedule_enabled) {
             results[r.username] = {skipped: true, reason: "schedule_disabled"};
             skipped++;

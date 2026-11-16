@@ -191,6 +191,12 @@ function deleteUser(username) {
 
 function exportUserDB() {
   var resultEl = document.getElementById('exportResult');
+  // ⚠️ 2026-11-16：用户库含账号清单，属管理员操作，必须校验角色。
+  //    （导出的 JSON 已不再包含任何账号口令 —— 服务端不再下发 password。）
+  if (!isAdmin()) {
+    resultEl.innerHTML = '<span style="color:#ff4d4f">仅管理员可导出用户库</span>';
+    return;
+  }
   resultEl.innerHTML = '<span style="color:#1890ff">☁️ 正在从云端加载...</span>';
   if (!window.CloudStore) {
     resultEl.innerHTML = '<span style="color:#ff4d4f">云端模块未加载</span>';

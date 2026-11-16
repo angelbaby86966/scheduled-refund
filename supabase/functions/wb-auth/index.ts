@@ -179,6 +179,11 @@ async function handle(p: any) {
     return json({ ok: true, username, role, ticket: t.ticket, expiresAt: t.expiresAt });
   }
 
+  // ---------- 健康探针（无需票据）：给未登录的诊断页用 ----------
+  if (action === "ping") {
+    return json({ ok: true, service: "wb-auth", serverTime: Date.now() });
+  }
+
   // ---------- 其余动作一律需要票据 ----------
   const ticket = String(p?.ticket ?? "").trim();
   const scope = action === "tool_ticket" || action === "tool_user_data" ? "tool" : "session";
@@ -244,15 +249,16 @@ async function handle(p: any) {
     if (payload.r !== "admin") return json({ ok: false, error: "仅管理员可查看用户列表" }, 403);
     const rows = await rest(
       "GET",
-      "app_users?select=username,password,role,created_by,created_at&order=username.asc",
+      "app_users?select=username,role,created_by,created_at&order=username.asc",
     );
     const users: Record<string, any> = {};
     let admin = ADMIN_USER;
     for (const r of rows ?? []) {
       if (r.role === "admin") admin = r.username;
       else {
+        // ⚠️ 2026-11-16：不再下发 password —— 前端（含「导出用户库」）已不需要明文口令，
+        //    更不该把全账号口令缓存进 localStorage（那等于把整张口令表留在浏览器里）。
         users[r.username] = {
-          password: r.password,
           createdBy: r.created_by,
           createdAt: r.created_at,
         };

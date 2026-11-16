@@ -1,23 +1,25 @@
 name: oneoff-handoff
-# 一次性凭据交接：
-#   1) 清理探测期遗留的 probe_tmp secret key（上次探测清理步骤失败留下的）
-#   2) 从 Supabase Management API 取回服务端强凭据（service_role / secret key）
-#   3) 写入 GitHub Repo Secret（明文只进 Secret 存储，全程不打印、不落日志）
-#   4) 生成 WB_AUTH_SECRET（Edge Function wb-auth 的 HMAC 签名密钥）
+# 一次性凭据交接（RSA 密文通道）
+#
+# 背景：GITHUB_TOKEN 无权读写 repo Secrets（permissions 里根本没有 secrets 键），
+#       而 service_role 明文又绝不能落到 public 仓库里。
+# 方案：本地生成 RSA-4096 密钥对 → 公钥内嵌本 workflow（明文无害）→
+#       workflow 用公钥加密凭据 → 只把密文打进日志 → 本地私钥解密 → 用本地 PAT 写 Secret。
+#       全程没有任何明文离开加密边界。
+#
+# 本次同时清理上次探测遗留的 probe_tmp secret key（探测时删除步骤失败）。
 on:
   workflow_dispatch: {}
 permissions:
   contents: read
-  secrets: write
 jobs:
   handoff:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       SUPA_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: 清理 probe_tmp + 交接强凭据
+      - name: 清理 probe_tmp + 密文交接强凭据
         run: |
           set -eu
           REF=opauwtkivhjxlijfqaix
@@ -31,7 +33,7 @@ jobs:
           echo "== 2. 拉取 api-keys =="
           curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys.json
 
-          echo "== 3. 提取强凭据到文件（明文不打印）=="
+          echo "== 3. 提取强凭据（明文不打印）=="
           python3 - <<'PY'
           import json
           d = json.load(open('/tmp/keys.json'))
@@ -48,20 +50,32 @@ jobs:
           assert sec, 'secret/default not found'
           open('/tmp/sr.key', 'w').write(sr)
           open('/tmp/sec.key', 'w').write(sec)
-          print('  提取完成，明文未落日志')
+          print('  提取完成（明文未落日志）')
           PY
 
-          echo "== 4. 写入 GitHub Secret =="
-          gh secret set SUPABASE_SERVICE_ROLE_KEY -R angelbaby86966/scheduled-refund --body "$(cat /tmp/sr.key)"
-          gh secret set SUPABASE_SECRET_KEY -R angelbaby86966/scheduled-refund --body "$(cat /tmp/sec.key)"
-          python3 -c "import secrets,base64;open('/tmp/wbauth.key','w').write(base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip('='))"
-          gh secret set WB_AUTH_SECRET -R angelbaby86966/scheduled-refund --body "$(cat /tmp/wbauth.key)"
-          echo "  已写入 SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY / WB_AUTH_SECRET"
+          echo "== 4. 用内嵌公钥加密 → 输出密文 =="
+          cat > /tmp/pub.pem <<'PUBEOF'
+          -----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAk1xawhX4zqDZ9+6GKS/A
+          9dMD0EwHdnKgcBf8Xc1YCTTPCErCqBHUgjaYGSuA85XazESvCh7EfO3XiUBm0mrw
+          sSRVGtOOfWTzNwyWXyFDTi1JlJ6MZ0TVtuLPx0PnnZF5OiFAtdLnHLDi7r+teWDZ
+          0MT0L6e9Wj2eEzaTnu/TgPuQT87TiQE5K0cZkwUBwdrVSkmbaBP076Z/fV8ivRMQ
+          MqllkmMYIUS50DGMcXhJA8lN3IoiK0Z+dvGTpf6MGCx8PBScjjJnkul9tMXJ3qIz
+          J3EXb92LNfjBjUvPs2VWzhpbbnhzkbqP5N28xQFO+nmrZ1LJrZVo19x/MQ6DVf5W
+          m+Wp8f3snrHxGWJuytV05Fq+Y40rKrVLx/xDertYh2FipTO1/f9E3SMkvmoOMH/j
+          2HbdPNn9PncMyH4XRwxd5kP7qx9nYLB6H4JsusMJBreUzjk6A5SsgkYnyEVBiDxx
+          ojVp1FpuLvuArgEUeOlvnkBQb8ZctJIKNysCqXP1U5OWPGs1e5F243cRKrzNK2Nx
+          nZIW++UqHrsCf5pKTpX1JeK2YWPnZb0FkNsx6U4as5jyGScEQUKsaOLzdMP8asii
+          AXgTLPHt7P+8WNWjzsxw1fWB9ZYas7jaIAB7ZRHsklwO5gVm1Jpx6TNo56hnd365
+          kO56d3pdQ4OWbhxFJXzoQVECAwEAAQ==
+          -----END PUBLIC KEY-----
+          PUBEOF
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/pub.pem -in /tmp/sr.key -out /tmp/sr.enc
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/pub.pem -in /tmp/sec.key -out /tmp/sec.enc
+          echo "  SR_ENC_B64=$(base64 -w0 /tmp/sr.enc)"
+          echo "  SEC_ENC_B64=$(base64 -w0 /tmp/sec.enc)"
 
-          echo "== 5. 复核（只看名字，不看值）=="
-          gh secret list -R angelbaby86966/scheduled-refund
-
-          echo "== 6. 确认 probe_tmp 已消失 =="
+          echo "== 5. 确认 probe_tmp 已消失 =="
           curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys2.json
           python3 - <<'PY'
           import json
@@ -73,5 +87,5 @@ jobs:
           print('  probe_tmp 已确认删除')
           PY
 
-          rm -f /tmp/sr.key /tmp/sec.key /tmp/wbauth.key /tmp/keys.json /tmp/keys2.json /tmp/del.json
+          rm -f /tmp/sr.key /tmp/sec.key /tmp/sr.enc /tmp/sec.enc /tmp/keys.json /tmp/keys2.json /tmp/del.json /tmp/pub.pem
           echo "== 完成 =="

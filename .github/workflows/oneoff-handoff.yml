@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -26,6 +26,7 @@ on:
           - handoff
           - cleanup
           - diag-rls
+          - rls-tighten-app
           - rls-tighten
 permissions:
   contents: read
@@ -252,8 +253,59 @@ jobs:
           echo '===== 17. 各表总行数 ====='
           run_sql "SELECT 'user_data' AS t, count(*) FROM public.user_data UNION ALL SELECT 'app_users', count(*) FROM public.app_users;"
 
-      # ============ RLS 收紧（破坏性）============
-      - name: 收紧 user_data / app_users 的 anon 权限
+      # ============ RLS 收紧 A：只动 app_users（零依赖，可立即执行）============
+      # app_users.password 是明文列。当前 policy app_users_anon_select USING true +
+      #   表级 SELECT grant ⇒ 任何拿到 publishable key 的人都能 select=* 拖走
+      #   全部账号明文口令。新版 cloud-store.js 走 wb-auth 网关（service_role），
+      #   前端/工具页都不再直连 app_users ⇒ 收紧对现网零影响。
+      - name: 收紧 app_users 权限（阶段 A，零影响）
+        if: inputs.mode == 'rls-tighten-app'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --fail-with-body --max-time 40 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '--- A0) 收紧前快照（口令只打长度）---'
+          run_sql "SELECT username, role, length(password) AS pw_len FROM public.app_users ORDER BY username;"
+          echo '--- A1) 撤销 anon / authenticated 对 app_users 的表级权限 ---'
+          run_sql "REVOKE ALL PRIVILEGES ON TABLE public.app_users FROM anon, authenticated;"
+          echo '--- A2) 撤销列级权限（PostgreSQL 表级 REVOKE 不会连带撤销列级）---'
+          run_sql "REVOKE ALL (id, username, password, role, created_by, created_at) ON TABLE public.app_users FROM anon, authenticated;"
+          echo '--- A3) 删除 app_users 上的 anon policy ---'
+          run_sql "DROP POLICY IF EXISTS app_users_anon_insert ON public.app_users;"
+          run_sql "DROP POLICY IF EXISTS app_users_anon_select ON public.app_users;"
+          run_sql "DROP POLICY IF EXISTS app_users_anon_update ON public.app_users;"
+          echo '--- A4) 撤销 future table 的默认授权（止血，防新建表再漏）---'
+          run_sql "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;"
+          run_sql "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated;"
+          echo '--- A5) 清理我之前实验遗留的诊断垃圾行 ---'
+          run_sql "DELETE FROM public.user_data WHERE username='_diag_test_write';"
+          echo '--- A6) 结果复核：policies ---'
+          run_sql "SELECT tablename, policyname, roles::text, cmd, coalesce(qual,'') AS using_expr, coalesce(with_check,'') AS check_expr FROM pg_policies WHERE schemaname='public' ORDER BY tablename, policyname;"
+          echo '--- A7) 结果复核：grants ---'
+          run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, privilege_type;"
+          run_sql "SELECT table_name, grantee, privilege_type, column_name FROM information_schema.column_privileges WHERE table_schema='public' AND table_name='app_users' ORDER BY grantee, column_name, privilege_type;"
+          echo '--- A8) anon 实测：app_users 应 403/0 行 ---'
+          ANON=sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username" -w '\n    http=%{http_code}\n' || true
+          echo '--- A9) service_role 实测：应仍可读 4 行 ---'
+          curl -sS --max-time 30 -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username,role" -w '\n    http=%{http_code}\n' || true
+          echo '--- A10) user_data 行数复核（应为 5，_diag_test_write 已删）---'
+          run_sql "SELECT username FROM public.user_data ORDER BY username;"
+          echo '--- A11) 各账号退订开关现状（不取 AK/SK 值）---'
+          run_sql "SELECT username, data->>'schedule_enabled' AS sched_on, data->>'schedule_hour' AS sh, data->>'schedule_minute' AS sm, data->>'ak_active' AS ak_on, (data ? 'schedule_exclude_instance_ids') AS has_exclude, (data ? 'schedule_ak_ids') AS has_ak_ids FROM public.user_data WHERE username NOT IN ('ocd_biz_map','_fc_heartbeat') ORDER BY username;"
+
+      # ============ RLS 收紧 B：user_data 收到 ocd_biz_map 单行（需先发工具页新版）============
+      - name: 收紧 user_data 权限（阶段 B，前置：工具页新版已上线）
         if: inputs.mode == 'rls-tighten'
         run: |
           set -eu
@@ -266,26 +318,12 @@ jobs:
               -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
             echo
           }
-          echo '--- 1) 撤销 anon / authenticated 对两表的一切权限 ---'
+          echo '--- 1) 撤销 anon / authenticated 对 user_data 的一切权限 ---'
           run_sql "REVOKE ALL PRIVILEGES ON TABLE public.user_data FROM anon, authenticated;"
-          run_sql "REVOKE ALL PRIVILEGES ON TABLE public.app_users FROM anon, authenticated;"
-          echo '--- 2) 删除旧的宽松 policy ---'
-          run_sql "DO \$\$
-          DECLARE r record;
-          BEGIN
-            FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
-                     WHERE schemaname='public'
-                       AND ( (tablename='user_data' AND policyname='anon_all_user_data')
-                          OR (tablename='app_users' AND policyname LIKE 'app_users_anon%')
-                          OR (tablename='user_data' AND policyname LIKE 'anon_%' AND policyname<>'anon_ocd_biz_map') )
-            LOOP
-              EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
-              RAISE NOTICE 'dropped policy % on %', r.policyname, r.tablename;
-            END LOOP;
-          END \$\$;"
-          echo '--- 3) 确认 RLS 开启 ---'
-          run_sql "ALTER TABLE public.user_data ENABLE ROW LEVEL SECURITY;"
-          run_sql "ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;"
+          echo '--- 2) 撤销列级权限（表级 REVOKE 不连带）---'
+          run_sql "REVOKE ALL (username, data, updated_at) ON TABLE public.user_data FROM anon, authenticated;"
+          echo '--- 3) 删除 anon_all_user_data 宽松 policy ---'
+          run_sql "DROP POLICY IF EXISTS anon_all_user_data ON public.user_data;"
           echo '--- 4) 只给 anon 留 ocd_biz_map 一行的读写 ---'
           run_sql "GRANT SELECT, INSERT, UPDATE ON TABLE public.user_data TO anon;"
           run_sql "DROP POLICY IF EXISTS anon_ocd_biz_map ON public.user_data;"
@@ -293,9 +331,9 @@ jobs:
           echo '--- 5) 结果复核 ---'
           run_sql "SELECT tablename, policyname, roles::text, cmd, coalesce(qual,'') AS using_expr, coalesce(with_check,'') AS check_expr FROM pg_policies WHERE schemaname='public' ORDER BY tablename, policyname;"
           run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, privilege_type;"
-          echo '--- 6) anon 实测：应只能看到 ocd_biz_map 一行 ---'
+          echo '--- 6) anon 实测 ---'
           ANON=sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd
-          echo "  anon 读 user_data 全部:"
+          echo "  anon 读 user_data 全部（应只有 ocd_biz_map）:"
           curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
             "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true
           echo "  anon 读 zhangruiyao 行（应 0 行）:"
@@ -311,3 +349,5 @@ jobs:
           curl -sS --max-time 30 -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
             "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true
+
+      # ============ RLS 收紧（破坏性）============

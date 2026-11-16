@@ -10,11 +10,13 @@ name: oneoff-ops
 #   deploy-edge- 部署 Edge Functions（wb-auth / aliyun-proxy）
 #   deploy-fc  - 部署阿里云 FC 定时退订执行器
 #   cleanup    - 清理本分支上的一次性探针 workflow 文件
+#   diag-rls   - RLS / grants / 行数 只读诊断（不改任何东西）
+#   rls-tighten- 收紧 user_data / app_users 的 anon 权限（破坏性，需人工确认后 dispatch）
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -23,6 +25,8 @@ on:
           - deploy-fc
           - handoff
           - cleanup
+          - diag-rls
+          - rls-tighten
 permissions:
   contents: read
 jobs:
@@ -192,3 +196,105 @@ jobs:
             git commit -m "chore: 清理一次性探针 workflow [skip ci]"
             git push
           fi
+
+      # ============ RLS 只读诊断 ============
+      - name: RLS 只读诊断（不改数据）
+        if: inputs.mode == 'diag-rls'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --fail-with-body --max-time 40 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '===== 1. 表 RLS 开关 ====='
+          run_sql "SELECT c.relname AS table, c.relrowsecurity AS rls_on, c.relforcerowsecurity AS rls_forced FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r' ORDER BY c.relname;"
+          echo '===== 2. RLS policies ====='
+          run_sql "SELECT tablename, policyname, permissive, roles::text, cmd, coalesce(qual,'') AS using_expr, coalesce(with_check,'') AS check_expr FROM pg_policies WHERE schemaname='public' ORDER BY tablename, policyname;"
+          echo '===== 3. 表级 grants ====='
+          run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, privilege_type;"
+          echo '===== 4. 列级 grants（只 user_data）====='
+          run_sql "SELECT table_name, grantee, privilege_type, column_name FROM information_schema.column_privileges WHERE table_schema='public' AND table_name='user_data' ORDER BY grantee, column_name, privilege_type;"
+          echo '===== 5. 表结构 ====='
+          run_sql "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('user_data','app_users') ORDER BY table_name, ordinal_position;"
+          echo '===== 6. user_data 行清单（只看 username/键名，不取值）====='
+          run_sql "SELECT u.username, ARRAY(SELECT jsonb_object_keys(COALESCE(u.data,'{}'::jsonb))) AS data_keys FROM public.user_data u ORDER BY u.username;"
+          echo '===== 7. app_users 行数（不取口令）====='
+          run_sql "SELECT count(*) AS app_users_rows FROM public.app_users;"
+          echo '===== 8. 角色属性（谁 BYPASSRLS）====='
+          run_sql "SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role','postgres','authenticator') ORDER BY rolname;"
+          echo '===== 9. service_role 的表权限（确认 revoke 不会误伤）====='
+          run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='public' AND table_name IN ('user_data','app_users') AND grantee IN ('service_role','postgres') ORDER BY table_name, grantee, privilege_type;"
+          echo '===== 10. ocd_biz_map 行是否存在 ====='
+          run_sql "SELECT username, (data ? 'map') AS has_map, jsonb_typeof(data->'map') AS map_type FROM public.user_data WHERE username='ocd_biz_map';"
+          echo '===== 11. 当前 anon 实测可读行数 ====='
+          ANON=sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true
+          echo '===== 12. 当前 anon 实测可读 app_users 行数 ====='
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username" -w '\n    http=%{http_code}\n' || true
+
+      # ============ RLS 收紧（破坏性）============
+      - name: 收紧 user_data / app_users 的 anon 权限
+        if: inputs.mode == 'rls-tighten'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --fail-with-body --max-time 40 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '--- 1) 撤销 anon / authenticated 对两表的一切权限 ---'
+          run_sql "REVOKE ALL PRIVILEGES ON TABLE public.user_data FROM anon, authenticated;"
+          run_sql "REVOKE ALL PRIVILEGES ON TABLE public.app_users FROM anon, authenticated;"
+          echo '--- 2) 删除旧的宽松 policy ---'
+          run_sql "DO \$\$
+          DECLARE r record;
+          BEGIN
+            FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+                     WHERE schemaname='public'
+                       AND ( (tablename='user_data' AND policyname='anon_all_user_data')
+                          OR (tablename='app_users' AND policyname LIKE 'app_users_anon%')
+                          OR (tablename='user_data' AND policyname LIKE 'anon_%' AND policyname<>'anon_ocd_biz_map') )
+            LOOP
+              EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+              RAISE NOTICE 'dropped policy % on %', r.policyname, r.tablename;
+            END LOOP;
+          END \$\$;"
+          echo '--- 3) 确认 RLS 开启 ---'
+          run_sql "ALTER TABLE public.user_data ENABLE ROW LEVEL SECURITY;"
+          run_sql "ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;"
+          echo '--- 4) 只给 anon 留 ocd_biz_map 一行的读写 ---'
+          run_sql "GRANT SELECT, INSERT, UPDATE ON TABLE public.user_data TO anon;"
+          run_sql "DROP POLICY IF EXISTS anon_ocd_biz_map ON public.user_data;"
+          run_sql "CREATE POLICY anon_ocd_biz_map ON public.user_data FOR ALL TO anon USING (username = 'ocd_biz_map') WITH CHECK (username = 'ocd_biz_map');"
+          echo '--- 5) 结果复核 ---'
+          run_sql "SELECT tablename, policyname, roles::text, cmd, coalesce(qual,'') AS using_expr, coalesce(with_check,'') AS check_expr FROM pg_policies WHERE schemaname='public' ORDER BY tablename, policyname;"
+          run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, privilege_type;"
+          echo '--- 6) anon 实测：应只能看到 ocd_biz_map 一行 ---'
+          ANON=sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd
+          echo "  anon 读 user_data 全部:"
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true
+          echo "  anon 读 zhangruiyao 行（应 0 行）:"
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?username=eq.zhangruiyao&select=username" -w '\n    http=%{http_code}\n' || true
+          echo "  anon 读 app_users（应 403/0 行）:"
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username" -w '\n    http=%{http_code}\n' || true
+          echo "  anon 读 ocd_biz_map（应 1 行）:"
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?username=eq.ocd_biz_map&select=username" -w '\n    http=%{http_code}\n' || true
+          echo '--- 7) service_role 实测：应仍可读全表 ---'
+          curl -sS --max-time 30 -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true

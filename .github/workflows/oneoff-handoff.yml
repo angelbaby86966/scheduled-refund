@@ -238,6 +238,19 @@ jobs:
           echo '===== 12. 当前 anon 实测可读 app_users 行数 ====='
           curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
             "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username" -w '\n    http=%{http_code}\n' || true
+          echo '===== 13. 关键：anon 能否读到 app_users.password 列（只打印长度，不打印值）====='
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/app_users?select=username,role,length(password)" -w '\n    http=%{http_code}\n' || true
+          echo '===== 14. 关键：anon 能否读到 user_data.data 里的 ak_secret（只打印长度）====='
+          curl -sS --max-time 30 -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?username=eq.zhangruiyao&select=username,length(data->>'ak_secret')" -w '\n    http=%{http_code}\n' || true
+          echo '===== 15. user_data / app_users 的约束与索引（username 是否唯一）====='
+          run_sql "SELECT c.relname AS table, con.conname, con.contype, pg_get_constraintdef(con.oid) AS def FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('user_data','app_users') ORDER BY c.relname, con.contype;"
+          run_sql "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname='public' AND tablename IN ('user_data','app_users') ORDER BY tablename, indexname;"
+          echo '===== 16. ocd_biz_map 行数（必须 = 1，否则单行策略不可靠）====='
+          run_sql "SELECT count(*) AS ocd_rows FROM public.user_data WHERE username='ocd_biz_map';"
+          echo '===== 17. 各表总行数 ====='
+          run_sql "SELECT 'user_data' AS t, count(*) FROM public.user_data UNION ALL SELECT 'app_users', count(*) FROM public.app_users;"
 
       # ============ RLS 收紧（破坏性）============
       - name: 收紧 user_data / app_users 的 anon 权限

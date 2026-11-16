@@ -123,18 +123,23 @@ jobs:
         run: |
           set -eu
           printf 'WB_AUTH_SECRET=%s\n' "$WB_AUTH_SECRET" > /tmp/.env.wb
-          supabase secrets set --env-file /tmp/.env.wb --project-ref opauwtkivhjxlijfqaix
+          # 新版 CLI 非交互环境必须显式 --yes，否则报 "Confirmation required" 直接失败
+          supabase secrets set --env-file /tmp/.env.wb --project-ref opauwtkivhjxlijfqaix --yes
           rm -f /tmp/.env.wb
 
       - name: 部署 wb-auth（--no-verify-jwt）
         if: inputs.mode == 'deploy-edge'
         run: |
-          supabase functions deploy wb-auth --project-ref opauwtkivhjxlijfqaix --no-verify-jwt
+          supabase functions deploy wb-auth --project-ref opauwtkivhjxlijfqaix --no-verify-jwt --yes
 
-      - name: 部署 aliyun-proxy
+      - name: 部署 aliyun-proxy（源码在 ref 上才部署）
         if: inputs.mode == 'deploy-edge'
         run: |
-          supabase functions deploy aliyun-proxy --project-ref opauwtkivhjxlijfqaix
+          if [ -d supabase/functions/aliyun-proxy ]; then
+            supabase functions deploy aliyun-proxy --project-ref opauwtkivhjxlijfqaix --yes
+          else
+            echo "  aliyun-proxy 源码不在本 ref，跳过"
+          fi
 
       - name: 冒烟验证（只测必须被拒绝的路径）
         if: inputs.mode == 'deploy-edge'

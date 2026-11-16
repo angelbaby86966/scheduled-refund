@@ -1,0 +1,49 @@
+name: oneoff-diag-rls
+
+on:
+  push:
+    branches: [gh-pages]
+    paths: [.github/workflows/oneoff-diag-rls.yml]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPA_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - name: Diagnose Supabase grants / RLS / rows
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --fail-with-body --max-time 40 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPA_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '===== 1. 表 RLS 状态 ====='
+          run_sql "SELECT c.relname AS table, c.relrowsecurity AS rls_on, c.relforcerowsecurity AS rls_forced FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY c.relname;"
+          echo '===== 2. RLS policies ====='
+          run_sql "SELECT tablename, policyname, permissive, roles::text, cmd, coalesce(qual,'') AS using_expr, coalesce(with_check,'') AS check_expr FROM pg_policies WHERE schemaname = 'public' ORDER BY tablename, policyname;"
+          echo '===== 3. 表级 grants (user_data/app_users) ====='
+          run_sql "SELECT table_name, grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema = 'public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, privilege_type;"
+          echo '===== 4. 列级 grants (user_data/app_users) ====='
+          run_sql "SELECT table_name, grantee, privilege_type, column_name FROM information_schema.column_privileges WHERE table_schema = 'public' AND table_name IN ('user_data','app_users') ORDER BY table_name, grantee, column_name;"
+          echo '===== 5. 表结构 ====='
+          run_sql "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('user_data','app_users') ORDER BY table_name, ordinal_position;"
+          echo '===== 6. user_data 各行的 data 键名（不取值）====='
+          run_sql "SELECT u.username, ARRAY(SELECT jsonb_object_keys(COALESCE(u.data,'{}'::jsonb))) AS data_keys FROM public.user_data u ORDER BY u.username;"
+          echo '===== 7. 角色属性（谁 BYPASSRLS）====='
+          run_sql "SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role','postgres','authenticator') ORDER BY rolname;"
+          echo '===== 8. API keys 清单（只列类型与前缀，不打印明文）====='
+          curl -sS --fail-with-body --max-time 40 \
+            "https://api.supabase.com/v1/projects/$REF/api-keys" \
+            -H "Authorization: Bearer $SUPA_TOKEN" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("  name=%s type=%s prefix=%s" % (k.get("name"), k.get("type"), (k.get("api_key") or "")[:14])) for k in (d if isinstance(d,list) else d.get("api_keys",[]))]'

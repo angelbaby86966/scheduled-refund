@@ -1,6 +1,8 @@
 #!/bin/bash
 # =============================================================================
 # q2_hide_dns.sh —— 让云主机的「明文 DNS 查询 / 本机日志」里不再出现爱奇艺系域名
+#   v1.2.0（2026-11-16）：在原 v1.1.0 基础上，容器内 resolv.conf 同走 DoH——
+#                        容器内 /etc/resolv.conf 一并改成 127.0.0.1，业务域名不再明文。
 #
 # 只解决域名可见性，不碰流量特征：
 #   - 本机起一个极简 DoH 转发器（Python 标准库，无第三方依赖）
@@ -42,8 +44,8 @@
 set -u
 export LC_ALL=C
 
-HIDE_DNS_VER="1.1.0-20261114"
-KA_VER="1.0.0-20261114"
+HIDE_DNS_VER="1.2.0-20261116"
+KA_VER="1.1.0-20261116"
 PYBIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
 
 # ── 看门狗保活（与 DNS 隐藏完全独立，安装顺序在 DNS 之前）──
@@ -63,6 +65,9 @@ UNIT_FILE="/etc/systemd/system/q2-doh-proxy.service"
 DNSMASQ_CONF="/etc/dnsmasq.d/q2-hide.conf"
 STATE_DIR="/etc/q2"
 RESOLV_BAK="${STATE_DIR}/resolv.conf.pre-hide"
+CONTAINER="${KA_CONTAINER}"
+CONTAINER_RESOLV_BAK="${STATE_DIR}/container_resolv.conf.pre-hide"
+CONTAINER_DNS_OFF="${STATE_DIR}/.container_dns_disabled"
 SUFFIX_FILE="${Q2_IQY_SUFFIXES_FILE:-/etc/q2/iqiyi_suffixes}"
 FAIL_FILE="/tmp/.q2_hide_dns_fail"
 MODE="${Q2_HIDE_MODE:-all}"
@@ -268,6 +273,25 @@ rollback_resolv() {
 }
 
 # -----------------------------------------------------------------------------
+# 容器内 resolv.conf（host 网络下 127.0.0.1 = 宿主机 dnsmasq → DoH）
+# Docker 在 start/run/restart 时会重建该文件，故改写非持久，靠看门狗/保活纠正。
+# -----------------------------------------------------------------------------
+apply_container_resolv() {
+  [ -f "${CONTAINER_DNS_OFF}" ] && return 0
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER}" || return 1
+  docker exec "${CONTAINER}" sh -c \
+    'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || return 1
+  docker exec "${CONTAINER}" cat /etc/resolv.conf 2>/dev/null \
+    | grep -q '^nameserver 127.0.0.1'
+}
+
+restore_container_resolv() {
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER}" || return 0
+  docker exec "${CONTAINER}" sh -c \
+    'printf "nameserver 8.8.8.8\nnameserver 114.114.114.114\n" > /etc/resolv.conf' 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
 install_cron() {
   local line="*/5 * * * * ${SELF_PATH} --watchdog >/dev/null 2>&1"
   ( crontab -l 2>/dev/null | grep -v 'q2_hide_dns.sh' || true; echo "${line}" ) | crontab - 2>/dev/null || true
@@ -362,6 +386,7 @@ s2_container() {
     if docker start "$C" >/dev/null 2>&1; then
       log "S2 docker start 成功（保留原 SN）"
       sleep 15
+      [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S2 start 后写容器 resolv 失败（业务域名可能明文）"
       return 0
     fi
     log "S2 docker start 失败，改为完整重建"
@@ -377,6 +402,7 @@ s2_container() {
   rc=$?
   log "S2 容器重建 rc=${rc} out=${out}"
   [ "$rc" = "0" ] || return 1
+  [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S2 重建后写容器 resolv 失败（业务域名可能明文）"
   sleep 20
   container_running
 }
@@ -404,6 +430,7 @@ s3_happ() {
   log "S3 执行 docker restart ${C} 拉回 ${N} 路"
   docker restart "$C" >/dev/null 2>&1 || log "S3 docker restart 返回非 0"
   mark
+  [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S3 restart 后写容器 resolv 失败（业务域名可能明文）"
   for i in $(seq 1 18); do
     sleep 5
     c=$(num "$(happ_cnt)")
@@ -595,6 +622,11 @@ do_install() {
   apply_resolv
   log "resolv.conf 已指向本机（原配置备份在 ${RESOLV_BAK}）"
 
+  # 容器 resolv 同指本机 dnsmasq；重装先清回滚闸门。失败只告警，不阻断部署主体。
+  rm -f "${CONTAINER_DNS_OFF}"
+  apply_container_resolv 2>/dev/null || log "⚠️ 容器 resolv 改写未成功（容器不存在或只读），容器域名可能仍明文"
+  log "容器 resolv 已尝试指向本机（闸门 ${CONTAINER_DNS_OFF} 已清除）"
+
   # 端到端验证：getent 走 glibc → resolv.conf
   getent hosts "${PROBE_IQY}" >/dev/null 2>&1 || { rollback_resolv; die "端到端解析爱奇艺域名失败，已回滚 resolv.conf"; }
   getent hosts "${PROBE_ANY}" >/dev/null 2>&1 || { rollback_resolv; die "端到端解析通用域名失败，已回滚 resolv.conf"; }
@@ -613,6 +645,7 @@ do_install() {
 
 do_watchdog() {
   if dns_probe 53 "${PROBE_IQY}" >/dev/null 2>&1 && dns_probe 53 "${PROBE_ANY}" >/dev/null 2>&1; then
+    apply_container_resolv 2>/dev/null || true
     rm -f "${FAIL_FILE}"
     exit 0
   fi
@@ -624,6 +657,7 @@ do_watchdog() {
   if [ "${n}" -ge 3 ]; then
     log "连续 3 次 DNS 自检失败，自动恢复原 resolv.conf 以避免全机断解析"
     rollback_resolv
+    restore_container_resolv 2>/dev/null || true
     rm -f "${FAIL_FILE}"
   fi
 }
@@ -632,6 +666,7 @@ do_status() {
   echo "版本        : ${HIDE_DNS_VER}"
   echo "模式        : ${MODE}"
   echo "resolv.conf : $(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
+  echo "容器resolv  : $(docker exec "${CONTAINER}" cat /etc/resolv.conf 2>/dev/null | grep -E '^nameserver' | tr '\n' ' ')"
   echo "备份        : $([ -f "${RESOLV_BAK}" ] && echo "${RESOLV_BAK}" || echo '无')"
   echo "dnsmasq     : $(systemctl is-active dnsmasq 2>/dev/null || echo 'n/a')"
   echo "DoH 转发    : $(systemctl is-active q2-doh-proxy 2>/dev/null || echo 'n/a')"
@@ -646,11 +681,20 @@ do_status() {
   echo "路数规则    : < ${KA_N} 补拉；>= ${KA_N} 不动（超出不杀）"
   echo "防抖/日志   : ${KA_DEBOUNCE}s / ${KA_LOG}"
   echo "最近动作    : $(tail -n 1 "${KA_LOG}" 2>/dev/null || echo '无')"
+  echo "--- 出向 UDP53 抓包（eth0，非 any；不含 loopback 本地链路）---"
+  if command -v tcpdump >/dev/null 2>&1; then
+    echo "eth0 爱奇艺域名 UDP53 计数: $(timeout 8 tcpdump -i eth0 -nn -c 60 'udp port 53' 2>/dev/null | grep -iE 'iqiyi|qiyi|iqiyipic' | wc -l | tr -d ' ') （期望 0）"
+  else
+    echo "eth0 爱奇艺域名 UDP53 计数: skip（tcpdump 未安装）"
+  fi
 }
 
 do_rollback() {
   [ "$(id -u)" = "0" ] || die "需要 root 运行"
   rollback_resolv
+  # 落闸门，防止 keepalive / watchdog 再把容器 resolv 写回 127.0.0.1（回滚后保活不互殴）
+  touch "${CONTAINER_DNS_OFF}"
+  restore_container_resolv 2>/dev/null || true
   rm -f "${DNSMASQ_CONF}" "${DOH_PY}" "${UNIT_FILE}"
   systemctl stop q2-doh-proxy >/dev/null 2>&1 || true
   systemctl disable q2-doh-proxy >/dev/null 2>&1 || true

@@ -139,11 +139,18 @@ def find_function(ak, sk, fc2):
         "或停用 refund-trigger / refund-trigger-fallback。")
 
 
-def fetch_exclude_ids(anon_key, supabase_url):
-    """实时读取前端「排除实例」文本框内容（全局合并所有用户）。"""
+def fetch_exclude_ids(api_key, supabase_url):
+    """实时读取前端「排除实例」文本框内容（全局合并所有用户）。
+
+    ⚠️ 2026-11-16：改用服务端强凭据读取 —— 前端 anon 权限收紧后，
+       公开 publishable key 将读不到 user_data（部署快照核对会失败）。
+    """
     url = supabase_url.rstrip("/") + "/rest/v1/user_data?select=username,data"
-    req = urllib.request.Request(url, headers={
-        "apikey": anon_key, "Authorization": "Bearer " + anon_key})
+    headers = {"apikey": api_key}
+    # sb_secret_ 不是 JWT，不能放进 Authorization: Bearer
+    if not str(api_key).startswith("sb_secret_"):
+        headers["Authorization"] = "Bearer " + api_key
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as r:
         rows = json.loads(r.read().decode())
     ids = set()
@@ -162,19 +169,29 @@ def merge_environment(client, ak, sk):
     """回读现有环境变量并合并新凭证 + 文本框兜底名单（FC 是全量替换，必须带原值）。"""
     cur = getattr(client.get_function(SERVICE, FUNCTION), "data", {}) or {}
     env = dict(cur.get("environmentVariables") or {})
+    # ⚠️ 2026-11-16：定时退订执行器改用**服务端强凭据**（service_role）。
+    #    优先级：FC 上已有的 → workflow 注入的 → 旧的 anon 兜底。
+    service_role = (
+        env.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or env.get("SUPABASE_ANON_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or DEFAULT_ANON_KEY
+    )
     anon = env.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_ANON_KEY") or DEFAULT_ANON_KEY
     supa = env.get("SUPABASE_URL") or "https://opauwtkivhjxlijfqaix.supabase.co"
-    ids = fetch_exclude_ids(anon, supa)
+    ids = fetch_exclude_ids(service_role, supa)
     if not ids:
         raise RuntimeError("Supabase 未读到任何排除实例 ID，拒绝部署（避免上线一份没有兜底的版本）")
     env.update({
         "ALIYUN_AK": ak,
         "ALIYUN_SK": sk,
+        "SUPABASE_SERVICE_ROLE_KEY": service_role,
         "EXCLUDE_INSTANCE_IDS": ",".join(sorted(ids)),
-        "EXCLUDE_PROTECT_VERSION": "2026-11-09-fc-python-v2",
+        "EXCLUDE_PROTECT_VERSION": "2026-11-16-per-account-v3",
     })
     log(f"环境变量合并完成：共 {len(env)} 项，文本框排除 ID {len(ids)} 个；"
-        f"DRY_RUN={env.get('DRY_RUN')}")
+        f"DRY_RUN={env.get('DRY_RUN')}；service_role={'已注入' if service_role.startswith('eyJ') else '未注入(回落 anon)'}")
     return env, len(ids), cur
 
 

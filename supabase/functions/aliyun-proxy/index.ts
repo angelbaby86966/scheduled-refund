@@ -1,7 +1,21 @@
 // 阿里云 SWAS API 代理 + 定时退订（零依赖版，避免 esm.sh BOOT_ERROR）
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+// ⚠️ 2026-11-16 加固：改用**服务端强凭据**（service_role）。
+// 平台（Supabase Edge）会自动注入 SUPABASE_SERVICE_ROLE_KEY；
+// 前端改走 wb-auth 服务端网关后，anon 对 user_data 的访问会被收紧，
+// 云端退订执行器必须用 service_role（具 BYPASSRLS）才能继续读表。
+const SUPABASE_KEY =
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+
+/** 统一的 Supabase 请求头。sb_secret_ 不是 JWT，不能放进 Authorization: Bearer。 */
+function sbHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { apikey: SUPABASE_KEY };
+  if (SUPABASE_KEY && !SUPABASE_KEY.startsWith("sb_secret_")) {
+    h["Authorization"] = `Bearer ${SUPABASE_KEY}`;
+  }
+  return extra ? { ...h, ...extra } : h;
+}
 
 // 阿里云 SWAS-OPEN 所有 API（包括 CreateOrder）都用地域 endpoint（swas.${regionId}.aliyuncs.com）
 // 没有 swas-open.aliyuncs.com 这个中心 endpoint（NXDOMAIN）
@@ -35,14 +49,24 @@ const GOLDEN_PUBLIC_IPS = new Set([
   "47.101.145.6",
 ]);
 
-// ====== 排除实例统一保护（2026-11-09 事故根治）======
+// ====== 排除实例统一保护（2026-11-09 事故根治 / 2026-11-16 按账号隔离）======
 // 单一事实来源：Supabase user_data.data.schedule_exclude_instance_ids。
 // 任何调用 BSS RefundInstance 的路径都必须过 assertNotExcluded()；
 // 名单读取失败一律抛错 → 一台都不退（fail-closed）。
-// 全局合并所有用户的排除 ID（实例 ID 全局唯一，合并只会更安全）。
-let EXCLUDE_CACHE: Set<string> | null = null;
+//
+// ⚠️ 2026-11-16 改造（修「几个账号的定时退订互相干扰」）：
+//   旧实现把所有用户的排除 ID **全局合并**成一张名单，且任一账号字段异常
+//   就让**所有**账号一起 fail-closed —— 一个账号配置脏/缺失会拖垮其他账号。
+//   新实现按账号隔离：
+//     · 每个账号用自己的排除名单；
+//     · 某账号没配排除清单 → 视作「该账号未配置」，**不牵连其他账号**；
+//     · 某账号排除字段类型脏 → **只**该账号 fail-closed；
+//     · 整表读取失败 → 全局 fail-closed（名单读不到，谁都不退）。
+let EXCLUDE_BY_USER: Map<string, Set<string>> = new Map();
+let EXCLUDE_DIRTY_USERS: Set<string> = new Set();
+let AK_OWNER: Map<string, string> = new Map();   // ak_id → username（零成本归属解析）
 let EXCLUDE_CACHE_AT = 0;
-let EXCLUDE_PENDING: Promise<Set<string>> | null = null;
+let EXCLUDE_PENDING: Promise<Map<string, Set<string>>> | null = null;
 const EXCLUDE_TTL_MS = 30_000;
 
 function normalizeExclude(raw: any): string[] {
@@ -52,43 +76,55 @@ function normalizeExclude(raw: any): string[] {
   return [];
 }
 
-async function fetchExcludeIds(): Promise<Set<string>> {
-  const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=data`, {
-    headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
+async function fetchExcludeMap(): Promise<Map<string, Set<string>>> {
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=username,data`, {
+    headers: sbHeaders(),
   });
   if (!resp.ok) throw new Error(`排除名单读取失败: HTTP ${resp.status}（拒绝执行任何退订）`);
   const rows: any[] = await resp.json();
   if (!Array.isArray(rows)) throw new Error("排除名单返回格式异常（拒绝执行任何退订）");
-  const ids = new Set<string>();
-  let hasField = false;
+  const byUser = new Map<string, Set<string>>();
+  const dirty = new Set<string>();
+  const owners = new Map<string, string>();
+  let total = 0;
   for (const r of rows) {
+    const username = String(r?.username || "");
+    const ak = r?.data?.ak_id;
+    if (ak) owners.set(String(ak), username);
     const raw = r?.data?.schedule_exclude_instance_ids;
-    if (raw === undefined || raw === null) continue;
-    hasField = true;
+    if (raw === undefined || raw === null) {
+      // 该账号没配排除清单 → 视作「未配置」，不牵连其他账号
+      byUser.set(username, new Set());
+      continue;
+    }
     // 与 FC / Actions 三套统一：脏类型不能静默当空名单（否则会漏保护该用户配置的实例）
     const t = typeof raw;
     if (t !== "string" && !Array.isArray(raw) && !(raw && t === "object")) {
-      throw new Error("schedule_exclude_instance_ids 类型异常（拒绝执行任何退订）");
+      dirty.add(username);
+      byUser.set(username, new Set());
+      continue;
     }
     if (Array.isArray(raw) && raw.some((x: any) => typeof x !== "string")) {
-      throw new Error("schedule_exclude_instance_ids 数组含非字符串（拒绝执行任何退订）");
+      dirty.add(username);
+      byUser.set(username, new Set());
+      continue;
     }
-    for (const id of normalizeExclude(raw)) ids.add(id);
+    const ids = new Set(normalizeExclude(raw));
+    byUser.set(username, ids);
+    total += ids.size;
   }
-  // 全体用户都缺该字段 = 配置被误删，不能当「名单为空继续退」
-  if (!hasField) {
-    throw new Error("所有用户都缺少 schedule_exclude_instance_ids 字段（疑似配置被误删），拒绝执行任何退订");
-  }
-  EXCLUDE_CACHE = ids;
+  EXCLUDE_BY_USER = byUser;
+  EXCLUDE_DIRTY_USERS = dirty;
+  AK_OWNER = owners;
   EXCLUDE_CACHE_AT = Date.now();
-  console.log(`[protect] 🛡️ 排除名单已加载 ${ids.size} 个实例 ID`);
-  return ids;
+  console.log(`[protect] 🛡️ 排除名单已加载：${byUser.size} 个账号 / ${total} 个实例 ID（脏账号 ${dirty.size} 个）`);
+  return byUser;
 }
 
-async function loadExcludeIds(): Promise<Set<string>> {
-  if (EXCLUDE_CACHE && Date.now() - EXCLUDE_CACHE_AT < EXCLUDE_TTL_MS) return EXCLUDE_CACHE;
+async function loadExcludeMap(): Promise<Map<string, Set<string>>> {
+  if (EXCLUDE_CACHE_AT && Date.now() - EXCLUDE_CACHE_AT < EXCLUDE_TTL_MS) return EXCLUDE_BY_USER;
   // 50 台并发退订时合并成一次请求，避免同时打 Supabase 50 次
-  if (!EXCLUDE_PENDING) EXCLUDE_PENDING = fetchExcludeIds();
+  if (!EXCLUDE_PENDING) EXCLUDE_PENDING = fetchExcludeMap();
   try {
     return await EXCLUDE_PENDING;
   } finally {
@@ -96,11 +132,41 @@ async function loadExcludeIds(): Promise<Set<string>> {
   }
 }
 
+/** 全局合并名单（归属未知时使用，最保守）。 */
+function globalExcludeIds(map: Map<string, Set<string>>): Set<string> {
+  const all = new Set<string>();
+  for (const s of map.values()) for (const id of s) all.add(id);
+  return all;
+}
+
+/**
+ * 解析某账号应当使用的排除名单。
+ *   - username 为空（归属未知，例如手工传入未登记的 AK）→ 用全局合并名单（最保守）
+ *   - 该账号排除字段类型脏 → deny=true（该账号一台都不退）
+ *   - 正常 → 该账号自己的名单
+ */
+function resolveExcludes(username: string, map: Map<string, Set<string>>): { deny: boolean; ids: Set<string> } {
+  if (!username) return { deny: false, ids: globalExcludeIds(map) };
+  if (EXCLUDE_DIRTY_USERS.has(username)) return { deny: true, ids: new Set() };
+  return { deny: false, ids: EXCLUDE_BY_USER.get(username) ?? new Set() };
+}
+
+/** 由 ak_id 反查归属账号（读名单时顺带建表，零额外请求）。 */
+function usernameForAk(ak?: string): string {
+  if (!ak) return "";
+  return AK_OWNER.get(String(ak)) || "";
+}
+
 /** 所有退订路径的统一闸门；名单读取失败时抛错（fail-closed）。 */
-async function assertNotExcluded(iid: string): Promise<boolean> {
-  const ids = await loadExcludeIds();
-  if (ids.has(iid)) {
-    console.log(`[protect] 🛡️ 跳过排除实例 ${iid}，绝不退订`);
+async function assertNotExcluded(iid: string, username?: string): Promise<boolean> {
+  const map = await loadExcludeMap();
+  const v = resolveExcludes(username || "", map);
+  if (v.deny) {
+    console.log(`[protect] 🛡 账号 ${username} 的排除名单配置异常，拒绝退订任何实例`);
+    return false;
+  }
+  if (v.ids.has(iid)) {
+    console.log(`[protect] 🛡 跳过排除实例 ${iid}，绝不退订`);
     return false;
   }
   return true;
@@ -280,14 +346,15 @@ async function listAll(ak:string,sk:string) {
   return all;
 }
 
-async function cancelOne(rid:string,iid:string,ak:string,sk:string): Promise<string> {
+async function cancelOne(rid:string,iid:string,ak:string,sk:string,username?:string): Promise<string> {
   // 🛡 黄金机硬保护（防御性兜底；runFullCancel 已先过滤，这里再保险一层）
   if (GOLDEN_INSTANCE_IDS.has(iid)) {
     console.log(`[refund] 🛡 跳过黄金机 ${iid}（${rid}），绝不退订`);
     return "protected";
   }
-  // 🛡 排除实例统一闸门（2026-11-09 根治）：名单读不到会抛错 → 一台都不退
-  if (!await assertNotExcluded(iid)) return "protected";
+  // 🛡 排除实例统一闸门（2026-11-09 根治 / 2026-11-16 按账号隔离）：
+  //    名单读不到会抛错 → 一台都不退；按 username 取该账号自己的名单
+  if (!await assertNotExcluded(iid, username)) return "protected";
   // 用 BSS RefundInstance 真正退订（能退款到原账户，不只是删除）
   // RefundInstance 是中心 endpoint，不分地域；地域信息仅用于日志
   // 自动尝试多个 ProductCode（swas / simpleappserver / swas-open）
@@ -315,13 +382,13 @@ async function cancelOne(rid:string,iid:string,ak:string,sk:string): Promise<str
   throw lastErr || new Error("所有 ProductCode 都不支持");
 }
 
-async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:string,sk:string) {
+async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:string,sk:string,username?:string) {
   const C = 50;
   let s=0,sk2=0,l=0,f=0;
   for (let i=0;i<insts.length;i+=C) {
     const slice = insts.slice(i,i+C);
     const rs = await Promise.all(slice.map(async x=>{
-      try { const cr = await cancelOne(x.regionId,x.instanceId,ak,sk); return cr === "protected" ? "p" : "s"; }
+      try { const cr = await cancelOne(x.regionId,x.instanceId,ak,sk,username); return cr === "protected" ? "p" : "s"; }
       catch(e:any){
         const m=e?.message||"";
         console.log(`[refund] ${x.regionId}/${x.instanceId} 失败: ${m}`);
@@ -335,9 +402,16 @@ async function batchCancel(insts:Array<{regionId:string;instanceId:string}>,ak:s
   return {success:s,skipped:sk2,locked:l,failed:f};
 }
 
-async function runFullCancel(ak:string,sk:string) {
+async function runFullCancel(ak:string,sk:string,username?:string) {
   // 🛡 fail-closed：保护名单读不到就抛错，绝不进入退订流程
-  const excluded = await loadExcludeIds();
+  // ⚠️ 2026-11-16 按账号隔离：只取该账号自己的排除名单；
+  //    归属未知（username 为空）→ 用全局合并名单（最保守）
+  const map = await loadExcludeMap();
+  const verdict = resolveExcludes(username || "", map);
+  if (verdict.deny) {
+    throw new Error(`账号 ${username} 的排除名单配置异常，拒绝执行任何退订`);
+  }
+  const excluded = verdict.ids;
   const raw = await listAll(ak,sk);
   // 🛡 黄金机 + 排除实例硬保护：从待退订清单中剔除，绝不退订
   const golden = raw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
@@ -346,7 +420,7 @@ async function runFullCancel(ak:string,sk:string) {
   if (excludedList.length) console.log(`[refund] 🛡 已剔除 ${excludedList.length} 台排除实例，绝不退订: ${excludedList.map(x=>x.instanceId).join(", ")}`);
   const all = raw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId) && !excluded.has(x.instanceId));
   if (all.length===0) return {success:0,skipped:golden.length,locked:0,failed:0,message:"无实例", goldenSkipped: golden.length};
-  const r1 = await batchCancel(all,ak,sk);
+  const r1 = await batchCancel(all,ak,sk,username);
   let res:any = {...r1, firstRoundInstances: all.length, goldenSkipped: golden.length, excludedSkipped: excludedList.length};
   if (r1.failed>0) {
     await new Promise(r=>setTimeout(r,10*60*1000));
@@ -354,7 +428,7 @@ async function runFullCancel(ak:string,sk:string) {
     const remGolden = remRaw.filter(x => GOLDEN_INSTANCE_IDS.has(x.instanceId));
     const rem = remRaw.filter(x => !GOLDEN_INSTANCE_IDS.has(x.instanceId) && !excluded.has(x.instanceId));
     if (rem.length>0) {
-      const r2 = await batchCancel(rem,ak,sk);
+      const r2 = await batchCancel(rem,ak,sk,username);
       res = {success:r1.success+r2.success,skipped:r1.skipped+r2.skipped,locked:r1.locked+r2.locked,failed:r2.failed,firstRound:r1,secondRound:r2,goldenSkipped: golden.length+remGolden.length};
     }
   }
@@ -363,18 +437,50 @@ async function runFullCancel(ak:string,sk:string) {
 
 // 用 fetch 直接读 user_data 表（无需 supabase-js）
 async function loadCredsForUsers(akHint?:string, skHint?:string) {
-  if (akHint && skHint) return [{username:"(caller)",ak:akHint,sk:skHint}];
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=username,data`, {
-    headers: {
-      "apikey": SUPABASE_ANON_KEY,
-      "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-    },
+    headers: sbHeaders(),
   });
   if (!resp.ok) throw new Error("读取用户凭证失败: HTTP "+resp.status);
   const rows: any[] = await resp.json();
-  return rows
+  const all = rows
     .filter(r => r.data?.ak_id && r.data?.ak_secret)
     .map(r => ({username:r.username, ak:r.data.ak_id, sk:r.data.ak_secret}));
+  // ⚠️ 2026-11-16：不再直接信任调用方传入的 AK/SK，而是回表匹配归属账号，
+  //    这样退订能落到「该账号自己的排除名单」上（按账号隔离的根）。
+  //    匹配不到（手工传入未登记的 AK）→ username 留空 → 走全局合并名单（最保守）。
+  if (!akHint) return all;
+  const hit = all.filter(u => u.ak === akHint);
+  if (hit.length) return hit;
+  return [{username:"", ak:akHint, sk:skHint || ""}];
+}
+
+/** 读取某账号当前最新的 data（写回前用，避免用旧快照覆盖用户新配置）。 */
+async function fetchLatestData(username:string): Promise<any | null> {
+  // ⚠️ 归属未知（空 username）时必须拒绝：URL 会变成 username=eq. → 匹配到第一行，
+  //    把别人行的 data 写回去。宁可跳过写回，也不能写错行。
+  if (!username) return null;
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?username=eq.${encodeURIComponent(username)}&select=data`, {
+    headers: sbHeaders(),
+  });
+  if (!resp.ok) return null;
+  const rows: any[] = await resp.json();
+  if (!Array.isArray(rows) || !rows.length) return null;
+  return rows[0]?.data || {};
+}
+
+/**
+ * 写回某账号的 data。
+ * ⚠️ PostgREST 对 jsonb 列的 PATCH 是**顶层替换**而不是深度合并
+ *    （实测：PATCH {"data":{"x":1}} 会把 {"data":{"probe":true}} 变成 {"data":{"x":1}}）。
+ *    所以必须整体写回完整的 data，绝不能只 PATCH 一个字段。
+ */
+async function patchUserData(username:string, data:any) {
+  if (!username) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/user_data?username=eq.${encodeURIComponent(username)}`, {
+    method: "PATCH",
+    headers: sbHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ data }),
+  });
 }
 
 function json(body:unknown, status=200) {
@@ -572,7 +678,7 @@ Deno.serve(async (req:Request)=>{
           return json({success:false, skipped:true, reason:"golden-machine-protected", instanceId: params.InstanceId});
         }
         // 🛡 排除实例保护：单实例退订同样受云端保护名单约束
-        if (!await assertNotExcluded(params.InstanceId)) {
+        if (!await assertNotExcluded(params.InstanceId, usernameForAk(p.ak_id))) {
           return json({success:false, skipped:true, reason:"exclude-list-protected", instanceId: params.InstanceId});
         }
 
@@ -618,7 +724,7 @@ Deno.serve(async (req:Request)=>{
         if (params?.InstanceId && (GOLDEN_INSTANCE_IDS.has(params.InstanceId) || (params.PublicIpAddress && GOLDEN_PUBLIC_IPS.has(params.PublicIpAddress)))) {
           return json({success:false, skipped:true, reason:"golden-machine-protected", instanceId: params.InstanceId});
         }
-        if (params?.InstanceId && !await assertNotExcluded(params.InstanceId)) {
+        if (params?.InstanceId && !await assertNotExcluded(params.InstanceId, usernameForAk(p.ak_id))) {
           return json({success:false, skipped:true, reason:"exclude-list-protected", instanceId: params.InstanceId});
         }
         if (!params?.InstanceId) return json({error:"缺少 params.InstanceId"},400);
@@ -791,7 +897,7 @@ Deno.serve(async (req:Request)=>{
         const users = await loadCredsForUsers(p.ak_id,p.ak_secret);
         const results:Record<string,any> = {};
         for (const u of users) {
-          try { results[u.username] = await runFullCancel(u.ak,u.sk); }
+          try { results[u.username] = await runFullCancel(u.ak,u.sk,u.username); }
           catch(e:any){ results[u.username] = {error:e.message}; }
         }
         return json({success:true,results,time:new Date().toISOString()});
@@ -813,10 +919,7 @@ Deno.serve(async (req:Request)=>{
 
         // 读取所有 user_data
         const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=username,data`, {
-          headers: {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-          },
+          headers: sbHeaders(),
         });
         if (!resp.ok) throw new Error("读取用户凭证失败: HTTP " + resp.status);
         const rows: any[] = await resp.json();
@@ -852,17 +955,16 @@ Deno.serve(async (req:Request)=>{
             triggered++;
             console.log(`[runScheduledCancel] ⏰ ${r.username} 时间匹配 (now=${curHour}:${curMinute}, target=${sh}:${sm}) → 执行退订`);
             try {
-              const cancelRes = await runFullCancel(d.ak_id, d.ak_secret);
+              const cancelRes = await runFullCancel(d.ak_id, d.ak_secret, r.username);
               // 成功后写入今天日期（防同天重复）
-              await fetch(`${SUPABASE_URL}/rest/v1/user_data?username=eq.${r.username}`, {
-                method: "PATCH",
-                headers: {
-                  "apikey": SUPABASE_ANON_KEY,
-                  "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ data: { ...d, schedule_last_executed_date: todayStr } }),
-              }).catch(() => {}); // 写日期失败不影响退订结果
+              // ⚠️ 2026-11-16：PostgREST 对 jsonb 是**顶层替换**，只 PATCH 一个字段会清空
+              //    该用户全部其它配置；且不能用循环开始时的旧快照 d（会把用户刚加的排除
+              //    实例冲掉 → 下一轮可能误退）。→ 先读最新 data，只改这一个键，整体写回。
+              const latest = await fetchLatestData(r.username);
+              if (latest) {
+                await patchUserData(r.username, { ...latest, schedule_last_executed_date: todayStr })
+                  .catch(() => {}); // 写日期失败不影响退订结果
+              }
               results[r.username] = { ...cancelRes, executed_at: todayStr + " " + String(curHour).padStart(2,'0') + ":" + String(curMinute).padStart(2,'0') };
             } catch(e:any) {
               results[r.username] = {error: e.message};
@@ -901,23 +1003,12 @@ Deno.serve(async (req:Request)=>{
         for (const u of users) {
           try {
             console.log(`[runScheduleNow] 🚀 立即触发 ${u.username} 退订`);
-            const cancelRes = await runFullCancel(u.ak, u.sk);
-            // 写今天日期（标记为已执行）
-            const dataResp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?username=eq.${u.username}&select=data`, {
-              headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
-            });
-            if (dataResp.ok) {
-              const dataRows = await dataResp.json();
-              const currentData = (dataRows && dataRows[0] && dataRows[0].data) || {};
-              await fetch(`${SUPABASE_URL}/rest/v1/user_data?username=eq.${u.username}`, {
-                method: "PATCH",
-                headers: {
-                  "apikey": SUPABASE_ANON_KEY,
-                  "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ data: { ...currentData, schedule_last_executed_date: todayStr } }),
-              }).catch(() => {});
+            const cancelRes = await runFullCancel(u.ak, u.sk, u.username);
+            // 写今天日期（标记为已执行）—— 读-改-写，不清空该账号的其它配置
+            const latest = await fetchLatestData(u.username);
+            if (latest) {
+              await patchUserData(u.username, { ...latest, schedule_last_executed_date: todayStr })
+                .catch(() => {});
             }
             results[u.username] = { ...cancelRes, executed_at: todayStr + " " + String(curHour).padStart(2,'0') + ":" + String(curMinute).padStart(2,'0'), mode: "manual" };
           } catch(e:any) {
@@ -937,7 +1028,7 @@ Deno.serve(async (req:Request)=>{
       case "checkSchedule": {
         // 轻量探测：只读 schedule 配置，不执行退订（给前端用来显示"下次执行时间"）
         const resp = await fetch(`${SUPABASE_URL}/rest/v1/user_data?select=username,data`, {
-          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
+          headers: sbHeaders(),
         });
         if (!resp.ok) throw new Error("读取用户凭证失败: HTTP " + resp.status);
         const rows: any[] = await resp.json();

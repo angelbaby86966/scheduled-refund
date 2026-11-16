@@ -1,0 +1,15 @@
+# Supabase 项目配置
+#
+# ⚠️ 2026-11-16：固化 Edge Function 的 JWT 校验开关。
+# main 上的 deploy-edge-functions.yml 用的是 `supabase functions deploy`（不带函数名、
+# 不带 --no-verify-jwt），CLI 默认会把 verify_jwt 重置为 true：
+#   · wb-auth 的身份凭证是它自己签发的 HMAC 票据（不是 Supabase JWT），
+#     一旦开启 JWT 校验，前端带票据的 POST 会被网关直接 401 拦死；
+#   · aliyun-proxy 由前端直调（身份靠请求里的 AK/SK 参数），历史上一直是免 JWT 校验。
+# 因此这里显式声明，保持与既有行为一致，避免每次部署把线上网关打挂。
+
+[functions.wb-auth]
+verify_jwt = false
+
+[functions.aliyun-proxy]
+verify_jwt = false

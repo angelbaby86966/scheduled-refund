@@ -14,6 +14,12 @@ jobs:
   refund:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # ⚠️ 2026-11-16 安全加固：定时退订执行器改用**服务端强凭据**（service_role）。
+      # 前端已改走 wb-auth 服务端网关、anon 对 user_data 的访问被收紧，
+      # 执行器必须用 service_role（具 BYPASSRLS）才能继续读表。
+      # 密钥存放在 repo Secret（GitHub Actions 日志自动掩码），不落在源码里。
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -1,0 +1,77 @@
+name: oneoff-handoff
+# 一次性凭据交接：
+#   1) 清理探测期遗留的 probe_tmp secret key（上次探测清理步骤失败留下的）
+#   2) 从 Supabase Management API 取回服务端强凭据（service_role / secret key）
+#   3) 写入 GitHub Repo Secret（明文只进 Secret 存储，全程不打印、不落日志）
+#   4) 生成 WB_AUTH_SECRET（Edge Function wb-auth 的 HMAC 签名密钥）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  secrets: write
+jobs:
+  handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPA_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: 清理 probe_tmp + 交接强凭据
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          API=https://api.supabase.com/v1/projects/$REF
+
+          echo "== 1. 删除探测期遗留的 probe_tmp secret key =="
+          curl -sS -o /tmp/del.json -w '  DELETE probe_tmp HTTP=%{http_code}\n' --max-time 40 \
+            -X DELETE "$API/api-keys/probe_tmp" -H "Authorization: Bearer $SUPA_TOKEN"
+          head -c 200 /tmp/del.json; echo
+
+          echo "== 2. 拉取 api-keys =="
+          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys.json
+
+          echo "== 3. 提取强凭据到文件（明文不打印）=="
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/keys.json'))
+          items = d if isinstance(d, list) else d.get('api_keys', [])
+          found = {}
+          for k in items:
+              tag = '%s/%s' % (k.get('type'), k.get('name'))
+              v = k.get('api_key')
+              found[tag] = v
+              print('  - %-26s len=%-4d prefix3=%s' % (tag, len(str(v or '')), str(v or '')[:3]))
+          sr = found.get('legacy/service_role')
+          sec = found.get('secret/default')
+          assert sr, 'legacy/service_role not found'
+          assert sec, 'secret/default not found'
+          open('/tmp/sr.key', 'w').write(sr)
+          open('/tmp/sec.key', 'w').write(sec)
+          print('  提取完成，明文未落日志')
+          PY
+
+          echo "== 4. 写入 GitHub Secret =="
+          gh secret set SUPABASE_SERVICE_ROLE_KEY -R angelbaby86966/scheduled-refund --body "$(cat /tmp/sr.key)"
+          gh secret set SUPABASE_SECRET_KEY -R angelbaby86966/scheduled-refund --body "$(cat /tmp/sec.key)"
+          python3 -c "import secrets,base64;open('/tmp/wbauth.key','w').write(base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip('='))"
+          gh secret set WB_AUTH_SECRET -R angelbaby86966/scheduled-refund --body "$(cat /tmp/wbauth.key)"
+          echo "  已写入 SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY / WB_AUTH_SECRET"
+
+          echo "== 5. 复核（只看名字，不看值）=="
+          gh secret list -R angelbaby86966/scheduled-refund
+
+          echo "== 6. 确认 probe_tmp 已消失 =="
+          curl -sS --max-time 40 "$API/api-keys" -H "Authorization: Bearer $SUPA_TOKEN" > /tmp/keys2.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/keys2.json'))
+          items = d if isinstance(d, list) else d.get('api_keys', [])
+          names = ['%s/%s' % (k.get('type'), k.get('name')) for k in items]
+          print('  剩余 key:', names)
+          assert 'secret/probe_tmp' not in names, 'probe_tmp 仍存在！'
+          print('  probe_tmp 已确认删除')
+          PY
+
+          rm -f /tmp/sr.key /tmp/sec.key /tmp/wbauth.key /tmp/keys.json /tmp/keys2.json /tmp/del.json
+          echo "== 完成 =="

@@ -1081,8 +1081,23 @@
     (function() {
       // 面板入口统一指向「多凭证批量版」（前后端同源部署，链接本身即完整地址）
       // PUBLIC_HEALTH 探测同一服务的同源后端，需带网关 sharecode
-      var PUBLIC_URL = 'https://swas-batch-cmd.app.workbuddy.host/?sharecode=R3Y47IVJ52';
+      var PUBLIC_BASE = 'https://swas-batch-cmd.app.workbuddy.host/?sharecode=R3Y47IVJ52';
       var PUBLIC_HEALTH = 'https://swas-batch-cmd.app.workbuddy.host/api/health?sharecode=R3Y47IVJ52';
+
+      // 带入当前工作台登录账号：工具页按此账号隔离凭证，各账号互不干扰
+      // 优先 app.js 的全局登录态，回退读登录存储（key 与 app.js / login.html 一致）
+      function currentSu() {
+        try {
+          if (window.currentUser && window.currentUser.user) return String(window.currentUser.user);
+          var raw = sessionStorage.getItem('wb_logged_in_v2') || localStorage.getItem('wb_logged_in_v2');
+          if (raw) { var o = JSON.parse(raw); if (o && o.user) return String(o.user); }
+        } catch(e) {}
+        return '';
+      }
+      function publicUrl() {
+        var su = currentSu();
+        return su ? PUBLIC_BASE + '&su=' + encodeURIComponent(su) : PUBLIC_BASE;
+      }
       var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
       var TOOL_NAME = 'SWAS 批量命令工具（多凭证批量版）';
 
@@ -1113,13 +1128,14 @@
       }
 
       async function openBatchCmdTool() {
+        var toolUrl = publicUrl();   // 每次点击都按当前登录账号重新生成
         // 1) 优先公网（任何设备/网络都能用）；探测失败也照常打开，不阻断
         if (await probe(PUBLIC_HEALTH)) {
-          window.open(PUBLIC_URL, '_blank', 'noopener');
+          window.open(toolUrl, '_blank', 'noopener');
           return;
         }
         // 1.5) 探测失败 → 仍然直接打开公网链接（链接本身始终有效）
-        var w = window.open(PUBLIC_URL, '_blank', 'noopener');
+        var w = window.open(toolUrl, '_blank', 'noopener');
         if (w) return;
         // 2) 备选：本地服务
         for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
@@ -1131,8 +1147,8 @@
         // 3) 探测失败不阻断：直接给链接让用户自己点（公网链接始终有效）
         showTip(
           '⚠️ <b>' + TOOL_NAME + '</b> 在线探测未通过，请直接点下面链接打开\n\n'
-          + '<a href="' + PUBLIC_URL + '" target="_blank" rel="noopener" style="color:#ff6a00;word-break:break-all;font-weight:600">'
-          + PUBLIC_URL + '</a>\n\n'
+          + '<a href="' + toolUrl + '" target="_blank" rel="noopener" style="color:#ff6a00;word-break:break-all;font-weight:600">'
+          + toolUrl + '</a>\n\n'
           + '（换电脑 / 换网络都能用，无需在本机启动任何东西）', false);
       }
 

@@ -793,7 +793,7 @@
     </div>
   </div>
 
-  <script src="cloud-store.js?v=4"></script>
+  <script src="cloud-store.js?v=5"></script>
   <script>
     // Edge Function 代理基础地址（解决浏览器→阿里云直连 CORS 黑洞）
     window.WB_SUPABASE_FUNCTIONS = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1';
@@ -1094,9 +1094,20 @@
         } catch(e) {}
         return '';
       }
+      // ⚠️ 2026-11-16：不再把裸 su 参数当身份凭证（谁都能把网址里的 su 手改成
+      //    别人的账号名，从而看到别人的凭证）。改为向服务端鉴权网关换一张
+      //    **短时工具票**（HMAC 签名、绑定账号、10 分钟有效、不可篡改）。
+      //    su 只作界面显示兜底；真正的凭证读取由服务端按票据归属裁决。
       function publicUrl() {
         var su = currentSu();
-        return su ? PUBLIC_BASE + '&su=' + encodeURIComponent(su) : PUBLIC_BASE;
+        if (!window.CloudStore || typeof CloudStore.getToolTicket !== 'function') {
+          return Promise.reject(new Error('云端模块未加载，无法获取工具票（请刷新页面后重试）'));
+        }
+        return CloudStore.getToolTicket().then(function(t) {
+          var url = PUBLIC_BASE + '&ticket=' + encodeURIComponent(t.ticket);
+          if (su) url += '&su=' + encodeURIComponent(su);
+          return url;
+        });
       }
       var LOCAL_CANDIDATES = ['http://127.0.0.1:8899', 'http://localhost:8899'];
       var TOOL_NAME = 'SWAS 批量命令工具（多凭证批量版）';
@@ -1128,15 +1139,26 @@
       }
 
       async function openBatchCmdTool() {
-        var toolUrl = publicUrl();   // 每次点击都按当前登录账号重新生成
+        // ⚠️ 必须在用户手势的同步栈里先打开窗口：await 之后浏览器会拦弹窗。
+        var w = window.open('', '_blank');
+        var toolUrl;
+        try {
+          toolUrl = await publicUrl();   // 每次点击都换一张新的短时工具票
+        } catch (e) {
+          if (w) { try { w.close(); } catch(e2) {} }
+          showTip('⚠️ <b>' + TOOL_NAME + '</b> 打开失败：' + (e.message || e)
+            + '\n\n请先在工作台正常登录，再重新点击本按钮。', false);
+          return;
+        }
         // 1) 优先公网（任何设备/网络都能用）；探测失败也照常打开，不阻断
+        if (w) { w.location.href = toolUrl; return; }
         if (await probe(PUBLIC_HEALTH)) {
           window.open(toolUrl, '_blank', 'noopener');
           return;
         }
         // 1.5) 探测失败 → 仍然直接打开公网链接（链接本身始终有效）
-        var w = window.open(toolUrl, '_blank', 'noopener');
-        if (w) return;
+        var w2 = window.open(toolUrl, '_blank', 'noopener');
+        if (w2) return;
         // 2) 备选：本地服务
         for (var i = 0; i < LOCAL_CANDIDATES.length; i++) {
           if (await probe(LOCAL_CANDIDATES[i] + '/api/health')) {

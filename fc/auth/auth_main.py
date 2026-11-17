@@ -160,6 +160,8 @@ def can_access(payload, target: str) -> bool:
 # ====== 业务 ======
 def handle(p: dict) -> tuple:
     action = str((p or {}).get("action") or "")
+    if action == "probe":
+        return {"ok": True, "shape": (p or {}).get("probe")}, 200
 
     # ---------- 登录：账号密码换票据 ----------
     if action == "login":
@@ -331,6 +333,7 @@ def _valid_username(u: str) -> bool:
 
 
 # ====== FC HTTP 入口 ======
+_PROBE = {"shape": None}
 def _reply(body, code=200, headers=None):
     """返回 FC HTTP 触发器的响应体。
 
@@ -345,6 +348,21 @@ def _reply(body, code=200, headers=None):
     hdrs["Content-Type"] = "application/json; charset=utf-8"
     if headers:
         hdrs.update(headers)
+    # ---- 探针模式：按 action 返回不同形态，一次测出 FC 认哪种 ----
+    probe = _PROBE.get("shape")
+    if probe == "dict":
+        return body
+    if probe == "tuple2":
+        return (body, code)
+    if probe == "tuple3":
+        return (body, code, hdrs)
+    if probe == "tuple3str":
+        return (json.dumps(body, ensure_ascii=False), code, hdrs)
+    if probe == "wsgi":
+        # WSGI 三元组 (status_line, headers_list, body_bytes)
+        return ("%d %s" % (code, "OK" if code == 200 else "ERROR"),
+                [(k, v) for k, v in hdrs.items()],
+                json.dumps(body, ensure_ascii=False).encode("utf-8"))
     return (body, code, hdrs)
 
 
@@ -396,6 +414,7 @@ def handler(event, context):
             p = dict(q)
     if not isinstance(p, dict):
         p = {}
+    action = str(p.get("action") or "")
 
     try:
         body, code = handle(p)

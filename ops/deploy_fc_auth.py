@@ -233,16 +233,37 @@ def ensure_http_trigger(client, region):
         data.get("triggerType"),
         (data.get("triggerConfig") or {}).get("authType")))
 
-    # 回读确认并取出访问 URL
+    # 回读触发器，取真实访问 URL
+    # ⚠️ 阿里云 HTTP 触发器的 URL 字段在不同版本可能是 url / invokeUrl / invokeUrlTemplate，
+    #    这里把整个 data 打出来，避免猜字段名。
     try:
         t = client.get_trigger(SERVICE, FUNCTION, HTTP_TRIGGER)
         td = getattr(t, "data", {}) or {}
-        url = td.get("url") or ""
+        log("   触发器原始字段: %s" % json.dumps(td, ensure_ascii=False)[:600])
+        url = (td.get("url") or td.get("invokeUrl")
+               or td.get("invokeUrlTemplate") or "")
+        # invokeUrlTemplate 里带 {functionName}/{triggerName} 占位符 → 替换掉
+        url = (url.replace("{functionName}", FUNCTION)
+                  .replace("{triggerName}", HTTP_TRIGGER)
+                  .replace("{serviceName}", SERVICE))
         log("   访问 URL: %s" % url)
         with open("/tmp/fc_auth_http_url.txt", "w") as f:
             f.write(url)
+        if url:
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps({"action": "ping"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    txt = r.read().decode("utf-8", "replace")
+                log("   ✅ ping 实测: HTTP %s %s" % (r.status, txt[:200]))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", "replace")[:200]
+                log("   ⚠️ ping 实测: HTTP %s %s" % (e.code, body), "WARN")
+            except Exception as e:
+                log("   ⚠️ ping 实测失败：%s" % str(e)[:160], "WARN")
     except Exception as e:
-        log("   回读触发器失败：%s" % str(e)[:120], "WARN")
+        log("   回读触发器失败：%s" % str(e)[:160], "WARN")
 
 
 def main():

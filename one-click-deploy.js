@@ -243,6 +243,35 @@ async function ocdBizCloudUpsert(map) {
   } catch (e) { return false; }
 }
 
+// ====== 2026-11-16 新增：把本机 localStorage 的完整映射整体写回云端 ======
+// 背景：云端 ocd_biz_map 行曾被一次探针 PATCH 误清空（PostgREST 对 jsonb 是
+//       **顶层替换**，PATCH {"data":{"map":{}}} 会把整份 map 覆盖成空）。
+//       本机 localStorage（wb_dev_biz_map）仍是完整副本 → 提供一键整份回写。
+// 注意：ocdSaveBizMap 只把**本批** nodeIds 合并写回云端，不会整体回写，
+//       所以没有这个按钮的话历史条目永远回不来。
+async function ocdRestoreBizMapFromLocal() {
+  var local = ocdLoadBizMap() || {};
+  var n = Object.keys(local).length;
+  if (!n) {
+    alert('本机没有可回写的映射（localStorage 键 ' + OCD_BIZ_MAP_KEY + ' 为空）');
+    return false;
+  }
+  if (!confirm('将本机的 ' + n + ' 条「设备ID ↔ 业务ID」映射**整体覆盖**回云端？\n' +
+               '（云端当前 ocd_biz_map 的内容会被本机副本替换）')) return false;
+  try {
+    var ok = await ocdBizCloudUpsert(local);
+    if (ok) {
+      alert('✅ 已写回云端 ' + n + ' 条映射');
+      try { ocdRenderBizMap(); } catch (e) {}
+      return true;
+    }
+    alert('❌ 写回失败，请重试');
+  } catch (e) {
+    alert('❌ 写回异常: ' + (e && e.message ? e.message : e));
+  }
+  return false;
+}
+
 // 暴露给 image-clone.js 共享同一云端映射（避免重复网络代码）
 window.OcdBizCloud = { load: ocdBizCloudLoad, upsertMerge: ocdBizCloudUpsert, KEY: OCD_BIZ_CLOUD_KEY };
 
@@ -283,7 +312,18 @@ function ocdRenderBizMap(filterIds) {
   var map = ocdLoadBizMap();
   var ids = (filterIds && filterIds.length) ? filterIds : Object.keys(map);
   var valid = ids.filter(function (id) { return map[id] && map[id].kind !== 'clone'; });
-  if (!valid.length) { el.innerHTML = ''; return; }
+  // ☁ 恢复按钮（2026-11-16）：云端 ocd_biz_map 被误清空后，用本机 localStorage
+  //    的完整副本一键整份写回。本地为空时也要显示按钮，否则用户找不到入口。
+  var restoreBtn = '<button onclick="ocdRestoreBizMapFromLocal()" ' +
+    'style="margin-top:8px;padding:5px 12px;font-size:12px;cursor:pointer;' +
+    'border:1px solid #b7eb8f;background:#f6ffed;border-radius:4px;color:#237804;">' +
+    '☁ 用本机完整映射覆盖云端</button>';
+  if (!valid.length) {
+    el.innerHTML = '<div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:10px;">' +
+      '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">🔗 设备ID ↔ 业务ID 一一对应（本机暂无记录）</div>' +
+      restoreBtn + '</div>';
+    return;
+  }
   var rows = valid.map(function (id) {
     var b = map[id];
     return '<tr>' +
@@ -299,7 +339,7 @@ function ocdRenderBizMap(filterIds) {
     '<th style="padding:4px 8px;text-align:left;">设备ID (device_id)</th>' +
     '<th style="padding:4px 8px;text-align:left;">业务ID</th>' +
     '<th style="padding:4px 8px;text-align:left;">更新时间</th></tr></thead>' +
-    '<tbody>' + rows + '</tbody></table></div>';
+    '<tbody>' + rows + '</tbody></table>' + restoreBtn + '</div>';
 }
 
 /* ---------- 调 one-click-deploy 函数（通用转发 admin.zhouyi.top，模拟手动） ---------- */

@@ -190,24 +190,51 @@ def merge_environment(client, ak, sk):
 
 
 def ensure_http_trigger(client, region):
-    """确保 HTTP 触发器存在（公网匿名访问，走 CORS）。"""
-    try:
-        client.delete_trigger(SERVICE, FUNCTION, HTTP_TRIGGER)
-        log("已删除同名旧触发器（幂等）")
-    except Exception:
-        pass
-    resp = client.create_trigger(
-        SERVICE, FUNCTION, HTTP_TRIGGER,
-        triggerType="http",
-        triggerConfig={
+    """确保 HTTP 触发器存在（公网匿名访问，走 CORS）。
+
+    ⚠️ fc2 SDK 的 create_trigger() 是**定时/事件触发器**接口，强制要求
+       sourceArn + invocationRole，且不支持 triggerType='http'。
+       HTTP 触发器只能直接调 FC OpenAPI：
+         PUT /2016-08-15/services/{svc}/functions/{fn}/triggers/{name}
+         body: {"triggerType":"http","triggerConfig":{...}}
+       这里走 client._do_request 底层方法。
+    """
+    api_version = getattr(client, "api_version", "2016-08-15")
+    path = "/%s/services/%s/functions/%s/triggers/%s" % (
+        api_version, SERVICE, FUNCTION, HTTP_TRIGGER)
+
+    trigger_body = {
+        "triggerType": "http",
+        "triggerConfig": {
             "authType": "anonymous",
             "disableInternet": False,
             "methods": ["POST", "OPTIONS"],
             "headers": [],
         },
-    )
+        "description": "wb-auth 境内镜像 HTTP 入口（POST JSON）",
+    }
+    body = json.dumps(trigger_body, ensure_ascii=False).encode("utf-8")
+    # ⚠️ content-length 参与签名，必须在 _build_common_headers 之前通过
+    #    customHeaders 传进去（它内部默认写死 '0'）；签完再改会破坏签名。
+    headers = client._build_common_headers(
+        "PUT", path, customHeaders={"content-length": str(len(body))})
+    resp = client._do_request("PUT", path, headers, body=body)
     data = getattr(resp, "data", {}) or {}
-    log("✅ HTTP 触发器已创建：%s url=%s" % (HTTP_TRIGGER, data.get("url")))
+    log("✅ HTTP 触发器已创建：%s" % HTTP_TRIGGER)
+    log("   triggerType=%s authType=%s" % (
+        data.get("triggerType"),
+        (data.get("triggerConfig") or {}).get("authType")))
+
+    # 回读确认并取出访问 URL
+    try:
+        t = client.get_trigger(SERVICE, FUNCTION, HTTP_TRIGGER)
+        td = getattr(t, "data", {}) or {}
+        url = td.get("url") or ""
+        log("   访问 URL: %s" % url)
+        with open("/tmp/fc_auth_http_url.txt", "w") as f:
+            f.write(url)
+    except Exception as e:
+        log("   回读触发器失败：%s" % str(e)[:120], "WARN")
 
 
 def main():

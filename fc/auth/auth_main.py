@@ -332,16 +332,20 @@ def _valid_username(u: str) -> bool:
 
 # ====== FC HTTP 入口 ======
 def _reply(body, code=200, headers=None):
+    """返回 FC HTTP 触发器的响应体。
+
+    ⚠️ 2026-11-17 实测：阿里云 FC **python3.10 runtime** 的 HTTP 触发器
+       会把 handler 返回的 dict 当作「响应头映射」处理 —— 返回
+       {"statusCode":..,"headers":..,"body":..} 会变成
+       `statusCodeheadersbodyisBase64Encoded` 这种键名拼接的畸形响应。
+       正确形态是 **(body, statusCode, headers) 元组**，由 FC 运行时识别为
+       「响应体 + 状态码 + 响应头」。
+    """
     hdrs = dict(CORS)
     hdrs["Content-Type"] = "application/json; charset=utf-8"
     if headers:
         hdrs.update(headers)
-    return {
-        "statusCode": code,
-        "headers": hdrs,
-        "body": json.dumps(body, ensure_ascii=False),
-        "isBase64Encoded": False,
-    }
+    return (body, code, hdrs)
 
 
 def handler(event, context):

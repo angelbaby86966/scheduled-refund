@@ -318,6 +318,10 @@ jobs:
               -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
             echo
           }
+          echo '--- 0) 删除已注销账号 chu 的 user_data 残留行（用户 2026-11-16 确认）---'
+          run_sql "DELETE FROM public.user_data WHERE username='chu' AND username NOT IN (SELECT username FROM public.app_users);"
+          echo '--- 0b) 删除后 user_data 行清单 ---'
+          run_sql "SELECT username FROM public.user_data ORDER BY username;"
           echo '--- 1) 撤销 anon / authenticated 对 user_data 的一切权限 ---'
           run_sql "REVOKE ALL PRIVILEGES ON TABLE public.user_data FROM anon, authenticated;"
           echo '--- 2) 撤销列级权限（表级 REVOKE 不连带）---'

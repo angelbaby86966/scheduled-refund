@@ -192,18 +192,26 @@ def merge_environment(client, ak, sk):
 def ensure_http_trigger(client, region):
     """确保 HTTP 触发器存在（公网匿名访问，走 CORS）。
 
-    ⚠️ fc2 SDK 的 create_trigger() 是**定时/事件触发器**接口，强制要求
-       sourceArn + invocationRole，且不支持 triggerType='http'。
-       HTTP 触发器只能直接调 FC OpenAPI：
-         PUT /2016-08-15/services/{svc}/functions/{fn}/triggers/{name}
-         body: {"triggerType":"http","triggerConfig":{...}}
-       这里走 client._do_request 底层方法。
+    ⚠️ fc2 SDK 的 create_trigger() 强制要求 sourceArn + invocationRole
+       （定时/事件触发器专用），且不支持 triggerType='http'。
+       HTTP 触发器必须直接调 FC OpenAPI：
+         POST /2016-08-15/services/{svc}/functions/{fn}/triggers
+         body: {"triggerName":..., "triggerType":"http", "triggerConfig":{...}}
+       ⚠️ 创建用 POST + 集合路径（triggerName 放 body）；
+          PUT + 单触发器路径是「更新」，触发器不存在时返回 404 TriggerNotFound。
     """
     api_version = getattr(client, "api_version", "2016-08-15")
-    path = "/%s/services/%s/functions/%s/triggers/%s" % (
-        api_version, SERVICE, FUNCTION, HTTP_TRIGGER)
+    path = "/%s/services/%s/functions/%s/triggers" % (api_version, SERVICE, FUNCTION)
+
+    # 幂等：先删同名旧触发器（不存在也无所谓）
+    try:
+        client.delete_trigger(SERVICE, FUNCTION, HTTP_TRIGGER)
+        log("已删除同名旧触发器（幂等）")
+    except Exception:
+        pass
 
     trigger_body = {
+        "triggerName": HTTP_TRIGGER,
         "triggerType": "http",
         "triggerConfig": {
             "authType": "anonymous",
@@ -217,8 +225,8 @@ def ensure_http_trigger(client, region):
     # ⚠️ content-length 参与签名，必须在 _build_common_headers 之前通过
     #    customHeaders 传进去（它内部默认写死 '0'）；签完再改会破坏签名。
     headers = client._build_common_headers(
-        "PUT", path, customHeaders={"content-length": str(len(body))})
-    resp = client._do_request("PUT", path, headers, body=body)
+        "POST", path, customHeaders={"content-length": str(len(body))})
+    resp = client._do_request("POST", path, headers, body=body)
     data = getattr(resp, "data", {}) or {}
     log("✅ HTTP 触发器已创建：%s" % HTTP_TRIGGER)
     log("   triggerType=%s authType=%s" % (

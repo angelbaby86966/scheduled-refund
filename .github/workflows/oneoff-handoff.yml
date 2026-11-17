@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map / recover-biz-map2 / recover-biz-map3 / recover-biz-map4'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map / recover-biz-map2 / recover-biz-map3 / recover-biz-map4 / recover-biz-map5'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -32,6 +32,7 @@ on:
           - recover-biz-map2
           - recover-biz-map3
           - recover-biz-map4
+          - recover-biz-map5
 permissions:
   contents: read
 jobs:
@@ -498,5 +499,40 @@ jobs:
           head -c 300 /tmp/heap.txt
           echo
           rm -f /tmp/conns.txt /tmp/conn.env /tmp/dump.sql
+
+      # ============ 抢救 ocd_biz_map 第五轮（审计日志 + CLI 调试输出）============
+      - name: 探审计日志与 CLI 连接信息
+        if: inputs.mode == 'recover-biz-map5'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --max-time 60 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '--- 1) 审计/日志相关设置 ---'
+          run_sql "SELECT name, setting FROM pg_settings WHERE name IN ('log_statement','log_min_duration_statement','pgaudit.log','pgaudit.log_rows','pgaudit.log_parameter','pgaudit.log_statement','pgaudit.role') ORDER BY name;"
+          echo '--- 2) 有哪些内置扩展已装 + 可用的读文件能力 ---'
+          run_sql "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
+          run_sql "SELECT proname, prosecdef FROM pg_proc WHERE proname IN ('get_raw_page','heap_page_items','tuple_data_split','pg_read_binary_file','pg_logdir_lsn') ORDER BY proname;"
+          echo '--- 3) Management API: database 子端点全探 ---'
+          for ep in uri password pooler backups pitr config; do
+            printf '  %-10s -> ' "$ep"
+            curl -sS --max-time 25 -w ' [http=%{http_code}]' \
+              "https://api.supabase.com/v1/projects/$REF/database/$ep" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | head -c 220; echo
+          done
+          echo '--- 4) CLI debug 全量输出（找连接串来源）---'
+          supabase db dump --project-ref "$REF" --data-only --schema public -f /tmp/dump.sql --debug > /tmp/cli_debug.txt 2>&1 || true
+          wc -c < /tmp/cli_debug.txt
+          grep -oiE "(postgres(ql)?://[^ \"']+)" /tmp/cli_debug.txt | sed -E 's/(:)[^:@/]+(@)/\1***\2/' | sort -u | head -10 || true
+          grep -inE "pooler|5432|6543|password|connection|database_url|host" /tmp/cli_debug.txt | sed -E 's/(password["= :]+)[^ "]+/\1***/gi' | head -20 || true
+          echo '--- 5) dump 里 ocd_biz_map 当前内容 ---'
+          grep -o "ocd_biz_map[^;]*" /tmp/dump.sql 2>/dev/null | head -c 600 || true; echo
+          rm -f /tmp/cli_debug.txt /tmp/dump.sql
 
       # ============ RLS 收紧（破坏性）============

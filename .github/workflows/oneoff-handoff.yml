@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map / recover-biz-map2'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -29,6 +29,7 @@ on:
           - rls-tighten-app
           - rls-tighten
           - recover-biz-map
+          - recover-biz-map2
 permissions:
   contents: read
 jobs:
@@ -378,5 +379,34 @@ jobs:
           run_sql "SELECT b.blk AS blk, encode(h.t_data,'hex') AS hex FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL AND position(convert_to('businessId','UTF8')::bytea in h.t_data) > 0 ORDER BY b.blk, h.t_xmin;"
           echo '--- 3) 当前元组（含 map 键）---'
           run_sql "SELECT b.blk AS blk, h.t_xmin AS xmin, h.t_xmax AS xmax, encode(h.t_data,'hex') AS hex FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL ORDER BY b.blk, h.t_xmin;"
+
+      # ============ 抢救 ocd_biz_map 第二轮（内置函数读堆文件）============
+      - name: 用内置函数读 user_data 堆文件捞回旧 map
+        if: inputs.mode == 'recover-biz-map2'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --max-time 60 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '--- 1) 当前身份与权限 ---'
+          run_sql "SELECT current_user AS usr, current_database() AS db, (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS is_super, has_function_privilege(current_user,'pg_read_binary_file(text,bigint,bigint,boolean)','EXECUTE') AS can_read_file, has_schema_privilege(current_user,'public','CREATE') AS can_create_schema;"
+          echo '--- 2) 可用扩展 ---'
+          run_sql "SELECT name, default_version FROM pg_available_extensions WHERE name IN ('pageinspect','pg_dirtyread','pg_visibility','pgstattuple') ORDER BY name;"
+          echo '--- 3) data_directory / relfilenode / dboid ---'
+          run_sql "SELECT pg_relation_filenode('public.user_data') AS relfilenode, (SELECT oid FROM pg_database WHERE datname=current_database()) AS dboid, current_setting('block_size') AS blksz, pg_relation_size('public.user_data') AS relsize;"
+          echo '--- 4) 尝试 SHOW data_directory ---'
+          run_sql "SHOW data_directory;"
+          echo '--- 5) Management API 备份端点 ---'
+          curl -sS --max-time 40 "https://api.supabase.com/v1/projects/$REF/database/backups" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | head -c 2000; echo
+          echo '--- 6) Management API PITR 端点 ---'
+          curl -sS --max-time 40 "https://api.supabase.com/v1/projects/$REF/database/pitr" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | head -c 1500; echo
 
       # ============ RLS 收紧（破坏性）============

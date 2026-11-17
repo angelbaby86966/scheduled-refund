@@ -57,12 +57,21 @@ def pct(s):
 
 
 def build_code_zip(src_path):
+    """把 Python 入口打成 zip（FC 要求 zipFile 为 zip 包，入口文件名必须是 auth_main.py）。
+
+    ⚠️ fc2 SDK 的 codeZipFile 参数要的是**文件路径**，不能传 bytes
+       （传 bytes 会报 "[Errno 36] File name too long"）。
+    """
     if not os.path.isfile(src_path):
         raise SystemExit("找不到源码 %s" % src_path)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(src_path, CODE_ENTRY)
-    return buf.getvalue()
+        z.write(src_path, arcname=CODE_ENTRY)
+    out = "/tmp/fc_auth_python_code.zip"
+    with open(out, "wb") as f:
+        f.write(buf.getvalue())
+    log("代码包已生成：%d 字节（入口 %s，零第三方依赖）" % (os.path.getsize(out), CODE_ENTRY))
+    return out
 
 
 def sts_account_id(ak, sk):
@@ -236,7 +245,6 @@ def main():
 
     src = os.path.join(os.getcwd(), SRC_FILE)
     code = build_code_zip(src)
-    log("代码包已生成：%d 字节（入口 %s，零第三方依赖）" % (len(code), CODE_ENTRY))
 
     env = merge_environment(client, ak, sk)
 

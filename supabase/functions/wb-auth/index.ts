@@ -186,7 +186,13 @@ async function handle(p: any) {
 
   // ---------- 其余动作一律需要票据 ----------
   const ticket = String(p?.ticket ?? "").trim();
-  const scope = action === "tool_ticket" || action === "tool_user_data" ? "tool" : "session";
+  // ⚠️ scope 映射（2026-11-16 修复 P0）：
+  //   `tool_ticket` 是「session 票 → tool 票」的**兑换入口**，验证时必须要求
+  //   session scope。若把它也算成 "tool"，就会出现死锁：session 票换 tool 票
+  //   永远被自己的 scope 校验拒掉 → 工作台拿不到 tool 票 → 工具页完全不可用。
+  //   只有真正消费 tool 票的 tool_user_data / tool_set_user_data 才要求 tool scope。
+  const scope =
+    action === "tool_user_data" || action === "tool_set_user_data" ? "tool" : "session";
   const payload = await verifyTicket(ticket, scope);
   if (!payload) {
     return json({ ok: false, error: "登录已失效，请重新登录" }, 401);

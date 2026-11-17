@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -28,6 +28,7 @@ on:
           - diag-rls
           - rls-tighten-app
           - rls-tighten
+          - recover-biz-map
 permissions:
   contents: read
 jobs:
@@ -353,5 +354,29 @@ jobs:
           curl -sS --max-time 30 -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
             "https://opauwtkivhjxlijfqaix.supabase.co/rest/v1/user_data?select=username" -w '\n    http=%{http_code}\n' || true
+
+      # ============ 抢救 ocd_biz_map 被误清空的 map（2026-11-16 误操作）============
+      - name: 从 Postgres 堆页捞回 ocd_biz_map 的旧 map
+        if: inputs.mode == 'recover-biz-map'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          run_sql() {
+            curl -sS --fail-with-body --max-time 60 -X POST \
+              "https://api.supabase.com/v1/projects/$REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$1")"
+            echo
+          }
+          echo '--- 0) 当前状态 ---'
+          run_sql "SELECT username, data, updated_at FROM public.user_data WHERE username='ocd_biz_map';"
+          echo '--- 1) 尝试启用 pageinspect ---'
+          run_sql "CREATE EXTENSION IF NOT EXISTS pageinspect;"
+          echo '--- 2) 扫 user_data 全部堆页，找含 businessId 的旧元组 ---'
+          run_sql "SELECT b.blk AS blk, count(*) AS tuples FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL GROUP BY b.blk ORDER BY b.blk;"
+          run_sql "SELECT b.blk AS blk, encode(h.t_data,'hex') AS hex FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL AND position(convert_to('businessId','UTF8')::bytea in h.t_data) > 0 ORDER BY b.blk, h.t_xmin;"
+          echo '--- 3) 当前元组（含 map 键）---'
+          run_sql "SELECT b.blk AS blk, h.t_xmin AS xmin, h.t_xmax AS xmax, encode(h.t_data,'hex') AS hex FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL ORDER BY b.blk, h.t_xmin;"
 
       # ============ RLS 收紧（破坏性）============

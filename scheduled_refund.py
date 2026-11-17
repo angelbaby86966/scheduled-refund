@@ -1088,20 +1088,17 @@ def main():
         log("⛔ 排除名单读取失败，本次拒绝执行任何退订（fail-closed）", "ERROR")
         sys.exit(1)
 
-    due_count = 0
     for row in rows:
         try:
-            before = (row.get("data") or {}).get("schedule_last_executed_date")
             process_user(row)
-            after = beijing_date_str()
-            # 粗略判断本用户是否本次执行了（用于计数日志）
-            if (row.get("data") or {}).get("schedule_enabled") and before != after:
-                due_count += 1
         except Exception as e:
             uname = row.get("username", "?")
             log(f"用户 {uname} 处理异常: {e}", "ERROR")
 
-    log(f"===== 本次任务结束，触发执行的用户数: {due_count} =====", "WARN")
+    # 旧文案「触发执行的用户数」用 schedule_last_executed_date != 今天 估算，
+    # 不在时间窗时会误报成 2，实际一台都没退（2026-11-16 修正，与 FC 版对齐）。
+    # 改为中性的扫描数，实际触发看上方 ▶ 行。
+    log(f"===== 本次任务结束，已扫描 {len(rows)} 个用户配置（实际触发退订见上方 ▶ 行） =====", "WARN")
     # 写回已退订状态（有新增才写；由 Actions 工作流 commit+push 持久化到下一轮）
     save_refunded_state()
 

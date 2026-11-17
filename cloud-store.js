@@ -88,6 +88,15 @@
   }
 
   // ====== 网关调用 ======
+  /**
+   * 调用鉴权网关。
+   *
+   * ⚠️ 2026-11-17 修复误报：原先 fetch 的网络层异常（DNS/TCP/TLS/CORS 被拦）
+   *    会直接冒泡成 TypeError("Failed to fetch")，而 verifyUser 又把它 catch 成
+   *    null → 登录页误报「账号或密码错误」。实际是网络问题，与密码无关。
+   *    现在：网络层失败统一包成 err.netError=true / err.netDetail=<可读原因>，
+   *    上层据此区分「网络不通」与「凭证不对」。
+   */
   function authCall(action, extra) {
     var body = Object.assign({ action: action }, extra || {});
     return fetch(AUTH_URL, {
@@ -109,7 +118,29 @@
         }
         return r;
       });
+    }, function(cause) {
+      // 网络层失败：连接不上 / DNS 解析失败 / TLS 被拦 / CORS 预检被拦
+      var err = new Error('无法连接鉴权服务（' + netReason(cause) + '）');
+      err.netError = true;
+      err.netDetail = netReason(cause);
+      err.cause = cause;
+      throw err;
     });
+  }
+
+  /** 把浏览器的原始网络异常翻译成人能看懂的原因 */
+  function netReason(cause) {
+    var msg = (cause && cause.message) ? String(cause.message) : '';
+    if (/Failed to fetch/i.test(msg)) {
+      return '网络请求被拦截或超时（DNS/代理/CORS 预检），请检查网络后重试';
+    }
+    if (/NetworkError|ERR_INTERNET_DISCONNECTED/i.test(msg)) {
+      return '网络已断开，请检查本机网络连接';
+    }
+    if (/timeout|ETIMEDOUT/i.test(msg)) {
+      return '连接鉴权服务超时，请稍后重试';
+    }
+    return msg || '未知网络错误';
   }
 
   /** 需要票据的调用：自动附带当前票据；401 时清票并抛出（前端可跳登录） */
@@ -144,6 +175,11 @@
 
   /**
    * 验证用户（返回角色或 null）。口令由服务端校验，前端不接触任何口令。
+   *
+   * ⚠️ 2026-11-17 修复误报：
+   *   - 服务端明确拒绝（账号或密码错误）→ 返回 null（登录页显示「账号或密码错误」）
+   *   - 网络层失败（连不上鉴权服务）→ 抛出 netError（登录页显示「网络不通」）
+   *   原实现把两者都 catch 成 null，导致用户明明网络不通，却一直被提示「密码错误」。
    */
   function verifyUser(username, password) {
     return authCall('login', { username: username, password: password })
@@ -153,6 +189,11 @@
         return r.role;
       })
       .catch(function(err) {
+        if (err && err.netError) {
+          // 网络故障：必须向上抛，不能伪装成「密码错误」
+          console.warn('[cloud-store] 登录失败（网络不可达）:', err.netDetail);
+          throw err;
+        }
         console.warn('[cloud-store] 登录失败:', err.message);
         return null;
       });

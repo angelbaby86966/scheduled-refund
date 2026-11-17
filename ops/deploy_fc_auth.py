@@ -20,6 +20,10 @@
   python3 ops/deploy_fc_auth.py --mode disable  # 删除 HTTP 触发器（止血）
 """
 
+import base64
+import datetime
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -29,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 SERVICE = "scheduled-refund-svc"
@@ -60,34 +65,91 @@ def build_code_zip(src_path):
     return buf.getvalue()
 
 
+def sts_account_id(ak, sk):
+    """通过 STS GetCallerIdentity 取主账号 UID，用于构造 <uid>.<region>.fc.aliyuncs.com。
+
+    ⚠️ 直接复用 deploy_fc_refund.py 里**已线上验证可用**的实现（阿里云官方简化签名：
+    key = sk + "&"，不是 AWS 风格的派生 key）。不要重写。
+    """
+    params = {
+        "Action": "GetCallerIdentity",
+        "Version": "2015-04-01",
+        "Format": "JSON",
+        "AccessKeyId": ak,
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": uuid.uuid4().hex,
+        "SignatureVersion": "1.0",
+        "Timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    canonical = "&".join(pct(k) + "=" + pct(v) for k, v in sorted(params.items()))
+    sts = "GET&" + pct("/") + "&" + pct(canonical)
+    sig = base64.b64encode(
+        hmac.new((sk + "&").encode(), sts.encode(), hashlib.sha1).digest()).decode()
+    url = "https://sts.aliyuncs.com/?" + canonical + "&Signature=" + pct(sig)
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        return str(data.get("AccountId") or "")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:300]
+        log("STS 返回 HTTP %s（用于判断 AK/SK 是否有效）：%s" % (e.code, body), "WARN")
+        return ""
+    except Exception as e:
+        log("STS 取 AccountId 失败：%s: %s" % (type(e).__name__, e), "WARN")
+        return ""
+
+
 def find_function(ak, sk, fc2, want=None):
-    """遍历地域 × endpoint 候选，返回 (client, region, info)。"""
+    """遍历地域 × endpoint 候选，返回 (client, region, info)。
+
+    ⚠️ 关键：auth 是**新函数**，get_function 会 404 → 不能用「函数是否存在」
+       来判断 endpoint 是否可达。改为：先用 DNS 过滤出可解析的 endpoint，
+       再对每个 endpoint 调 get_service（服务必然存在）验证连通性。
+    """
+    uid = sts_account_id(ak, sk)
+    if uid:
+        log("STS AccountId 已获取（%s***）" % uid[:4])
+
     targets = [want] if want else REGIONS
+    endpoints = []
     for region in targets:
-        endpoints = []
-        try:
-            endpoints.append((region, "https://fc-open.%s.aliyuncs.com" % region))
-        except Exception:
-            pass
-        uid = os.environ.get("ALIYUN_UID") or ""
+        endpoints.append((region, "https://fc-open.%s.aliyuncs.com" % region))
         if uid:
             endpoints.append((region, "https://%s.%s.fc.aliyuncs.com" % (uid, region)))
-        for reg, ep in endpoints:
+
+    # DNS 预过滤：解析不了的 host 直接跳过，避免 urllib3 指数退避白等
+    reachable = []
+    for region, ep in endpoints:
+        host = ep.split("//")[1]
+        try:
+            socket.gethostbyname(host)
+            reachable.append((region, ep))
+        except socket.gaierror:
+            log("  × %s / %s: DNS 不解析，跳过" % (region, host), "DEBUG")
+    log("可解析的 FC endpoint：%d 个" % len(reachable))
+
+    for region, ep in reachable:
+        try:
+            client = fc2.Client(endpoint=ep, accessKeyID=ak,
+                                accessKeySecret=sk, timeout=8)
+            # 用 get_service 探活（服务一定存在），而不是 get_function
+            client.get_service(SERVICE)
+            log("✅ endpoint 可用：region=%s endpoint=%s" % (region, ep))
             try:
-                socket.setdefaulttimeout(6)
-            except Exception:
-                pass
-            try:
-                client = fc2.Client(endpoint=ep, accessKeyID=ak,
-                                    accessKeySecret=sk, timeout=8)
                 info = client.get_function(SERVICE, FUNCTION)
-                log("✅ 找到函数：region=%s endpoint=%s" % (reg, ep))
-                return client, reg, info
+                log("   函数 %s 已存在" % FUNCTION)
             except Exception:
-                continue
+                info = None
+                log("   函数 %s 尚不存在（将新建）" % FUNCTION)
+            return client, region, info
+        except Exception as e:
+            msg = str(e)[:200].replace(ak, "***").replace(sk, "***")
+            log("  × %s / %s: %s %s" % (region, ep.split("//")[1],
+                                        type(e).__name__, msg), "DEBUG")
     raise SystemExit(
-        "所有候选 endpoint 都未找到 %s/%s。\n"
-        "若函数尚未创建，请先用 deploy-fc 模式或控制台创建。" % (SERVICE, FUNCTION))
+        "所有可解析的 FC endpoint 都未命中服务 %s。\n"
+        "可能原因：① ALIYUN_AK/SK 失效或无 FC 权限；② 服务已删除；"
+        "③ 服务在其它地域，可在 REGIONS 常量补充。" % SERVICE)
 
 
 def merge_environment(client, ak, sk):
@@ -156,7 +218,7 @@ def main():
         raise SystemExit("缺少 aliyun-fc2，请 pip install aliyun-fc2==2.5.2")
 
     client, region, info = find_function(ak, sk, fc2)
-    data = getattr(info, "data", {}) or {}
+    data = getattr(info, "data", {}) or {} if info is not None else {}
     log("函数当前配置：runtime=%s handler=%s codeSize=%s"
         % (data.get("runtime"), data.get("handler"), data.get("codeSize")))
 
@@ -178,7 +240,7 @@ def main():
 
     env = merge_environment(client, ak, sk)
 
-    # 首次部署时函数可能还不存在 → 先建
+    # 首次部署时函数可能还不存在 → 先建后更
     try:
         resp = client.update_function(SERVICE, FUNCTION, codeZipFile=code,
                                       environmentVariables=env, description=DESC)
@@ -186,7 +248,7 @@ def main():
         log("✅ FC 代码已更新：codeSize=%s checksum=%s handler=%s runtime=%s"
             % (d.get("codeSize"), d.get("codeChecksum"), d.get("handler"), d.get("runtime")))
     except Exception as e:
-        log("update_function 失败，尝试创建新函数：%s" % str(e)[:160], "WARN")
+        log("update_function 失败（%s），尝试创建新函数" % str(e)[:120], "WARN")
         resp = client.create_function(
             SERVICE, FUNCTION,
             runtime="python3.10",
@@ -196,7 +258,7 @@ def main():
             description=DESC,
         )
         d = getattr(resp, "data", {}) or {}
-        log("✅ FC 函数已创建：codeSize=%s" % d.get("codeSize"))
+        log("✅ FC 函数已创建：codeSize=%s handler=%s" % (d.get("codeSize"), d.get("handler")))
 
     ensure_http_trigger(client, region)
     log("境内镜像版鉴权网关部署完成", "SUCCESS")

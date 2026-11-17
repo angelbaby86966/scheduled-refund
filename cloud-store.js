@@ -18,8 +18,14 @@
 (function() {
   'use strict';
 
-  // ====== 服务端鉴权网关 ======
-  var AUTH_URL = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/wb-auth';
+  // ====== 服务端鉴权网关（多入口，主入口不通时自动降级）======
+  // ① 主：Supabase Edge Function（Cloudflare 国际 IP，部分国内线路不通）
+  // ② 备：阿里云 FC 境内镜像（cn-hangzhou.fcapp.run，境内可达）
+  // 两端共用同一个 WB_AUTH_SECRET → 票据互通，走哪条路都无感。
+  var AUTH_URLS = [
+    'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/wb-auth',
+    'https://auth-schedulfund-svc-tzsnybzlnd.cn-hangzhou.fcapp.run'
+  ];
   var TICKET_PREFIX = 'wb_auth_ticket_';   // 按账号分桶，避免同一台机器切号串票
   var STALE_USERS_CACHE = 'wb_users_cache'; // 旧版全账号明文口令缓存，启动即清
 
@@ -89,43 +95,68 @@
 
   // ====== 网关调用 ======
   /**
-   * 调用鉴权网关。
+   * 调用鉴权网关（**多入口自动降级**）。
    *
-   * ⚠️ 2026-11-17 修复误报：原先 fetch 的网络层异常（DNS/TCP/TLS/CORS 被拦）
-   *    会直接冒泡成 TypeError("Failed to fetch")，而 verifyUser 又把它 catch 成
-   *    null → 登录页误报「账号或密码错误」。实际是网络问题，与密码无关。
-   *    现在：网络层失败统一包成 err.netError=true / err.netDetail=<可读原因>，
-   *    上层据此区分「网络不通」与「凭证不对」。
+   * ⚠️ 2026-11-17 为什么要有两个入口：
+   *    主入口 Supabase Edge Function 的域名解析到 Cloudflare 国际 IP
+   *    （104.18.38.10 / 172.64.149.246），部分中国大陆运营商线路不通，
+   *    浏览器直接抛 "Failed to fetch"，与账号无关。
+   *    备入口是同一套鉴权网关的**阿里云 FC 境内镜像**
+   *    （cn-hangzhou.fcapp.run），境内可达。
+   *    两端共用同一个 WB_AUTH_SECRET → 签发的票据互相通用，
+   *    用户走哪条路登录都无感，后续换 tool 票、读数据都不受影响。
+   *
+   * 降级规则：
+   *    · 仅当**网络层失败**（连不上）才换入口；
+   *    · 服务端明确拒绝（401 / ok:false）是业务响应，各入口一致，不换。
    */
   function authCall(action, extra) {
     var body = Object.assign({ action: action }, extra || {});
-    return fetch(AUTH_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    }).then(function(resp) {
-      return resp.text().then(function(txt) {
-        var r = {};
-        if (txt && txt.trim()) {
-          try { r = JSON.parse(txt); }
-          catch (e) { throw new Error('网关返回非 JSON 内容：' + txt.substring(0, 120)); }
+    var lastErr = null;
+
+    function attempt(idx) {
+      if (idx >= AUTH_URLS.length) {
+        var e0 = new Error('无法连接鉴权服务（' +
+          (lastErr ? lastErr.netDetail : '所有入口均不可达') + '）');
+        e0.netError = true;
+        e0.netDetail = lastErr ? lastErr.netDetail : '所有入口均不可达';
+        e0.cause = lastErr ? lastErr.cause : null;
+        return Promise.reject(e0);
+      }
+      return fetch(AUTH_URLS[idx], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function(resp) {
+        return resp.text().then(function(txt) {
+          var r = {};
+          if (txt && txt.trim()) {
+            try { r = JSON.parse(txt); }
+            catch (e) { throw new Error('网关返回非 JSON 内容：' + txt.substring(0, 120)); }
+          }
+          if (resp.status === 401 || r.ok === false) {
+            var err = new Error(r.error || ('网关 HTTP ' + resp.status));
+            err.status = resp.status;
+            err.authFailed = (resp.status === 401);
+            throw err;
+          }
+          return r;
+        });
+      }, function(cause) {
+        // 网络层失败：连接不上 / DNS 解析失败 / TLS 被拦 / CORS 预检被拦
+        var err = new Error('无法连接鉴权服务（' + netReason(cause) + '）');
+        err.netError = true;
+        err.netDetail = netReason(cause);
+        err.cause = cause;
+        lastErr = err;
+        if (idx + 1 < AUTH_URLS.length) {
+          console.warn('[cloud-store] 入口 ' + idx + ' 不可达，自动切换到备入口 ' + (idx + 1));
+          return attempt(idx + 1);
         }
-        if (resp.status === 401 || r.ok === false) {
-          var err = new Error(r.error || ('网关 HTTP ' + resp.status));
-          err.status = resp.status;
-          err.authFailed = (resp.status === 401);
-          throw err;
-        }
-        return r;
+        throw err;
       });
-    }, function(cause) {
-      // 网络层失败：连接不上 / DNS 解析失败 / TLS 被拦 / CORS 预检被拦
-      var err = new Error('无法连接鉴权服务（' + netReason(cause) + '）');
-      err.netError = true;
-      err.netDetail = netReason(cause);
-      err.cause = cause;
-      throw err;
-    });
+    }
+    return attempt(0);
   }
 
   /** 把浏览器的原始网络异常翻译成人能看懂的原因 */

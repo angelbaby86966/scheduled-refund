@@ -16,13 +16,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten'
+        description: 'handoff / deploy-edge / deploy-fc / deploy-fc-auth / cleanup / diag-rls / rls-tighten-app / rls-tighten'
         required: true
         default: 'deploy-edge'
         type: choice
         options:
           - deploy-edge
           - deploy-fc
+          - deploy-fc-auth
           - handoff
           - cleanup
           - diag-rls
@@ -178,6 +179,16 @@ jobs:
           set -eu
           pip install --quiet aliyun-fc2==2.5.2
           python3 ops/deploy_fc_refund.py --mode deploy
+
+      - name: 部署 wb-auth 境内镜像（阿里云 FC，HTTP 触发器）
+        if: inputs.mode == 'deploy-fc-auth'
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WB_AUTH_SECRET: ${{ secrets.WB_AUTH_SECRET }}
+        run: |
+          set -eu
+          pip install --quiet aliyun-fc2==2.5.2
+          python3 ops/deploy_fc_auth.py --mode deploy
 
       # ============ 清理探针文件 ============
       - name: 清理一次性探针 workflow

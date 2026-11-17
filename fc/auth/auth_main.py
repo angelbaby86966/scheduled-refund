@@ -160,8 +160,6 @@ def can_access(payload, target: str) -> bool:
 # ====== 业务 ======
 def handle(p: dict) -> tuple:
     action = str((p or {}).get("action") or "")
-    if action == "probe":
-        return {"ok": True, "shape": (p or {}).get("probe")}, 200
 
     # ---------- 登录：账号密码换票据 ----------
     if action == "login":
@@ -348,79 +346,83 @@ def _reply(body, code=200, headers=None):
     hdrs["Content-Type"] = "application/json; charset=utf-8"
     if headers:
         hdrs.update(headers)
-    # ---- 探针模式：按 action 返回不同形态，一次测出 FC 认哪种 ----
-    probe = _PROBE.get("shape")
-    if probe == "dict":
-        return body
-    if probe == "tuple2":
-        return (body, code)
-    if probe == "tuple3":
-        return (body, code, hdrs)
-    if probe == "tuple3str":
-        return (json.dumps(body, ensure_ascii=False), code, hdrs)
-    if probe == "wsgi":
-        # WSGI 三元组 (status_line, headers_list, body_bytes)
-        return ("%d %s" % (code, "OK" if code == 200 else "ERROR"),
-                [(k, v) for k, v in hdrs.items()],
-                json.dumps(body, ensure_ascii=False).encode("utf-8"))
     return (body, code, hdrs)
 
 
-def handler(event, context):
-    """阿里云 FC HTTP 触发器入口。event 可能是 bytes/str/dict。"""
-    # OPTIONS 预检
-    raw = event
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode("utf-8", "replace")
-    if isinstance(raw, str):
-        raw = raw.strip()
-        try:
-            raw = json.loads(raw) if raw else {}
-        except Exception:
-            raw = {}
-    if not isinstance(raw, dict):
-        raw = {}
+def handler(environ, start_response):
+    """阿里云 FC **Web 函数（WSGI）运行时**入口。
 
-    # FC 的 HTTP 触发器把请求信息放在 headers/query/body
-    method = str((raw.get("httpMethod") or raw.get("method") or "POST")).upper()
-    headers = raw.get("headers") or {}
-    if isinstance(headers, list):  # 部分运行时给的是 [{key,value}]
-        headers = {str(h.get("key")).lower(): h.get("value")
-                   for h in headers if isinstance(h, dict)}
-    else:
-        headers = {str(k).lower(): v for k, v in headers.items()}
+    ⚠️ 2026-11-17 实测：带 HTTP 触发器的 python3.10 函数跑的是 WSGI 运行时
+       （/var/fc/runtime/python3.10/fc_rapis_wsgi.py），
+       handler 必须是 (environ, start_response) 形态：
+         · 先调用 start_response(status_line, headers_list)
+         · 再返回 **可迭代的 bytes 列表**（如 [b'...']）
+       返回 dict / tuple / 字符串统统报 "invalid response type"。
+    """
+    # ---- 读请求体 ----
+    try:
+        n = int(environ.get("CONTENT_LENGTH") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    raw_body = b""
+    try:
+        stream = environ.get("wsgi.input")
+        if stream is not None:
+            raw_body = stream.read(n) if n else stream.read()
+    except Exception:
+        raw_body = b""
 
+    # ---- CORS 预检：OPTIONS 直接回 204 ----
+    method = str(environ.get("REQUEST_METHOD") or "POST").upper()
     if method == "OPTIONS":
-        return _reply({"ok": True}, 200)
+        start_response("204 No Content", [
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "content-type, x-wb-auth"),
+            ("Access-Control-Max-Age", "86400"),
+            ("Content-Length", "0"),
+        ])
+        return [b""]
 
-    # 解析 body
+    # ---- 解析业务参数 ----
     p = {}
-    if isinstance(raw.get("body"), (str, bytes, bytearray)):
-        b = raw["body"]
-        if isinstance(b, (bytes, bytearray)):
-            b = b.decode("utf-8", "replace")
-        b = b.strip()
-        if b:
-            try:
-                p = json.loads(b)
-            except Exception:
-                p = {}
-    elif isinstance(raw.get("body"), dict):
-        p = raw["body"]
-    if not p:
-        # form 编码兜底
-        q = raw.get("queryParameters") or raw.get("queryStringParameters") or {}
-        if isinstance(q, dict) and q:
-            p = dict(q)
+    txt = raw_body.decode("utf-8", "replace").strip() if raw_body else ""
+    if txt:
+        try:
+            p = json.loads(txt)
+        except Exception:
+            p = {}
     if not isinstance(p, dict):
         p = {}
-    action = str(p.get("action") or "")
+    # GET 查询串兜底
+    qs = environ.get("QUERY_STRING") or ""
+    if not p and qs:
+        for kv in qs.split("&"):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                try:
+                    p[urllib.parse.unquote_plus(k)] = urllib.parse.unquote_plus(v)
+                except Exception:
+                    pass
 
     try:
         body, code = handle(p)
     except Exception as e:
         body, code = {"ok": False, "error": "服务端异常：%s" % str(e)[:160]}, 500
-    return _reply(body, code)
+
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
+              403: "Forbidden", 404: "Not Found", 409: "Conflict",
+              500: "Internal Server Error", 503: "Service Unavailable"}.get(code, "OK")
+    start_response("%d %s" % (code, reason), [
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Content-Length", str(len(payload))),
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+        ("Access-Control-Allow-Headers", "content-type, x-wb-auth"),
+        ("Access-Control-Max-Age", "86400"),
+    ])
+    return [payload]
 
 
 if __name__ == "__main__":

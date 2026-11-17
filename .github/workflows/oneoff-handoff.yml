@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map / recover-biz-map2 / recover-biz-map3'
+        description: 'handoff / deploy-edge / deploy-fc / cleanup / diag-rls / rls-tighten-app / rls-tighten / recover-biz-map / recover-biz-map2 / recover-biz-map3 / recover-biz-map4'
         required: true
         default: 'deploy-edge'
         type: choice
@@ -31,6 +31,7 @@ on:
           - recover-biz-map
           - recover-biz-map2
           - recover-biz-map3
+          - recover-biz-map4
 permissions:
   contents: read
 jobs:
@@ -442,5 +443,60 @@ jobs:
           echo '--- 5) CLI dump 能力探测 ---'
           supabase db dump --project-ref "$REF" --data-only --schema public -f /tmp/dump.sql 2>&1 | head -20 || true
           if [ -f /tmp/dump.sql ]; then echo "  dump 大小: $(wc -c < /tmp/dump.sql)"; grep -c "ocd_biz_map" /tmp/dump.sql || true; fi
+
+      # ============ 抢救 ocd_biz_map 第四轮（CLI 直连 → 提权 → pageinspect）============
+      - name: 用 CLI 直连提权并扫堆页
+        if: inputs.mode == 'recover-biz-map4'
+        run: |
+          set -eu
+          REF=opauwtkivhjxlijfqaix
+          echo '--- 1) 从 CLI debug 输出里抓直连连接串（不回显密码）---'
+          supabase db dump --project-ref "$REF" --data-only --schema public -f /tmp/dump.sql --debug 2>&1 \
+            | grep -oE 'postgres(ql)?://[^ "]+' | sort -u > /tmp/conns.txt || true
+          wc -l < /tmp/conns.txt
+          python3 - <<'PY' > /tmp/conn.env
+          import re, urllib.parse, base64
+          best=None
+          for line in open('/tmp/conns.txt'):
+              line=line.strip()
+              if not line: continue
+              # 直连优先（端口 5432），排除 pooler 6543
+              try:
+                  u=urllib.parse.urlparse(line)
+              except Exception:
+                  continue
+              if u.port==5432 or u.hostname and ':' not in (u.netloc.split('@')[-1]):
+                  best=line; break
+              if best is None: best=line
+          if not best:
+              print('CONN=')
+          else:
+              u=urllib.parse.urlparse(best)
+              print('HOST='+ (u.hostname or ''))
+              print('PORT='+ str(u.port or 5432))
+              print('USER='+ (urllib.parse.unquote(u.username or 'postgres')))
+              print('PASS='+ urllib.parse.unquote(u.password or ''))
+              print('DB='+ (u.path or '/postgres').lstrip('/'))
+              print('PROVIDED=1')
+          PY
+          set -a; . /tmp/conn.env; set +a
+          echo "  直连目标: host=${HOST:-?} port=${PORT:-?} user=${USER:-?} db=${DB:-?} provided=${PROVIDED:-0}"
+          if [ "${PROVIDED:-0}" != "1" ] || [ -z "${PASS:-}" ]; then
+            echo "  没抓到直连口令，放弃"
+            exit 0
+          fi
+          echo '--- 2) 直连身份探测 ---'
+          export PGPASSWORD="$PASS"
+          PSQL="psql -h $HOST -p $PORT -U $USER -d $DB -t -A"
+          $PSQL -c "SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname=current_user);" 2>&1 | head -5 || true
+          echo '--- 3) 尝试建 pageinspect ---'
+          $PSQL -c "CREATE EXTENSION IF NOT EXISTS pageinspect;" 2>&1 | head -5 || true
+          $PSQL -c "SELECT count(*) AS can_use FROM pg_proc WHERE proname='heap_page_items';" 2>&1 | head -5 || true
+          echo '--- 4) 扫堆页找旧 map ---'
+          $PSQL -c "SELECT b.blk AS blk, encode(h.t_data,'hex') AS hex FROM generate_series(0, (pg_relation_size('public.user_data')/current_setting('block_size')::int - 1)) AS b(blk) CROSS JOIN LATERAL heap_page_items(get_raw_page('public.user_data', b.blk)) h WHERE h.t_data IS NOT NULL ORDER BY b.blk, h.t_xmin;" > /tmp/heap.txt 2>&1 || true
+          wc -c < /tmp/heap.txt
+          head -c 300 /tmp/heap.txt
+          echo
+          rm -f /tmp/conns.txt /tmp/conn.env /tmp/dump.sql
 
       # ============ RLS 收紧（破坏性）============

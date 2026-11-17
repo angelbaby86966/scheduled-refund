@@ -199,7 +199,7 @@
   <p class="footer-note">仅供内部管理使用</p>
 </div>
 
-<script src="cloud-store.js?v=2"></script>
+<script src="cloud-store.js?v=6"></script>
 <script>
 (function() {
   'use strict';
@@ -289,9 +289,22 @@
         container.innerHTML += '<div class="diag-item">用户库导入/导出已移至管理员工作台（前端不再下发任何账号口令）</div>';
       }).catch(function(err) {
         var el = document.getElementById('cloudDiag');
+        var isNet = err && err.netError;
         if (el) {
           el.className = 'diag-item fail';
-          el.textContent = '☁️ 云端连接: 失败 ❌ (' + err.message + ')';
+          el.textContent = '☁️ 云端连接: 失败 ❌ (' + (err && err.message ? err.message : '未知错误') + ')';
+        }
+        // ⚠️ 2026-11-17：明确区分「网络不通」与「账号问题」，
+        //    否则用户看到「账号或密码错误」会去反复改密码，方向完全错。
+        if (isNet) {
+          container.innerHTML += '<div class="diag-item fail" style="margin-top:8px;">'
+            + '🔍 诊断结论：<b>网络无法连接鉴权服务</b>，与账号或密码无关。<br>'
+            + '· 鉴权服务地址：opauwtkivhjxlijfqaix.supabase.co<br>'
+            + '· 常见原因：当前网络到境外 Cloudflare 线路不通 / 被拦截 / 代理未生效<br>'
+            + '· 解决办法：<b>换网络（手机热点）后重试</b>，或联系管理员确认账号状态</div>';
+        } else {
+          container.innerHTML += '<div class="diag-item fail" style="margin-top:8px;">'
+            + '🔍 诊断结论：网关可达但拒绝了本次请求（账号或密码错误）。</div>';
         }
       });
     }
@@ -332,6 +345,7 @@
           setTimeout(function() { window.location.replace('index.html'); }, 500);
         });
       } else {
+        // 服务端明确拒绝 → 才是真正的账号/密码错误
         showMsg('❌ 账号或密码错误，请重试', 'error');
         loginBtn.disabled = false;
         loginBtn.textContent = '登 录';
@@ -339,7 +353,16 @@
         document.getElementById('password').focus();
       }
     }).catch(function(err) {
-      showMsg('❌ 云端验证失败: ' + err.message + '\n请检查网络后重试', 'error');
+      // ⚠️ 2026-11-17：网络层失败（连不上鉴权服务）必须与「密码错误」区分开，
+      //    否则用户会反复改密码，而真正的问题是网络不通。
+      if (err && err.netError) {
+        showMsg('❌ 无法连接服务器（不是账号或密码问题）\n'
+          + '原因：' + (err.netDetail || '网络请求失败') + '\n'
+          + '请换网络（如手机热点）后重试，或联系管理员', 'error');
+      } else {
+        showMsg('❌ 云端验证失败: ' + (err && err.message ? err.message : '未知错误')
+          + '\n请检查网络后重试', 'error');
+      }
       loginBtn.disabled = false;
       loginBtn.textContent = '登 录';
     });

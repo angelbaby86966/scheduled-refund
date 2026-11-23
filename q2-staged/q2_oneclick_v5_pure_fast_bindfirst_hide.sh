@@ -23,7 +23,7 @@
 #         nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
 # ==============================================================================
 # 【隐藏域名版】q2 一键部署 + 宿主机侧域名隐藏（在官方 bindfirst 基础上新增 [5/5]）
-#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.3.0-20261123"
+#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.4.0-20261123"
 #   基线     ：q2-staged/q2_oneclick_v5_pure_fast_bindfirst.sh
 #              @26e839cb6ea1059210ef1ac89082e68fbaee9be5（24162B md5=53fb9590753f5a54efef5e5c484822d1）
 #   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.5.0（容器内 resolv 同走 DoH）
@@ -110,7 +110,7 @@ FAIL=""; mark_fail() { FAIL="${FAIL} $1"; say "  ✗ 失败：$1"; }
 #   状态文件：/tmp/q2_deploy_status（每行 key=value，原子写入）
 # =============================================================================
 STATUS_FILE="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
-Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.3.0-20261123}"
+Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.4.0-20261123}"
 status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重复行）
   local kv k v
   for kv in "$@"; do
@@ -124,7 +124,8 @@ status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重�
 status_init() {
   rm -f "${STATUS_FILE}.tmp"
   status_set "state=running" "pid=$$" "log=${LOG}" "start=$(date '+%F %T')" \
-            "step=init" "failed=" "version=${Q2_BINDFIRST_HIDE_REV}"
+            "step=init" "failed=" "version=${Q2_BINDFIRST_HIDE_REV}" \
+            "end=" "result="
 }
 status_step() {
   status_set "step=$1" "step_at=$(date '+%F %T')"
@@ -151,8 +152,6 @@ dur() { echo "$(( $2 - $1 ))s"; }
 
 say "===== q2 一键部署 v5-pure-fast 开始 $(date '+%F %T') ====="
 say "日志: $LOG"
-status_init
-say "状态文件: $STATUS_FILE（外部可用 --status 秒回查进度，无需 tail -f）"
 
 # ---- 镜像启动清理（Q2_FROM_IMAGE=1）：移除克隆身份，避免多机共用 SN/注册/9路/device_code ----
 if [ "${Q2_FROM_IMAGE:-0}" = "1" ]; then
@@ -173,7 +172,11 @@ fi
 LOCK=/var/run/ipes_deploy.lock
 exec 9>"$LOCK" 2>/dev/null
 if flock -n 9 2>/dev/null; then say "✅ 部署锁已获取（防并发互踩）"
-else say "❌ 本机已有部署在运行，本次退出"; say "   确认前一份卡死： rm -f $LOCK"; exit 1; fi
+# 被锁挡掉时先摘 EXIT trap：否则 trap 会把另一进程正在跑的状态改写成 failed
+# （SWAS 重发/手滑下发两次会误判）；且 status_init 也移到拿锁之后，被挡掉者不碰状态文件
+else say "❌ 本机已有部署在运行，本次退出"; say "   确认前一份卡死： rm -f $LOCK"; trap - EXIT; exit 1; fi
+status_init
+say "状态文件: $STATUS_FILE（外部可用 --status 秒回查进度，无需 tail -f）"
 
 node_id() { cat /usr/local/edge_zycloud/device_code 2>/dev/null || cat /usr/local/edge/device_code 2>/dev/null || cat /etc/.mac 2>/dev/null; }
 flow() { curl -fsS -m 30 -X POST "$ADMIN_API/api/edgeNode/stateflow" -H "Content-Type: application/json" \

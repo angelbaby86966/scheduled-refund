@@ -98,6 +98,7 @@
             <button class="tab admin-only-tab" data-tab="imageclone" onclick="switchTab('imageclone')" data-page-node-id="YUlHHsVe7zq1spcDSbZBpl">🖼️ 镜像克隆</button>
             <span class="tab-sep" aria-hidden="true"></span>
             <button class="tab tab-ext" id="btnBatchCmd" type="button" onclick="openBatchCmdTool()" title="打开 SWAS 批量命令工具 · 多凭证批量版（可勾选多个凭证一起执行）">🚀 批量命令</button>
+            <button class="tab" data-tab="nodelookup" onclick="switchTab('nodelookup')" data-page-node-id="NK_TAB_NODELOOKUP" title="批量输入舟翼云节点ID，查询对应的阿里云实例ID">🔍 节点查实例</button>
           </div>
 
           <!-- 防火墙面板 -->
@@ -597,6 +598,46 @@
               </div>
             </div>
           </div>
+
+          <!-- 节点查实例面板：舟翼云节点ID → 阿里云实例ID -->
+          <div class="tab-content" id="tab-nodelookup" data-page-node-id="NK_PANEL_NODELOOKUP">
+            <div class="card" data-page-node-id="NK_CARD_MAIN">
+              <div class="card-header" data-page-node-id="NK_CARD_HEADER">
+                <h3 data-page-node-id="NK_TITLE">🔍 舟翼云节点ID → 阿里云实例ID</h3>
+              </div>
+              <div class="card-body" data-page-node-id="NK_CARD_BODY">
+                <div style="background:#e6f4ff;border:1px solid #91caff;color:#0958d9;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.7;margin-bottom:14px;" data-page-node-id="NK_TIP">
+                  批量粘贴舟翼云节点ID，自动查平台公网IP，再用已保存的阿里云凭证（全部账号/全部地域）按IP反查实例ID。<br>
+                  查询链：节点ID →（舟翼云平台）公网IP →（阿里云 ListInstances）实例ID。只读查询，不执行任何变更。
+                </div>
+
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+                  <div style="flex:1;min-width:180px;">
+                    <label style="font-weight:600;font-size:13px;" for="nlOwnerId">平台 ownerId</label>
+                    <input type="text" id="nlOwnerId" class="input" value="3666" style="width:100%;" placeholder="默认 3666" data-page-node-id="NK_OWNER" />
+                  </div>
+                  <div style="flex:2;min-width:240px;">
+                    <label style="font-weight:600;font-size:13px;" for="nlToken">admin.zhouyi.top Token <span style="color:#999;font-weight:400;">（不必保存）</span></label>
+                    <input type="password" id="nlToken" class="input" style="width:100%;" placeholder="留空则复用页面已保存的 token" data-page-node-id="NK_TOKEN" />
+                  </div>
+                </div>
+
+                <div style="margin-bottom:10px;">
+                  <label style="font-weight:600;font-size:13px;" for="nlNodeIds">舟翼云节点ID（每行一个，或逗号/空格分隔）</label>
+                  <textarea id="nlNodeIds" class="input" rows="5" style="width:100%;font-family:monospace;font-size:13px;resize:vertical;" placeholder="每行一个节点ID，例如：&#10;98935c81210022516e94e433dcb10e8f&#10;5fcb5885-456a-4344-8b82-4703a42699e9" data-page-node-id="NK_IDS"></textarea>
+                </div>
+
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                  <button class="btn btn-primary" id="nlQueryBtn" onclick="queryNodeToInstance()" data-page-node-id="NK_BTN_QUERY" style="background:#0958d9;border:none;">🔍 查询实例ID</button>
+                  <button class="btn btn-sm" onclick="document.getElementById('nlNodeIds').value='';document.getElementById('nlResult').innerHTML='';" data-page-node-id="NK_BTN_CLEAR">清空</button>
+                  <span id="nlProgress" style="font-size:13px;color:#666;"></span>
+                </div>
+
+                <div id="nlResult" style="margin-top:14px;" data-page-node-id="NK_RESULT"></div>
+              </div>
+            </div>
+          </div>
+
           <!-- 日志区 -->
           <div class="card" style="margin-top:16px" data-page-node-id="hCITeWkqftMVQj9zaMGHuV">
             <div class="card-header" data-page-node-id="Q5jn7ZVEpln7YaJIq9vM2v">
@@ -800,7 +841,7 @@
   </script>
   <script src="aliyun-client-v2.js?v=19"></script>
   <script src="ai-client.js?v=3"></script>
-  <script src="app.js?v=120"></script>
+  <script src="app.js?v=121"></script>
   <script src="one-click-deploy.js?v=18"></script>
   <script src="image-clone.js?v=21&r=39"></script>
   <script>

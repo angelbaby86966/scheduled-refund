@@ -23,11 +23,16 @@
 #         nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
 # ==============================================================================
 # 【隐藏域名版】q2 一键部署 + 宿主机侧域名隐藏（在官方 bindfirst 基础上新增 [5/5]）
-#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.0.0-20261116"
+#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.2.0-20261123"
 #   基线     ：q2-staged/q2_oneclick_v5_pure_fast_bindfirst.sh
 #              @26e839cb6ea1059210ef1ac89082e68fbaee9be5（24162B md5=53fb9590753f5a54efef5e5c484822d1）
-#   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.2.0（容器内 resolv 同走 DoH）
-#              （29784B sha256=19d54c6a84012e728da9f1ab95b88518d0b14239bd669873cfc9751f8da3f4bd）
+#   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.4.0（容器内 resolv 同走 DoH）
+#              ★ v1.3.0 根治安装自检误判失败：DoH 转发器改 keep-alive 持久连接 + 启动预热，
+#                自检探针带重试退避，等 unit active 再自检（替代固定 sleep 2）
+#   v2.1.0 新增：状态机（/tmp/q2_deploy_status）+ --status / --wait 模式
+#              ★ 根治 SWAS 回执假失败：外部用 tail -f 盯进度 → 永不退出 → 300s 上限判 Timeout，
+#                但部署主体其实在后台跑完。现在脚本自己落终态，外部秒回查询即可，
+#                不再需要 tail -f，回执真实反映结果。
 #
 #   ⚠️ 覆盖边界（务必知悉）：
 #     · 隐藏的是「宿主机侧 + 容器内侧明文 DNS 查询 / 本机日志」；容器内 resolv 已同指
@@ -37,6 +42,32 @@
 #
 # ==============================================================================
 Q2_JWT_FILE="${Q2_JWT_FILE:-/etc/q2/jwt}"
+# ---- 外部查询模式（--status 打印状态；--wait 阻塞等待终态后打印）----
+#      ★ 必须在凭证校验之前：查询状态时不该要求 JWT/AK/SK
+if [ "${1:-}" = "--status" ] || [ "${1:-}" = "--wait" ]; then
+  _sf="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
+  _ws=0
+  [ "${1:-}" = "--wait" ] && _ws="${2:-1800}"
+  _el=0
+  while [ "$_el" -lt "$_ws" ]; do
+    _st="$(grep -E '^state=' "$_sf" 2>/dev/null | head -1 | cut -d= -f2-)"
+    [ "$_st" = "running" ] || [ -z "$_st" ] || break
+    sleep 5; _el=$((_el + 5))
+  done
+  if [ -f "$_sf" ]; then
+    echo "=== q2 部署状态 ==="
+    cat "$_sf"
+    echo "=== 状态文件: $_sf ==="
+  else
+    echo "状态文件不存在：$_sf（部署可能从未启动）"
+    exit 3
+  fi
+  _st="$(grep -E '^state=' "$_sf" 2>/dev/null | head -1 | cut -d= -f2-)"
+  [ "$_st" = "ok" ] && exit 0
+  [ "$_st" = "failed" ] && exit 1
+  exit 2   # 仍在运行（--wait 超时）
+fi
+
 if [ -z "${Q2_JWT:-}" ] && [ -f "$Q2_JWT_FILE" ]; then
   Q2_JWT="$(cat "$Q2_JWT_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
@@ -65,12 +96,58 @@ exec > >(tee -a "$LOG" 2>/dev/null) 2>&1
 say() { echo "[$(date '+%H:%M:%S')] $*"; }
 FAIL=""; mark_fail() { FAIL="${FAIL} $1"; say "  ✗ 失败：$1"; }
 
+# =============================================================================
+# ★ v2.1.0 状态机（根治 SWAS 回执假失败）
+#   根因：外部习惯用 `tail -f <log>` 盯进度，而 tail -f 永不退出 →
+#         SWAS 300s 上限判定 Timeout/Failed，但部署主体其实在后台正常跑完。
+#   对策：脚本自己写一个「可轮询的状态文件」，外部用 --status / --wait 秒回取值，
+#         完全不需要 tail -f，回执自然反映真实结果。
+#   状态文件：/tmp/q2_deploy_status（每行 key=value，原子写入）
+# =============================================================================
+STATUS_FILE="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
+Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.2.0-20261123}"
+status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重复行）
+  local kv k v
+  for kv in "$@"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    # 删除该 key 的旧行，再追加新值
+    grep -v "^${k}=" "${STATUS_FILE}" > "${STATUS_FILE}.tmp" 2>/dev/null || true
+    printf '%s=%s\n' "$k" "$v" >> "${STATUS_FILE}.tmp"
+    mv -f "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null || true
+  done
+}
+status_init() {
+  rm -f "${STATUS_FILE}.tmp"
+  status_set "state=running" "pid=$$" "log=${LOG}" "start=$(date '+%F %T')" \
+            "step=init" "failed=" "version=${Q2_BINDFIRST_HIDE_REV}"
+}
+status_step() {
+  status_set "step=$1" "step_at=$(date '+%F %T')"
+}
+status_done() { # $1 = ok|failed
+  _Q2_STATUS_DONE=1
+  status_set "state=$1" "end=$(date '+%F %T')" "failed=${FAIL# }" \
+            "result=$([ "$1" = "ok" ] && echo 全部完成 || echo 有失败步骤)"
+}
+# ★ 异常退出也必须落终态，否则 --status 会永远停在 running
+#   （这正是旧版「回执 Failed 但日志无结论」的根源：外部无从判断真实结果）
+_q2_exit_trap() {
+  _rc=$?
+  if [ "${_Q2_STATUS_DONE:-0}" != "1" ]; then
+    status_set "state=failed" "end=$(date '+%F %T')" "failed=${FAIL# }" \
+               "result=异常退出(rc=${_rc})" >/dev/null 2>&1 || true
+  fi
+}
+trap _q2_exit_trap EXIT
+
 # ---- O5：阶段耗时打点 ----
 T0=$(date +%s); T_PAR=0; T_Q2=0; T_NINE=0; T_SN=0
 dur() { echo "$(( $2 - $1 ))s"; }
 
 say "===== q2 一键部署 v5-pure-fast 开始 $(date '+%F %T') ====="
 say "日志: $LOG"
+status_init
+say "状态文件: $STATUS_FILE（外部可用 --status 秒回查进度，无需 tail -f）"
 
 # ---- 镜像启动清理（Q2_FROM_IMAGE=1）：移除克隆身份，避免多机共用 SN/注册/9路/device_code ----
 if [ "${Q2_FROM_IMAGE:-0}" = "1" ]; then
@@ -116,6 +193,7 @@ detect_loc() {
 #   已绑定（registration_info 状态成功）的机器自动跳过，不重复硬化。
 # ==============================================================================
 NID=$(node_id)
+status_step "[0] 绑定+注册"
 say ""; say "===== [0] 渠道绑定 + 设备注册（先于部署，完成后等 30s）====="
 NEED_BIND=0
 if [ -z "$NID" ] || ! grep -q "注册状态: 成功" /usr/local/edge/registration_info 2>/dev/null; then NEED_BIND=1; fi
@@ -141,6 +219,7 @@ fi
 # ① 先流转「服务中」—— 早于部署，节点立刻可被调度
 #   绑定已在第 0 步完成，此处 nodeID 已就绪，可直接用占位符流转
 # ==============================================================================
+status_step "[1/4] 占位符流转"
 say ""; say "===== [1/4] 占位符流转「服务中」（先流转，再部署）====="
 if [ -z "$NID" ]; then
   say "  本机无 device_code（新机器）→ ② 部署会完成绑定+注册，之后重跑本脚本即会补流转"
@@ -158,6 +237,7 @@ fi
 # ② 部署 + 9 路一次做对 + 真SN回填（同一流程内闭环）
 #    绑定已在第 0 步完成；此处只做 docker 安装+预拉 ∥ Q2 组件预下载+patch
 # ==============================================================================
+status_step "[2/4] 部署+9路+SN回填"
 say ""; say "===== [2/4] 部署：docker+预拉 ∥ Q2组件 → Q2业务 → 9路 → 真SN回填 ====="
 
 # ---- O1-a：docker 安装（已就绪则跳过）+ 镜像预拉取 ----
@@ -325,6 +405,7 @@ fi
 T_SN=$(date +%s); say "  ⏱ SN回填阶段耗时 $(dur $T_NINE $T_SN)"
 
 # ==============================================================================
+status_step "[3/4] 保活"
 say ""; say "===== [3/4] 安装真保活（融合版 + r20-fix11 硬自愈，内嵌自包含，不依赖外网 OSS）====="
 install_health_check() {
   say "  [3.1] 写入 /usr/local/bin/ipes_health_check.sh（容器兜底启动 + ./bin/ipes health 探测 + fix11 挂载自愈）"
@@ -430,21 +511,31 @@ install_health_check || mark_fail "保活"
 say "  保活cron: $(crontab -l 2>/dev/null | grep -cE 'ipes_health|health_check') 条"
 
 # ==============================================================================
+status_step "[4/4] 限速"
 say ""; say "===== [4/4] 挂限速 ${LIMIT_START} → ${LIMIT_END} ====="
 curl -fsSL -m 180 "$OSS/limit/run_limit.sh" 2>/dev/null | tr -d '\r' | bash -s -- "$LIMIT_START" "$LIMIT_END"
 say "  qdisc=$(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条  cron=$(crontab -l 2>/dev/null | grep -cE 'limit_start|clear_limit') 条"
 
 # ==============================================================================
+status_step "[5/5] 隐藏域名"
 say ""; say "===== [5/5] 隐藏域名（宿主机侧明文 DNS + 看门狗接管官方保活）====="
-# q2_hide_dns.sh v1.2.0：极简 DoH 转发 + dnsmasq 127.0.0.1:53 + 容器内 resolv 同走 DoH + 日志治理 + 看门狗保活。
+# q2_hide_dns.sh v1.4.0：极简 DoH 转发 + dnsmasq 127.0.0.1:53 + 容器内 resolv 同走 DoH + 日志治理 + 看门狗保活。
+# ★ v1.3.0 根治安装自检误判失败（时序竞态）：DoH 转发器改 keep-alive 持久连接 + 启动预热握手；
+#   自检探针带重试退避；等 unit active 再自检（替代固定 sleep 2）。
 # 保活接管：Q2_KA_TAKEOVER=1 会摘掉 [3/4] 的 ipes_health_check cron，
 #           换成 q2_keepalive（flock 单实例 + happ>=9 不动 + 300s 防抖），避免两套互殴。
-HIDE_DNS_VER_EXPECT="1.2.0-20261116"
-HIDE_DNS_BYTES=29784
-HIDE_DNS_SHA256="19d54c6a84012e728da9f1ab95b88518d0b14239bd669873cfc9751f8da3f4bd"
+HIDE_DNS_VER_EXPECT="1.4.0-20261123"
+HIDE_DNS_BYTES=38715
+HIDE_DNS_SHA256="af844ad7657f21e065a36e738eff7795ad1f860ddcf0881cf48c467c0c8dc5b5"
+# ★ v2.1.0：URL 列表改为「多源 + 内容指纹校验」
+#   ① 首选 commit SHA 锁定源（不可变，最稳）
+#   ② 兜底分支名源（ops-patch 分支头），内容指纹不符就跳过
+#   无论走哪个源，都必须 bytes + sha256 双校验通过才执行，杜绝跑到半路被篡改的文件
 HIDE_DNS_URLS="
-https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/a261e6f1014a5725690fa45f965b1bb989fb8ea1/ops/q2_hide_dns.sh
-https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@a261e6f1014a5725690fa45f965b1bb989fb8ea1/ops/q2_hide_dns.sh
+https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/55f5e7ad5222010ef9d7cd701f3970d406660aa6/ops/q2_hide_dns.sh
+https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@55f5e7ad5222010ef9d7cd701f3970d406660aa6/ops/q2_hide_dns.sh
+https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/ops-patch/ops/q2_hide_dns.sh
+https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@ops-patch/ops/q2_hide_dns.sh
 "
 HIDE_DNS_DL=/tmp/q2_hide_dns_install.sh
 _hd_ok=0; _hb=0; _hs=none
@@ -461,7 +552,16 @@ done
 if [ "$_hd_ok" = "1" ]; then
   say "  [5.1] 隐藏脚本校验通过：${_hb}B sha256=${_hs:0:12}… 版本=${HIDE_DNS_VER_EXPECT}"
   # ★ 隐藏脚本内部「保活先装、DNS 后装」，DNS 失败也不影响保活
-  Q2_KA_TAKEOVER=1 bash "$HIDE_DNS_DL" || say "  ⚠️ 隐藏域名未全部成功（不影响 q2 部署主体，可稍后单独重跑隐藏脚本）"
+  # ★ v2.1.0：隐藏脚本自身已带重试退避自检；这里再加一层「整脚本重试」兜底
+  #   —— 首跑若仍因上游抖动失败，等 10s 重跑一次（第二次必绿：连接已热）
+  _hd_run=0; _hd_rc=1
+  while [ "$_hd_run" -lt 2 ]; do
+    _hd_run=$((_hd_run + 1))
+    if [ "$_hd_run" -gt 1 ]; then say "     隐藏域名第 2 次尝试（等 10s 让 DoH 连接预热）…"; sleep 10; fi
+    if Q2_KA_TAKEOVER=1 bash "$HIDE_DNS_DL"; then _hd_rc=0; break; fi
+    say "     ⚠️ 隐藏域名第 ${_hd_run} 次未全成功"
+  done
+  [ "$_hd_rc" = "0" ] || say "  ⚠️ 隐藏域名两次均未全成功（不影响 q2 部署主体，可稍后单独重跑隐藏脚本）"
   say "  宿主机DNS : $(grep -c '^nameserver 127.0.0.1' /etc/resolv.conf 2>/dev/null) 条指向本机"
   say "  容器DNS   : $(docker exec ipes cat /etc/resolv.conf 2>/dev/null | grep -c '^nameserver 127.0.0.1') 条指向本机（业务域名走 DoH）"
   say "  看门狗cron: $(crontab -l 2>/dev/null | grep -c q2_keepalive) 条"
@@ -485,5 +585,11 @@ say "纯净版   : CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/nul
 say "隐藏域名 : 宿主机DNS=$(grep -c '^nameserver 127.0.0.1' /etc/resolv.conf 2>/dev/null) 容器DNS=$(docker exec ipes cat /etc/resolv.conf 2>/dev/null | grep -c '^nameserver 127.0.0.1') 看门狗cron=$(crontab -l 2>/dev/null | grep -c q2_keepalive) 条"
 say "nodeID   : $(node_id)"
 say "⏱ 耗时   : 绑定(第0步)+docker+预拉=$(dur $T0 $T_PAR)  Q2+9路=$(dur $T_PAR $T_NINE)  SN回填=$(dur $T_NINE $T_SN)  总计=$(dur $T0 $T_SN)"
-[ -n "$FAIL" ] && say "❌ 失败步骤:${FAIL}" || say "✅ 全部完成"
+if [ -n "$FAIL" ]; then
+  say "❌ 失败步骤:${FAIL}"
+  status_done failed
+else
+  say "✅ 全部完成"
+  status_done ok
+fi
 say "============ 完成 $(date '+%F %T') ============"

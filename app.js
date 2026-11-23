@@ -6840,6 +6840,40 @@ function nlParseIds(raw) {
   return out;
 }
 
+/** 判断是否为公网 IPv4（支持直接粘贴 IP 反查实例ID） */
+function nlIsIPv4(s) {
+  var m = String(s || '').match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return !!m && m.slice(1).every(function (n) { var v = +n; return v >= 0 && v <= 255; });
+}
+
+/** 规范化 token：去首尾空白 / Bearer 前缀 / token= 前缀 / 包裹引号（F12 复制 Authorization 头常见形态） */
+function nlNormalizeToken(raw) {
+  var t = String(raw == null ? '' : raw).trim();
+  t = t.replace(/^Bearer\s+/i, '').replace(/^token\s*=\s*/i, '');
+  t = t.replace(/^["']+|["']+$/g, '').trim();
+  return t;
+}
+
+/** 本地预检 JWT：返回错误提示（空串表示格式/有效期无明显问题） */
+function nlTokenDiag(token) {
+  var t = nlNormalizeToken(token);
+  if (!t) return '请先填写 admin.zhouyi.top Token（不必保存）';
+  var parts = t.split('.');
+  if (parts.length !== 3 || !/^eyJ/.test(t)) {
+    return 'Token 格式不对：应是以 eyJ 开头的三段式 JWT；不要带 Bearer 前缀或引号，直接从平台 F12 复制 token 值';
+  }
+  try {
+    var p = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (p.length % 4) p += '=';
+    var d = JSON.parse(decodeURIComponent(escape(atob(p))));
+    if (d.exp && Date.now() > d.exp * 1000) {
+      var dt = new Date(d.exp * 1000);
+      return 'Token 已于 ' + dt.toLocaleString('zh-CN') + ' 过期，请到舟翼云平台重新获取后粘贴';
+    }
+  } catch (e) { /* 解析失败交给平台判定，不拦住查询 */ }
+  return '';
+}
+
 /** 从节点列表里找指定 nodeID，返回 {publicIp, innerIp, region, status, stage, matchField} */
 function nlFindNode(list, id) {
   var want = String(id || '').trim();
@@ -6889,6 +6923,7 @@ function nlFindNode(list, id) {
 
 /** 走 one-click-deploy 活代理拉平台节点列表 */
 function nlFetchNodes(ownerId, token) {
+  token = nlNormalizeToken(token);
   var FN = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/one-click-deploy';
   var KEY = 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
   var headers = { 'X-Token': token, 'x-token': token, Authorization: token, Token: token };
@@ -6915,6 +6950,25 @@ function nlFetchNodes(ownerId, token) {
   });
 }
 
+/** 单地域完整翻页（SWAS ListInstances 默认只返回前 100 台，必须按 TotalCount 翻完） */
+async function nlListAllInstances(rid, pname, errs) {
+  var pageSize = 100;
+  var first = await AliyunClient.listInstances(rid, { pageSize: pageSize, pageNumber: 1 });
+  var arr = (first && first.Instances) || [];
+  var total = (first && first.TotalCount) || arr.length;
+  var pages = Math.ceil(total / pageSize);
+  if (!isFinite(pages) || pages < 1) pages = 1;
+  if (pages > 100) {
+    errs && errs.push(pname + '/' + rid + ': 实例页数异常(' + pages + ')，仅扫描前100页');
+    pages = 100;
+  }
+  for (var p = 2; p <= pages; p++) {
+    var d = await AliyunClient.listInstances(rid, { pageSize: pageSize, pageNumber: p });
+    arr = arr.concat((d && d.Instances) || []);
+  }
+  return arr;
+}
+
 /** 遍历所有已保存凭证 + 全部地域，建 公网IP → {instanceId,region,name,profile} 映射 */
 async function nlBuildIpToInstance(onProgress) {
   var map = {};
@@ -6922,9 +6976,11 @@ async function nlBuildIpToInstance(onProgress) {
     ? AliyunClient.listProfiles() : [];
   profiles = (profiles || []).filter(function (p) { return p && p.name; });
   if (!profiles.length) throw new Error('页面未配置任何阿里云凭证（请先在凭证处添加 AK/SK）');
-  var regionIds = (typeof activeRegionIds === 'function') ? activeRegionIds() : ['cn-hangzhou','cn-shanghai','cn-guangzhou','cn-shenzhen','cn-beijing','cn-chengdu'];
+  // 只读反查用「全部地域」，不受批量操作里的地区启用/禁用开关影响，避免漏掉被临时禁用的地域
+  var regionIds = Object.keys(REGION_INFO);
+  if (!regionIds.length) regionIds = ['cn-hangzhou','cn-shanghai','cn-guangzhou','cn-shenzhen','cn-beijing','cn-chengdu'];
   var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
-  var total = profiles.length * regionIds.length, done = 0, errs = [];
+  var total = profiles.length * regionIds.length, done = 0, errs = [], scanned = 0;
   try {
     // 多账号必须串行（单例客户端签名实时读 active 凭证，并行会密钥错配）
     for (var ci = 0; ci < profiles.length; ci++) {
@@ -6937,8 +6993,8 @@ async function nlBuildIpToInstance(onProgress) {
       }
       // 单账号内地域并发
       await Promise.all(regionIds.map(function (rid) {
-        return AliyunClient.listInstances(rid, { pageSize: 100 }).then(function (data) {
-          var arr = (data && data.Instances) || [];
+        return nlListAllInstances(rid, pname, errs).then(function (arr) {
+          scanned += arr.length;
           arr.forEach(function (inst) {
             var pub = inst.PublicIpAddress;
             if (Array.isArray(pub)) pub = pub[0];
@@ -6964,6 +7020,7 @@ async function nlBuildIpToInstance(onProgress) {
     if (originalActive) { try { AliyunClient.useProfile(originalActive); } catch (e) {} }
   }
   map.__errs = errs;
+  map.__meta = { profiles: profiles.map(function (p) { return p.name; }), regions: regionIds.length, instances: scanned };
   return map;
 }
 
@@ -6974,11 +7031,14 @@ async function queryNodeToInstance() {
   var out = document.getElementById('nlResult');
   if (!out) return;
   var ids = nlParseIds((document.getElementById('nlNodeIds') || {}).value || '');
-  if (!ids.length) { out.innerHTML = '<span style="color:#cf1322;">⚠️ 请先粘贴舟翼云节点ID</span>'; return; }
+  if (!ids.length) { out.innerHTML = '<span style="color:#cf1322;">⚠️ 请先粘贴舟翼云节点ID，或直接粘贴公网IP（也支持） </span>'; return; }
   var ownerId = (((document.getElementById('nlOwnerId') || {}).value || '').trim()) || '3666';
-  var token = (((document.getElementById('nlToken') || {}).value || '').trim())
-    || (function () { try { return localStorage.getItem('zy_admin_token') || ''; } catch (e) { return ''; } })();
-  if (!token) { out.innerHTML = '<span style="color:#cf1322;">⚠️ 请填写 admin.zhouyi.top Token（不必保存）</span>'; return; }
+  var token = nlNormalizeToken(((document.getElementById('nlToken') || {}).value || '').trim()
+    || (function () { try { return localStorage.getItem('zy_admin_token') || ''; } catch (e) { return ''; } })());
+  var tokenErr = nlTokenDiag(token);
+  if (tokenErr) { out.innerHTML = '<span style="color:#cf1322;">⚠️ ' + escapeHtml(tokenErr) + '</span>'; return; }
+  // 记住上一次成功通过本地校验的 token（仅本机 localStorage，便于下次免粘贴）
+  try { localStorage.setItem('zy_admin_token', token); } catch (e) {}
   if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
   out.innerHTML = '<span style="color:#1677ff;">🔄 正在从平台拉取 ownerId=' + escapeHtml(ownerId) + ' 的节点列表…</span>';
 
@@ -6988,7 +7048,14 @@ async function queryNodeToInstance() {
     if (st) st.textContent = '平台节点 ' + nodeList.length + ' 个，正在匹配…';
     // 先把 Id→IP 匹配出来
     var idInfo = {};
-    ids.forEach(function (id) { idInfo[id] = nlFindNode(nodeList, id) || null; });
+    ids.forEach(function (id) {
+      var n = nlFindNode(nodeList, id);
+      // 平台没有该节点ID但输入本身是 IPv4 → 直接用这个公网IP反查实例ID
+      if (!n && nlIsIPv4(id)) {
+        n = { publicIp: id, innerIp: '—', region: '—', status: '直接输入IP', stage: '—', matchField: 'ip' };
+      }
+      idInfo[id] = n;
+    });
     var ipsNeeded = ids.filter(function (id) { return idInfo[id] && idInfo[id].publicIp; }).length;
     out.innerHTML = '<span style="color:#1677ff;">✅ 平台匹配 ' + ipsNeeded + '/' + ids.length + ' 个节点有公网IP，正在遍历阿里云凭证反查实例ID（全部地域）…</span>';
 
@@ -7026,10 +7093,19 @@ async function queryNodeToInstance() {
     var pairs = rows.map(function (r) { return r.id + ' -> ' + (r.instanceId === '—' ? '未找到' : r.instanceId); }).join('\n');
     var instOnly = rows.filter(function (r) { return r.matched; }).map(function (r) { return r.instanceId; }).join('\n');
 
+    var meta = ipMap.__meta || {};
+    var scanTip = '<div style="margin-top:8px;font-size:12px;color:#666;">扫描范围：阿里云账号 ' + escapeHtml((meta.profiles || []).join('、') || '—')
+      + '；地域 ' + (meta.regions || 0) + ' 个；实例 ' + (meta.instances || 0) + ' 台（已按 TotalCount 翻完所有页）。</div>';
+    if (!meta.profiles || !meta.profiles.length) {
+      scanTip += '<div style="margin-top:4px;font-size:12px;color:#cf1322;">⚠️ 当前页面未配置任何阿里云凭证，请先在凭证管理中添加目标账号的 AK/SK。</div>';
+    } else if (hit === 0 && ids.some(function (id) { return idInfo[id] && idInfo[id].publicIp; })) {
+      scanTip += '<div style="margin-top:4px;font-size:12px;color:#cf1322;">⚠️ 未命中：如果目标实例所属账号不在上面「扫描范围」里，请把该账号 AK/SK 加到页面凭证后重查；也可直接粘贴公网IP单独反查。</div>';
+    }
     var errTip = '';
     if (ipMap.__errs && ipMap.__errs.length) {
-      errTip = '<details style="margin-top:8px;font-size:12px;color:#cf1322;"><summary>部分地域扫描失败 ' + ipMap.__errs.length + ' 项（展开）</summary><ul style="padding-left:18px;">'
-        + ipMap.__errs.slice(0, 20).map(function (e) { return '<li>' + escapeHtml(e) + '</li>'; }).join('') + '</ul></details>';
+      errTip = '<div style="margin-top:6px;font-size:12px;color:#cf1322;">⚠️ 部分地域扫描失败 ' + ipMap.__errs.length
+        + ' 项：<details style="display:inline;"><summary style="cursor:pointer;">展开明细</summary><ul style="padding-left:18px;">'
+        + ipMap.__errs.slice(0, 20).map(function (e) { return '<li>' + escapeHtml(e) + '</li>'; }).join('') + '</ul></details></div>';
     }
 
     var html = '<div style="background:#f6ffed;border:1px solid #b7eb8f;padding:12px;border-radius:6px;">'
@@ -7060,8 +7136,8 @@ async function queryNodeToInstance() {
             + '</tr>';
         }).join('')
       + '</tbody></table></div>'
-      + '<div style="margin-top:8px;color:#666;font-size:12px;">来源：节点ID→IP 来自舟翼云平台 getEdgeNodeList；IP→实例ID 来自阿里云 ListInstances（按公网IP匹配）。未命中多为该节点不在当前凭证下，或平台IP与阿里云公网IP不一致。</div>'
-      + errTip + '</div>';
+      + '<div style="margin-top:8px;color:#666;font-size:12px;">来源：节点ID→IP 来自舟翼云平台 getEdgeNodeList（也支持直接粘贴IP）；IP→实例ID 来自阿里云 ListInstances（按公网IP匹配）。</div>'
+      + scanTip + errTip + '</div>';
 
     out.innerHTML = html;
     if (st) st.textContent = '';
@@ -7081,8 +7157,20 @@ async function queryNodeToInstance() {
       downloadCsvImpl('节点查实例_' + new Date().toISOString().slice(0,10) + '.csv', document.getElementById('nlOutCsv').value);
     });
   } catch (e) {
-    out.innerHTML = '<span style="color:#cf1322;">❌ 查询失败：' + escapeHtml((e && e.message) || String(e)) + '</span>';
+    var msg = (e && e.message) || String(e);
+    var hint = /not even a token|invalid token|token.*格式/i.test(msg)
+      ? '　👉 若从 F12 的 Authorization 头复制，请只粘贴 token 值本身（页面已自动去掉 Bearer 前缀；仍失败说明 token 串不完整，请重新复制）' : '';
+    out.innerHTML = '<span style="color:#cf1322;">❌ 查询失败：' + escapeHtml(msg) + '</span>'
+      + (hint ? '<div style="color:#cf1322;font-size:12px;margin-top:6px;">' + escapeHtml(hint) + '</div>' : '');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔍 查询实例ID'; }
   }
 }
+
+// 节点查实例：页面加载时回填上次保存的 token（仅填输入框，不自动发起查询）
+(function () {
+  try {
+    var el = document.getElementById('nlToken');
+    if (el && !el.value) el.value = nlNormalizeToken(localStorage.getItem('zy_admin_token') || '');
+  } catch (e) {}
+})();

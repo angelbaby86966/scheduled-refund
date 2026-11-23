@@ -6820,3 +6820,269 @@ async function stableClientToken(rid, iid) {
   return 'wb-' + _djb2hex(key) + _djb2hex(key.split('').reverse().join(''));
 }
 
+
+/* ============================================================
+ * 节点查实例：舟翼云节点ID → 阿里云实例ID（只读查询）
+ * 数据链：节点ID →(平台 getEdgeNodeList)公网IP →(阿里云 ListInstances)实例ID
+ * - 平台侧走 one-click-deploy 活代理（opauwtkivhjxlijfqaix），token 来自输入框或本地缓存
+ * - 阿里云侧遍历所有已保存凭证（串行 useProfile，查完恢复 active），6 地域并发
+ * - 不触碰锁定文件、不执行任何变更操作
+ * ============================================================ */
+
+/** 解析节点ID文本框 → 去重数组（每行/逗号/空格/分号分隔） */
+function nlParseIds(raw) {
+  var parts = String(raw || '').split(/[\s,;，；\r\n]+/);
+  var seen = {}, out = [];
+  parts.forEach(function (s) {
+    s = (s || '').trim();
+    if (s && !seen[s]) { seen[s] = 1; out.push(s); }
+  });
+  return out;
+}
+
+/** 从节点列表里找指定 nodeID，返回 {publicIp, innerIp, region, status, stage, matchField} */
+function nlFindNode(list, id) {
+  var want = String(id || '').trim();
+  if (!want) return null;
+  var wantL = want.toLowerCase();
+  for (var i = 0; i < list.length; i++) {
+    var n = list[i] || {};
+    // 平台节点对象里的 nodeID 字段：nodeID / nodeId / nodeName；兼容 sn( UUID )/ business_tags.nodeId
+    var ids = [n.nodeID, n.nodeId, n.nodeName];
+    var bt = n.business_tags || n.businessTags || [];
+    for (var b = 0; b < bt.length; b++) { ids.push(bt[b] && bt[b].nodeId); }
+    for (var k = 0; k < ids.length; k++) {
+      if (ids[k] != null && String(ids[k]).toLowerCase() === wantL) {
+        var ip = n.publicIP || n.wan_ip || n.publicIp || '';
+        var ips = n.ipInfos || [];
+        if (!ip && ips.length && ips[0]) ip = ips[0].wan_ip || '';
+        var ifs = n.ifaceInfos || [];
+        var innerIp = n.internalIP || (ifs.length && ifs[0] ? ifs[0].iface_ip_v_4 : '') || '';
+        return {
+          publicIp: String(ip || '').trim(),
+          innerIp: String(innerIp || '').trim(),
+          region: [n.province, n.city].filter(Boolean).join('/') || '-',
+          status: n.status || n.stage || '-',
+          stage: n.stage || '-',
+          matchField: 'nodeID'
+        };
+      }
+    }
+    // 也支持按 sn(UUID) 或 product_serial 匹配
+    var serials = [n.sn, n.product_serial, n.product_uuid];
+    for (var s = 0; s < serials.length; s++) {
+      if (serials[s] && String(serials[s]).toLowerCase() === wantL) {
+        var ip2 = n.publicIP || n.wan_ip || n.publicIp || '';
+        var ips2 = n.ipInfos || [];
+        if (!ip2 && ips2.length && ips2[0]) ip2 = ips2[0].wan_ip || '';
+        return {
+          publicIp: String(ip2 || '').trim(),
+          innerIp: String(n.internalIP || '').trim(),
+          region: [n.province, n.city].filter(Boolean).join('/') || '-',
+          status: n.status || n.stage || '-', stage: n.stage || '-', matchField: 'sn'
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/** 走 one-click-deploy 活代理拉平台节点列表 */
+function nlFetchNodes(ownerId, token) {
+  var FN = 'https://opauwtkivhjxlijfqaix.supabase.co/functions/v1/one-click-deploy';
+  var KEY = 'sb_publishable_SM9yvpcOBqvVPH2oGwTmFg_BZ1Lz9Xd';
+  var headers = { 'X-Token': token, 'x-token': token, Authorization: token, Token: token };
+  return fetch(FN, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KEY },
+    body: JSON.stringify({
+      token: token, headers: headers, method: 'GET',
+      path: '/api/edgeNode/getEdgeNodeList',
+      query: 'ownerId=' + encodeURIComponent(ownerId), body: null
+    })
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var j = null; try { j = JSON.parse(t); } catch (e) {}
+      if (!r.ok) throw new Error('平台代理 HTTP ' + r.status + (j ? ' ' + JSON.stringify(j).slice(0, 160) : ''));
+      return j;
+    });
+  }).then(function (j) {
+    if (!j || j.code !== 0) throw new Error('平台返回异常: ' + JSON.stringify(j).slice(0, 200));
+    var d = j.data || {};
+    var list = d.list || d.records || d.rows || (Array.isArray(d) ? d : []);
+    if (!Array.isArray(list)) throw new Error('平台节点列表格式异常');
+    return list;
+  });
+}
+
+/** 遍历所有已保存凭证 + 全部地域，建 公网IP → {instanceId,region,name,profile} 映射 */
+async function nlBuildIpToInstance(onProgress) {
+  var map = {};
+  var profiles = (window.AliyunClient && typeof AliyunClient.listProfiles === 'function')
+    ? AliyunClient.listProfiles() : [];
+  profiles = (profiles || []).filter(function (p) { return p && p.name; });
+  if (!profiles.length) throw new Error('页面未配置任何阿里云凭证（请先在凭证处添加 AK/SK）');
+  var regionIds = (typeof activeRegionIds === 'function') ? activeRegionIds() : ['cn-hangzhou','cn-shanghai','cn-guangzhou','cn-shenzhen','cn-beijing','cn-chengdu'];
+  var originalActive = (AliyunClient.getActiveProfile() || {}).name || null;
+  var total = profiles.length * regionIds.length, done = 0, errs = [];
+  try {
+    // 多账号必须串行（单例客户端签名实时读 active 凭证，并行会密钥错配）
+    for (var ci = 0; ci < profiles.length; ci++) {
+      var pname = profiles[ci].name;
+      try {
+        AliyunClient.useProfile(pname);
+      } catch (e) {
+        errs.push(pname + ': 切换凭证失败 ' + (e.message || e));
+        done += regionIds.length; if (onProgress) onProgress(done, total); continue;
+      }
+      // 单账号内地域并发
+      await Promise.all(regionIds.map(function (rid) {
+        return AliyunClient.listInstances(rid, { pageSize: 100 }).then(function (data) {
+          var arr = (data && data.Instances) || [];
+          arr.forEach(function (inst) {
+            var pub = inst.PublicIpAddress;
+            if (Array.isArray(pub)) pub = pub[0];
+            else if (pub && typeof pub === 'object') pub = pub.IpAddress && pub.IpAddress[0];
+            pub = String(pub || '').trim();
+            if (pub && !map[pub]) {
+              map[pub] = {
+                instanceId: inst.InstanceId || '',
+                region: (typeof REGION_INFO !== 'undefined' && REGION_INFO[rid]) ? REGION_INFO[rid] : rid,
+                regionId: rid,
+                name: inst.InstanceName || '',
+                status: inst.Status || '',
+                profile: pname
+              };
+            }
+          });
+        }).catch(function (e) {
+          errs.push(pname + '/' + rid + ': ' + ((e && e.message) || e));
+        }).then(function () { done++; if (onProgress) onProgress(done, total); });
+      }));
+    }
+  } finally {
+    if (originalActive) { try { AliyunClient.useProfile(originalActive); } catch (e) {} }
+  }
+  map.__errs = errs;
+  return map;
+}
+
+/** 主入口：节点ID → 实例ID */
+async function queryNodeToInstance() {
+  var btn = document.getElementById('nlQueryBtn');
+  var st = document.getElementById('nlProgress');
+  var out = document.getElementById('nlResult');
+  if (!out) return;
+  var ids = nlParseIds((document.getElementById('nlNodeIds') || {}).value || '');
+  if (!ids.length) { out.innerHTML = '<span style="color:#cf1322;">⚠️ 请先粘贴舟翼云节点ID</span>'; return; }
+  var ownerId = (((document.getElementById('nlOwnerId') || {}).value || '').trim()) || '3666';
+  var token = (((document.getElementById('nlToken') || {}).value || '').trim())
+    || (function () { try { return localStorage.getItem('zy_admin_token') || ''; } catch (e) { return ''; } })();
+  if (!token) { out.innerHTML = '<span style="color:#cf1322;">⚠️ 请填写 admin.zhouyi.top Token（不必保存）</span>'; return; }
+  if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
+  out.innerHTML = '<span style="color:#1677ff;">🔄 正在从平台拉取 ownerId=' + escapeHtml(ownerId) + ' 的节点列表…</span>';
+
+  var nodeList, ipMap;
+  try {
+    nodeList = await nlFetchNodes(ownerId, token);
+    if (st) st.textContent = '平台节点 ' + nodeList.length + ' 个，正在匹配…';
+    // 先把 Id→IP 匹配出来
+    var idInfo = {};
+    ids.forEach(function (id) { idInfo[id] = nlFindNode(nodeList, id) || null; });
+    var ipsNeeded = ids.filter(function (id) { return idInfo[id] && idInfo[id].publicIp; }).length;
+    out.innerHTML = '<span style="color:#1677ff;">✅ 平台匹配 ' + ipsNeeded + '/' + ids.length + ' 个节点有公网IP，正在遍历阿里云凭证反查实例ID（全部地域）…</span>';
+
+    ipMap = await nlBuildIpToInstance(function (done, total) {
+      if (st) st.textContent = '阿里云实例扫描 ' + done + '/' + total + '（账号×地域）…';
+    });
+
+    var rows = ids.map(function (id) {
+      var n = idInfo[id];
+      var m = n && n.publicIp ? ipMap[n.publicIp] : null;
+      var reason = '';
+      if (!n) reason = '平台未找到该节点ID';
+      else if (!n.publicIp) reason = '平台节点无公网IP';
+      else if (!m) reason = '阿里云实例中未找到该IP';
+      return {
+        id: id,
+        publicIp: n ? (n.publicIp || '—') : '—',
+        innerIp: n ? (n.innerIp || '—') : '—',
+        region: n ? n.region : '—',
+        nodeStatus: n ? n.status : '—',
+        instanceId: m ? m.instanceId : '—',
+        instanceName: m ? m.name : '',
+        irRegion: m ? m.region : '',
+        profile: m ? m.profile : '',
+        matched: !!m,
+        reason: reason
+      };
+    });
+
+    var hit = rows.filter(function (r) { return r.matched; }).length;
+    var csv = '节点ID,实例ID,公网IP,内网IP,地域,节点状态,阿里云账号,实例名称,备注\n'
+      + rows.map(function (r) {
+        return [r.id, r.instanceId, r.publicIp, r.innerIp, r.region, r.nodeStatus, r.profile, r.instanceName, r.reason].map(escapeCsv).join(',');
+      }).join('\n');
+    var pairs = rows.map(function (r) { return r.id + ' -> ' + (r.instanceId === '—' ? '未找到' : r.instanceId); }).join('\n');
+    var instOnly = rows.filter(function (r) { return r.matched; }).map(function (r) { return r.instanceId; }).join('\n');
+
+    var errTip = '';
+    if (ipMap.__errs && ipMap.__errs.length) {
+      errTip = '<details style="margin-top:8px;font-size:12px;color:#cf1322;"><summary>部分地域扫描失败 ' + ipMap.__errs.length + ' 项（展开）</summary><ul style="padding-left:18px;">'
+        + ipMap.__errs.slice(0, 20).map(function (e) { return '<li>' + escapeHtml(e) + '</li>'; }).join('') + '</ul></details>';
+    }
+
+    var html = '<div style="background:#f6ffed;border:1px solid #b7eb8f;padding:12px;border-radius:6px;">'
+      + '<div style="font-weight:600;margin-bottom:8px;">✅ 查询完成：' + ids.length + ' 个节点，命中实例ID ' + hit + ' 个</div>'
+      + '<div style="margin-bottom:10px;">'
+      + '<button class="btn btn-sm btn-primary nl-copy" data-k="pairs" style="margin-right:6px;">📋 复制 节点ID→实例ID</button>'
+      + '<button class="btn btn-sm btn-primary nl-copy" data-k="inst">📋 复制实例ID列表</button>'
+      + '<button class="btn btn-sm btn-primary nl-csv" style="margin-left:6px;">⬇️ 下载CSV</button>'
+      + '</div>'
+      + '<textarea id="nlOutPairs" style="display:none;">' + escapeHtml(pairs) + '</textarea>'
+      + '<textarea id="nlOutInst" style="display:none;">' + escapeHtml(instOnly) + '</textarea>'
+      + '<textarea id="nlOutCsv" style="display:none;">' + escapeHtml(csv) + '</textarea>'
+      + '<div style="max-height:360px;overflow:auto;border:1px solid #eee;background:#fff;">'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="background:#f0f0f0;">'
+      + ['节点ID','实例ID','公网IP','内网IP','地域','节点状态','阿里云账号','备注'].map(function (h) {
+          return '<th style="padding:6px;border:1px solid #ddd;text-align:left;">' + h + '</th>';
+        }).join('') + '</tr></thead><tbody>'
+      + rows.map(function (r) {
+          return '<tr>'
+            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;">' + escapeHtml(r.id) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;color:' + (r.matched ? '#1677ff' : '#999') + ';font-weight:' + (r.matched ? '600' : '400') + ';">' + escapeHtml(r.instanceId) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.publicIp) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;color:#666;">' + escapeHtml(r.innerIp) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.region) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.nodeStatus) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.profile) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;color:' + (r.matched ? '#52c41a' : '#cf1322') + ';">' + escapeHtml(r.reason || '命中') + '</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div>'
+      + '<div style="margin-top:8px;color:#666;font-size:12px;">来源：节点ID→IP 来自舟翼云平台 getEdgeNodeList；IP→实例ID 来自阿里云 ListInstances（按公网IP匹配）。未命中多为该节点不在当前凭证下，或平台IP与阿里云公网IP不一致。</div>'
+      + errTip + '</div>';
+
+    out.innerHTML = html;
+    if (st) st.textContent = '';
+    // 事件委托绑定复制/下载
+    var root = out;
+    root.querySelectorAll('.nl-copy').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var k = b.getAttribute('data-k');
+        var el = document.getElementById(k === 'pairs' ? 'nlOutPairs' : 'nlOutInst');
+        var orig = b.textContent;
+        copyTextToClipboardImpl(el ? el.value : '').then(function () {
+          b.textContent = '✅ 已复制'; setTimeout(function () { b.textContent = orig; }, 1500);
+        }).catch(function (e) { alert('复制失败：' + e.message); });
+      });
+    });
+    root.querySelector('.nl-csv').addEventListener('click', function () {
+      downloadCsvImpl('节点查实例_' + new Date().toISOString().slice(0,10) + '.csv', document.getElementById('nlOutCsv').value);
+    });
+  } catch (e) {
+    out.innerHTML = '<span style="color:#cf1322;">❌ 查询失败：' + escapeHtml((e && e.message) || String(e)) + '</span>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 查询实例ID'; }
+  }
+}

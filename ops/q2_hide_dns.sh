@@ -1,6 +1,13 @@
 #!/bin/bash
 # =============================================================================
 # q2_hide_dns.sh —— 让云主机的「明文 DNS 查询 / 本机日志」里不再出现爱奇艺系域名
+#   v1.3.0（2026-11-17）：根治「安装自检误判失败」的时序竞态——
+#                        ① DoH 转发器改 keep-alive 持久连接 + 启动预热握手
+#                           （旧版每包重做 TLS 握手，冷启动首查必超时）
+#                        ② 自检探针带重试退避（8 次 × 3s），吸收冷启动握手耗时
+#                        ③ 等 systemd unit 真正 active 再自检（替代固定 sleep 2）
+#                        ④ 端到端 getent 验证同样带重试
+#                        ⑤ watchdog 探针带轻量重试，避免抖动被记为失败
 #   v1.2.0（2026-11-16）：在原 v1.1.0 基础上，容器内 resolv.conf 同走 DoH——
 #                        容器内 /etc/resolv.conf 一并改成 127.0.0.1，业务域名不再明文。
 #
@@ -22,10 +29,12 @@
 #
 # 看门狗保活（独立于 DNS 安装，装在最前面，DNS 失败也不影响）：
 #   · happ 路数 < 9  → docker restart 补拉回 9 路
-#   · happ 路数 >= 9 → 完全不动（★ 超过 9 路不杀、不重启）
+#   · happ 路数 >= 9 → 仅继续查 health，不因路数重启（★ 超过 9 路不杀、不重启）
+#   · health 探测异常（服务僵死） → docker restart（v1.2.0 新增，补回被接管的 ipes_health_check 能力）
 #   · docker 守护进程挂了 → systemctl/service 拉起
-#   · ipes 容器挂了 → docker start；容器被删 → 按现网烘焙参数完整重建
-#   · cron 每分钟 + @reboot；重置防抖默认 300s；日志 /var/log/q2_keepalive.log
+#   · ipes 容器挂了 → docker start（轮询 happ 就绪，不写死 sleep）；容器被删 → 按现网烘焙参数完整重建
+#   · 重启失败不写防抖戳，下一分钟立即重试；cron 每分钟 + @reboot
+#   · 重置防抖默认 120s（v1.2.0 由 300s 收紧）；日志 /var/log/q2_keepalive.log
 #
 # 可外置调整（随时改，不需要改脚本）：
 #   Q2_HIDE_MODE=all|suffix        默认 all：除白名单一律走 DoH（最彻底）
@@ -34,7 +43,7 @@
 #   Q2_DOH_URLS="https://dns.alidns.com/dns-query,https://doh.pub/dns-query"
 #   Q2_UPSTREAM=114.114.114.114    明文回退上游（DoH 全挂时 watchdog 用）
 #   Q2_KA_HAPP_N=9                 保活目标路数
-#   Q2_KA_DEBOUNCE=300             两次补拉之间的最小间隔（秒）
+#   Q2_KA_DEBOUNCE=120             两次补拉之间的最小间隔（秒；v1.2.0 由 300 收紧到 120 快恢复）
 #   Q2_KA_TAKEOVER=1               1=摘掉旧 ipes_health_check cron 避免互殴，0=保留
 #   Q2_KA_PATTERN='[h]app:vod'     容器内 happ 进程计数匹配串
 #
@@ -44,8 +53,8 @@
 set -u
 export LC_ALL=C
 
-HIDE_DNS_VER="1.2.0-20261116"
-KA_VER="1.1.0-20261116"
+HIDE_DNS_VER="1.4.0-20261123"
+KA_VER="1.2.0-20261123"
 PYBIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
 
 # ── 看门狗保活（与 DNS 隐藏完全独立，安装顺序在 DNS 之前）──
@@ -53,7 +62,7 @@ KA_PATH="/usr/local/bin/q2_keepalive.sh"
 KA_LOG="/var/log/q2_keepalive.log"
 KA_STAMP="/tmp/.q2_ka_last_reset"
 KA_N="${Q2_KA_HAPP_N:-9}"
-KA_DEBOUNCE="${Q2_KA_DEBOUNCE:-300}"
+KA_DEBOUNCE="${Q2_KA_DEBOUNCE:-120}"
 KA_TAKEOVER="${Q2_KA_TAKEOVER:-1}"
 KA_PATTERN="${Q2_KA_PATTERN:-[h]app:vod}"
 KA_CONTAINER="${Q2_KA_CONTAINER:-ipes}"
@@ -121,6 +130,22 @@ except Exception as e:
 PY
 }
 
+# ★ v1.3.0 新增：带重试退避的探针
+#   根因：DoH 转发器首次请求需完成 TLS 握手（冷启动可能 >6s），单次探针必然误判失败。
+#   这里按 retry 次重试，每次间隔 backoff 秒；任一次成功即返回 0。
+#   用法：dns_probe_retry <port> <name> [retry] [backoff]
+dns_probe_retry() {
+  local port="$1" name="$2" retry="${3:-8}" backoff="${4:-3}" i=1
+  while [ "$i" -le "$retry" ]; do
+    if dns_probe "$port" "$name" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$i" -lt "$retry" ] && sleep "$backoff"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # -----------------------------------------------------------------------------
 # DoH 转发器：UDP 5353 收到原始 DNS 报文 → POST 到 DoH 端点 → 应答原样回送
 # -----------------------------------------------------------------------------
@@ -128,38 +153,130 @@ write_doh_proxy() {
   cat > "${DOH_PY}" <<'PY'
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""极简 DoH 转发器（RFC 8484），Python 标准库，兼容 py2.7 / py3。"""
+"""极简 DoH 转发器（RFC 8484），Python 标准库，兼容 py2.7 / py3。
+
+★ v1.3.0 关键修复：DoH 端点改用 http.client 持久连接（keep-alive + 连接池）
+  旧版每次查询都 urlopen() 新建连接 → 每包都重做一次 TLS 握手。
+  冷启动首个查询握手可能 >6s，安装脚本自检因此误判失败（服务其实稍后就绪）。
+  现改为：每个 DoH 端点复用一个 HTTPSConnection（带失效重连），
+  并在服务启动时预热一次握手，使首个真实查询不再付握手代价。
+"""
 import os
 import socket
 import threading
 
 try:
-    from urllib.request import Request, urlopen
+    from http.client import HTTPSConnection
 except ImportError:
-    from urllib2 import Request, urlopen
+    from httplib import HTTPSConnection
 
 URLS = [u for u in os.environ.get(
     'Q2_DOH_URLS',
     'https://dns.alidns.com/dns-query,https://doh.pub/dns-query'
 ).split(',') if u.strip()]
 HOST, PORT = '127.0.0.1', 5353
+TIMEOUT = 10
+
+# 每个端点一把锁 + 一个复用连接（http.client 非线程安全，需串行使用）
+_conns = {}
+_locks = {}
+_pool_lock = threading.Lock()
+
+
+def _split_url(url):
+    rest = url.split('://', 1)[-1]
+    if '/' in rest:
+        host, path = rest.split('/', 1)
+        path = '/' + path
+    else:
+        host, path = rest, '/'
+    return host, path
+
+
+def _get_conn(url):
+    """取该端点的复用连接；不存在则新建。"""
+    with _pool_lock:
+        conn = _conns.get(url)
+        if conn is None:
+            host, _ = _split_url(url)
+            conn = HTTPSConnection(host, timeout=TIMEOUT)
+            _conns[url] = conn
+        return conn
+
+
+def _drop_conn(url):
+    """丢弃失效连接，下次重新建。"""
+    with _pool_lock:
+        conn = _conns.pop(url, None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _post(conn, url, pkt):
+    _, path = _split_url(url)
+    conn.request('POST', path, body=pkt, headers={
+        'Content-Type': 'application/dns-message',
+        'Accept': 'application/dns-message',
+        'User-Agent': 'q2-doh/1.3',
+        'Content-Length': str(len(pkt)),
+    })
+    resp = conn.getresponse()
+    data = resp.read()
+    if resp.status != 200:
+        raise RuntimeError('doh http %s' % resp.status)
+    if not data:
+        raise RuntimeError('doh empty body')
+    return data
 
 
 def ask(pkt):
+    """按 URLS 顺序查询；同一端点失败则重连一次，再换下一个端点。"""
     last = None
     for url in URLS:
-        try:
-            req = Request(url, data=pkt, headers={
-                'Content-Type': 'application/dns-message',
-                'Accept': 'application/dns-message',
-                'User-Agent': 'q2-doh/1.0',
-            })
-            return urlopen(req, timeout=5).read()
-        except Exception as e:
-            last = e
+        with _pool_lock:
+            lk = _locks.get(url)
+            if lk is None:
+                lk = threading.Lock()
+                _locks[url] = lk
+        with lk:
+            for attempt in (0, 1):
+                try:
+                    return _post(_get_conn(url), url, pkt)
+                except Exception as e:
+                    last = e
+                    _drop_conn(url)
+                    if attempt == 1:
+                        break
     if last:
         raise last
     raise RuntimeError('no DoH endpoint')
+
+
+def _build_query(name):
+    import struct
+    import random
+    tid = random.randint(0, 65535)
+    head = struct.pack('!HHHHHH', tid, 0x0100, 1, 0, 0, 0)
+    q = b''
+    for p in name.split('.'):
+        q += bytes(bytearray([len(p)])) + p.encode('ascii')
+    return head + q + b'\x00' + struct.pack('!HH', 1, 1)
+
+
+def warmup():
+    """启动预热：完成一次 TLS 握手，避免首个真实查询超时。"""
+    pkt = _build_query('www.baidu.com')
+    for url in URLS:
+        for _ in range(2):
+            try:
+                ask(pkt)
+                return True
+            except Exception:
+                pass
+    return False
 
 
 def handle(sock, pkt, addr):
@@ -173,6 +290,14 @@ def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((HOST, PORT))
+    # ★ 预热必须放后台线程：否则握手期间 recv 循环被阻塞，
+    #   早到的查询会一直排队直到预热结束，反而放大冷启动延迟
+    try:
+        wt = threading.Thread(target=warmup)
+        wt.daemon = True
+        wt.start()
+    except Exception:
+        pass
     while True:
         try:
             pkt, addr = s.recvfrom(4096)
@@ -298,7 +423,7 @@ install_cron() {
 }
 
 # =============================================================================
-# 看门狗保活：happ < N 补拉到 N，happ >= N 不动；docker / 容器挂了自动拉起
+# 看门狗保活：happ < N 补拉到 N，happ >= N 查 health；docker / 容器挂了自动拉起
 # 生成独立脚本 + 独立 cron，与 DNS 隐藏互不依赖
 # =============================================================================
 capture_ka_params() {
@@ -319,7 +444,8 @@ write_keepalive() {
   {
     printf '#!/bin/bash\n'
     printf '# q2 看门狗保活 v%s（由 q2_hide_dns.sh 生成，请勿手工修改）\n' "${KA_VER}"
-    printf '# 规则：happ < %s 补拉到 %s；happ >= %s 一律不动；docker / 容器挂了自动拉起\n' "${KA_N}" "${KA_N}" "${KA_N}"
+    printf '# 规则：happ < %s 补拉到 %s；happ >= %s 时仅查 health；health 僵死重启；docker / 容器挂了自动拉起\n' "${KA_N}" "${KA_N}" "${KA_N}"
+    printf '# v1.2.0：重启失败不写防抖戳(下轮立即重试) + S2 轮询就绪 + S4 health 探测 + 防抖 %ss\n' "${KA_DEBOUNCE}"
     printf 'set -u\n'
     printf 'export LC_ALL=C\n'
     printf 'C="%s"\n' "${KA_CONTAINER}"
@@ -332,6 +458,7 @@ write_keepalive() {
     printf 'CFG="%s"\n' "${KA_CFG}"
     printf 'LOG="%s"\n' "${KA_LOG}"
     printf 'STAMP="%s"\n' "${KA_STAMP}"
+    printf 'HEALTH_BIN="%s"\n' "${KA_HEALTH_BIN:-./bin/ipes health}"
     cat <<'KAEOF'
 
 LOCK="/tmp/.q2_keepalive.lock"
@@ -384,9 +511,18 @@ s2_container() {
   log "S2 容器 ${C} 未运行，尝试拉起"
   if docker inspect "$C" >/dev/null 2>&1; then
     if docker start "$C" >/dev/null 2>&1; then
-      log "S2 docker start 成功（保留原 SN）"
-      sleep 15
+      log "S2 docker start 成功（保留原 SN），轮询 happ 就绪（不写死 sleep，避免 S3 把初始化误判成掉路）"
       [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S2 start 后写容器 resolv 失败（业务域名可能明文）"
+      local _j _hc
+      for _j in $(seq 1 18); do
+        sleep 5
+        _hc=$(num "$(happ_cnt)")
+        if [ "$_hc" -ge "$N" ]; then
+          log "S2 start 后 happ=${_hc} 就绪（约 $((_j*5))s），交 S3 复核"
+          return 0
+        fi
+      done
+      log "S2 start 后 90s happ=$(num "$(happ_cnt)") 未达 ${N}，交 S3 处理"
       return 0
     fi
     log "S2 docker start 失败，改为完整重建"
@@ -428,7 +564,11 @@ s3_happ() {
   fi
   # 采用部署线验证过的路径：docker restart 会按 custom.yml 的 9 行 args 重新拉起全部分片
   log "S3 执行 docker restart ${C} 拉回 ${N} 路"
-  docker restart "$C" >/dev/null 2>&1 || log "S3 docker restart 返回非 0"
+  # ★ 只有 restart 真正成功才写防抖戳；失败不写，下一轮可立即重试（避免坏状态被锁 300s）
+  if ! docker restart "$C" >/dev/null 2>&1; then
+    log "S3 docker restart 返回非 0，本轮不写防抖戳，下一分钟立即重试"
+    return 1
+  fi
   mark
   [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S3 restart 后写容器 resolv 失败（业务域名可能明文）"
   for i in $(seq 1 18); do
@@ -442,6 +582,40 @@ s3_happ() {
   c=$(num "$(happ_cnt)")
   log "S3 等待 90s 后 happ=${c} 仍未达 ${N}，保留现场等下轮"
   return 1
+}
+
+# S4 应用层 health：happ 路数达标但服务僵死时兜底重启（补回被接管的 ipes_health_check 能力）
+# 与 S3 共用防抖戳：S3 本轮已 restart 并 mark → debounce_ok 为假 → S4 自动跳过，不重复重启。
+s4_health() {
+  # 职责边界：路数不足是 S3 的事，S4 只在 happ 达标时查 health，避免同一轮双 restart
+  local hc
+  hc=$(num "$(happ_cnt)")
+  if [ "$hc" -lt "$N" ]; then
+    log "S4 happ=${hc} < ${N}，交给 S3 处理，本轮不查 health"
+    return 0
+  fi
+  # 探测命令不可用 → 跳过，避免每分钟误重启（兼容老版本容器无 health 子命令）
+  local out rc
+  out=$(docker exec "$C" sh -c "$HEALTH_BIN" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qiE 'OCI runtime|exec: "|No such file|command not found|not a valid'; then
+    log "S4 健康探测命令不可用，跳过（$out）"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -qiE 'connection refused|get services failed|unhealthy|not healthy|panic|refused to connect'; then
+    if ! debounce_ok; then
+      log "S4 检测到服务异常但处于防抖窗口（${DEBOUNCE}s）内，本轮跳过（多半 S3 刚重启过）"
+      return 0
+    fi
+    log "S4 检测到服务异常，准备 docker restart（$(printf '%s' "$out" | head -c 160)）"
+    if ! docker restart "$C" >/dev/null 2>&1; then
+      log "S4 docker restart 返回非 0，本轮不写防抖戳，下一分钟重试"
+      return 1
+    fi
+    mark
+    [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S4 restart 后写容器 resolv 失败（业务域名可能明文）"
+    log "S4 已重启恢复"
+  fi
+  return 0
 }
 
 main() {
@@ -463,6 +637,7 @@ main() {
   if ! s1_docker; then log "主流程中止：docker 不可用（S1 已尝试自愈）"; exit 1; fi
   if ! s2_container; then log "主流程中止：容器不可用（S2 已尝试 start / 重建），下轮继续"; exit 1; fi
   s3_happ || true
+  s4_health || true
   exit 0
 }
 main "$@"
@@ -505,7 +680,7 @@ install_keepalive() {
   systemctl enable crond >/dev/null 2>&1 || true
   systemctl start crond >/dev/null 2>&1 || true
   ok "看门狗已装：${KA_PATH}（cron 每分钟 + @reboot）"
-  log "规则：happ < ${KA_N} 补拉到 ${KA_N}；happ >= ${KA_N} 完全不动；docker / 容器挂了自动拉起"
+  log "规则：happ < ${KA_N} 补拉到 ${KA_N}；happ >= ${KA_N} 仅查 health（僵死重启）；docker / 容器挂了自动拉起"
   log "防抖：${KA_DEBOUNCE}s  日志：${KA_LOG}"
   return 0
 }
@@ -609,15 +784,36 @@ do_install() {
   systemctl restart q2-doh-proxy
   systemctl enable dnsmasq >/dev/null 2>&1 || true
   systemctl restart dnsmasq
-  sleep 2
+
+  # ★ v1.3.0 根因修复（时序竞态 → 假失败）：
+  #   旧版 restart 后只 sleep 2 就做单次 6s 探针，DoH 首次 TLS 握手没完成 → 探针超时
+  #   → die 退出（但服务事后是 active 的，属于误判）。
+  #   现在：① 等 unit 真正 active（含重试）② 自检探针带重试退避（最多 ~8 次）
+  wait_unit_active() {
+    local unit="$1" tries="${2:-20}" i=1
+    while [ "$i" -le "$tries" ]; do
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then return 0; fi
+      sleep 1; i=$((i + 1))
+    done
+    return 1
+  }
+  log "等待 q2-doh-proxy 进入 active …"
+  wait_unit_active q2-doh-proxy 20 || log "⚠️ q2-doh-proxy 未在 20s 内 active（继续走自检重试）"
+  log "等待 dnsmasq 进入 active …"
+  wait_unit_active dnsmasq 20 || log "⚠️ dnsmasq 未在 20s 内 active（继续走自检重试）"
+  sleep 1
 
   # 三层自检：任何一层失败都不碰 resolv.conf
-  log "自检 1/3：DoH 转发器 (127.0.0.1:5353) ..."
-  dns_probe 5353 "${PROBE_IQY}" >/dev/null 2>&1 || die "DoH 转发自检失败，未改 resolv.conf（原配置保持不变）"
-  log "自检 2/3：dnsmasq 解析爱奇艺域名 (127.0.0.1:53) ..."
-  dns_probe 53 "${PROBE_IQY}" >/dev/null 2>&1 || die "dnsmasq 自检失败，未改 resolv.conf"
-  log "自检 3/3：dnsmasq 解析通用域名 ..."
-  dns_probe 53 "${PROBE_ANY}" >/dev/null 2>&1 || die "通用域名自检失败，未改 resolv.conf"
+  # ★ 每层都带重试退避（8 次 × 3s 间隔 ≈ 最多 24s），吸收 DoH 冷启动握手耗时
+  log "自检 1/3：DoH 转发器 (127.0.0.1:5353) …（带重试）"
+  dns_probe_retry 5353 "${PROBE_IQY}" 8 3 >/dev/null 2>&1 \
+    || die "DoH 转发自检失败（重试 8 次仍不通），未改 resolv.conf（原配置保持不变）"
+  log "自检 2/3：dnsmasq 解析爱奇艺域名 (127.0.0.1:53) …（带重试）"
+  dns_probe_retry 53 "${PROBE_IQY}" 8 3 >/dev/null 2>&1 \
+    || die "dnsmasq 自检失败（重试 8 次仍不通），未改 resolv.conf"
+  log "自检 3/3：dnsmasq 解析通用域名 …（带重试）"
+  dns_probe_retry 53 "${PROBE_ANY}" 8 3 >/dev/null 2>&1 \
+    || die "通用域名自检失败（重试 8 次仍不通），未改 resolv.conf"
 
   apply_resolv
   log "resolv.conf 已指向本机（原配置备份在 ${RESOLV_BAK}）"
@@ -628,8 +824,17 @@ do_install() {
   log "容器 resolv 已尝试指向本机（闸门 ${CONTAINER_DNS_OFF} 已清除）"
 
   # 端到端验证：getent 走 glibc → resolv.conf
-  getent hosts "${PROBE_IQY}" >/dev/null 2>&1 || { rollback_resolv; die "端到端解析爱奇艺域名失败，已回滚 resolv.conf"; }
-  getent hosts "${PROBE_ANY}" >/dev/null 2>&1 || { rollback_resolv; die "端到端解析通用域名失败，已回滚 resolv.conf"; }
+  # ★ 带重试（glibc 缓存 + 上游刚切换，偶发一次失败不代表坏了）
+  getent_retry() {
+    local name="$1" tries="${2:-5}" i=1
+    while [ "$i" -le "$tries" ]; do
+      getent hosts "$name" >/dev/null 2>&1 && return 0
+      sleep 2; i=$((i + 1))
+    done
+    return 1
+  }
+  getent_retry "${PROBE_IQY}" 5 || { rollback_resolv; die "端到端解析爱奇艺域名失败，已回滚 resolv.conf"; }
+  getent_retry "${PROBE_ANY}" 5 || { rollback_resolv; die "端到端解析通用域名失败，已回滚 resolv.conf"; }
 
   self_install
   install_cron
@@ -644,7 +849,9 @@ do_install() {
 }
 
 do_watchdog() {
-  if dns_probe 53 "${PROBE_IQY}" >/dev/null 2>&1 && dns_probe 53 "${PROBE_ANY}" >/dev/null 2>&1; then
+  # ★ v1.3.0：探针带轻量重试（3 次 × 2s），避免偶发单次抖动被记为失败
+  #   （连续 3 轮都失败才回滚 resolv.conf，防的是真故障，不是抖动脉冲）
+  if dns_probe_retry 53 "${PROBE_IQY}" 3 2 >/dev/null 2>&1 && dns_probe_retry 53 "${PROBE_ANY}" 3 2 >/dev/null 2>&1; then
     apply_container_resolv 2>/dev/null || true
     rm -f "${FAIL_FILE}"
     exit 0
@@ -670,8 +877,8 @@ do_status() {
   echo "备份        : $([ -f "${RESOLV_BAK}" ] && echo "${RESOLV_BAK}" || echo '无')"
   echo "dnsmasq     : $(systemctl is-active dnsmasq 2>/dev/null || echo 'n/a')"
   echo "DoH 转发    : $(systemctl is-active q2-doh-proxy 2>/dev/null || echo 'n/a')"
-  echo "爱奇艺解析  : $(dns_probe 53 "${PROBE_IQY}" 2>/dev/null || echo 'FAIL')"
-  echo "通用解析    : $(dns_probe 53 "${PROBE_ANY}" 2>/dev/null || echo 'FAIL')"
+  echo "爱奇艺解析  : $(dns_probe_retry 53 "${PROBE_IQY}" 3 2 2>/dev/null || echo 'FAIL')"
+  echo "通用解析    : $(dns_probe_retry 53 "${PROBE_ANY}" 3 2 2>/dev/null || echo 'FAIL')"
   echo "配置        : $([ -f "${DNSMASQ_CONF}" ] && echo "${DNSMASQ_CONF}" || echo '未安装')"
   echo "后缀清单    : $([ -f "${SUFFIX_FILE}" ] && echo "${SUFFIX_FILE} ($(wc -l < "${SUFFIX_FILE}") 行)" || echo '无')"
   echo "--- 看门狗保活 ---"

@@ -53,8 +53,8 @@
 set -u
 export LC_ALL=C
 
-HIDE_DNS_VER="1.4.0-20261123"
-KA_VER="1.2.0-20261123"
+HIDE_DNS_VER="1.5.0-20261123"
+KA_VER="1.3.0-20261123"
 PYBIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
 
 # ── 看门狗保活（与 DNS 隐藏完全独立，安装顺序在 DNS 之前）──
@@ -419,7 +419,12 @@ restore_container_resolv() {
 # -----------------------------------------------------------------------------
 install_cron() {
   local line="*/5 * * * * ${SELF_PATH} --watchdog >/dev/null 2>&1"
-  ( crontab -l 2>/dev/null | grep -v 'q2_hide_dns.sh' || true; echo "${line}" ) | crontab - 2>/dev/null || true
+  # ★ 先取后写：避免 crontab -l | ... | crontab - 读写同一 spool 的竞态（吞掉别的 cron）
+  local cur filtered
+  cur="$(crontab -l 2>/dev/null || true)"
+  filtered="$(printf '%s\n' "${cur}" | grep -v 'q2_hide_dns.sh' | sed '/^[[:space:]]*$/d' || true)"
+  { if [ -n "${filtered}" ]; then printf '%s\n' "${filtered}"; fi; printf '%s\n' "${line}"; } \
+    | crontab - 2>/dev/null || true
 }
 
 # =============================================================================
@@ -476,6 +481,23 @@ num() {
   case "${1:-0}" in ''|*[!0-9]*) printf '0';; *) printf '%s' "$1";; esac
 }
 
+# 等待 happ 就绪（最多 18×5s=90s）：达标 0 / 超时 1
+# ★ S2 的 start 分支和「容器被删重建」分支共用，避免重建分支写死 sleep 20
+#   导致初始化慢时被 S3 误判成掉路、刚重建又 restart 一次
+wait_happ_ready() {
+  local _j _hc
+  for _j in $(seq 1 18); do
+    sleep 5
+    _hc=$(num "$(happ_cnt)")
+    if [ "$_hc" -ge "$N" ]; then
+      log "happ=${_hc} 就绪（约 $((_j*5))s）"
+      return 0
+    fi
+  done
+  log "等待 90s 后 happ=$(num "$(happ_cnt)") 未达 ${N}"
+  return 1
+}
+
 # 防抖：重置后 DEBOUNCE 秒内不重复重启，避免 OOM 频发时每分钟断流
 debounce_ok() {
   [ -f "$STAMP" ] || return 0
@@ -513,16 +535,7 @@ s2_container() {
     if docker start "$C" >/dev/null 2>&1; then
       log "S2 docker start 成功（保留原 SN），轮询 happ 就绪（不写死 sleep，避免 S3 把初始化误判成掉路）"
       [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S2 start 后写容器 resolv 失败（业务域名可能明文）"
-      local _j _hc
-      for _j in $(seq 1 18); do
-        sleep 5
-        _hc=$(num "$(happ_cnt)")
-        if [ "$_hc" -ge "$N" ]; then
-          log "S2 start 后 happ=${_hc} 就绪（约 $((_j*5))s），交 S3 复核"
-          return 0
-        fi
-      done
-      log "S2 start 后 90s happ=$(num "$(happ_cnt)") 未达 ${N}，交 S3 处理"
+      wait_happ_ready || log "S2 start 后 happ 未达 ${N}（90s），交 S3 处理"
       return 0
     fi
     log "S2 docker start 失败，改为完整重建"
@@ -539,7 +552,9 @@ s2_container() {
   log "S2 容器重建 rc=${rc} out=${out}"
   [ "$rc" = "0" ] || return 1
   [ -f "/etc/q2/.container_dns_disabled" ] || docker exec "$C" sh -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' 2>/dev/null || log "S2 重建后写容器 resolv 失败（业务域名可能明文）"
-  sleep 20
+  # ★ 与 start 分支共用就绪轮询（v1.5.0），替代固定 sleep 20：
+  #   重建后 happ 起满 9 路要 10~20s，写死 20s 会在初始化未完成时交棒 S3 → S3 立刻 restart，刚重建又断一次流
+  wait_happ_ready || log "S2 重建后 happ 未达 ${N}（90s），交 S3 处理"
   container_running
 }
 
@@ -885,7 +900,7 @@ do_status() {
   echo "保活版本    : ${KA_VER}"
   echo "保活脚本    : $([ -x "${KA_PATH}" ] && echo "${KA_PATH}" || echo '未安装')"
   echo "保活 cron   : $(crontab -l 2>/dev/null | grep -c 'q2_keepalive.sh') 条"
-  echo "路数规则    : < ${KA_N} 补拉；>= ${KA_N} 不动（超出不杀）"
+  echo "路数规则    : < ${KA_N} 补拉；>= ${KA_N} 查 health，僵死则重启（路数超出不杀）"
   echo "防抖/日志   : ${KA_DEBOUNCE}s / ${KA_LOG}"
   echo "最近动作    : $(tail -n 1 "${KA_LOG}" 2>/dev/null || echo '无')"
   echo "--- 出向 UDP53 抓包（eth0，非 any；不含 loopback 本地链路）---"

@@ -6821,6 +6821,13 @@ async function stableClientToken(rid, iid) {
 }
 
 
+/** 节点查实例专用 HTML 转义：不把换行改成 <br>（页面后面另一个 escapeHtml 会这么改，导致复制出来带 <br>） */
+function nlEscapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+
 /* ============================================================
  * 节点查实例：舟翼云节点ID → 阿里云实例ID（只读查询）
  * 数据链：节点ID →(平台 getEdgeNodeList)公网IP →(阿里云 ListInstances)实例ID
@@ -7036,11 +7043,11 @@ async function queryNodeToInstance() {
   var token = nlNormalizeToken(((document.getElementById('nlToken') || {}).value || '').trim()
     || (function () { try { return localStorage.getItem('zy_admin_token') || ''; } catch (e) { return ''; } })());
   var tokenErr = nlTokenDiag(token);
-  if (tokenErr) { out.innerHTML = '<span style="color:#cf1322;">⚠️ ' + escapeHtml(tokenErr) + '</span>'; return; }
+  if (tokenErr) { out.innerHTML = '<span style="color:#cf1322;">⚠️ ' + nlEscapeHtml(tokenErr) + '</span>'; return; }
   // 记住上一次成功通过本地校验的 token（仅本机 localStorage，便于下次免粘贴）
   try { localStorage.setItem('zy_admin_token', token); } catch (e) {}
   if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
-  out.innerHTML = '<span style="color:#1677ff;">🔄 正在从平台拉取 ownerId=' + escapeHtml(ownerId) + ' 的节点列表…</span>';
+  out.innerHTML = '<span style="color:#1677ff;">🔄 正在从平台拉取 ownerId=' + nlEscapeHtml(ownerId) + ' 的节点列表…</span>';
 
   var nodeList, ipMap;
   try {
@@ -7094,7 +7101,7 @@ async function queryNodeToInstance() {
     var instOnly = rows.filter(function (r) { return r.matched; }).map(function (r) { return r.instanceId; }).join('\n');
 
     var meta = ipMap.__meta || {};
-    var scanTip = '<div style="margin-top:8px;font-size:12px;color:#666;">扫描范围：阿里云账号 ' + escapeHtml((meta.profiles || []).join('、') || '—')
+    var scanTip = '<div style="margin-top:8px;font-size:12px;color:#666;">扫描范围：阿里云账号 ' + nlEscapeHtml((meta.profiles || []).join('、') || '—')
       + '；地域 ' + (meta.regions || 0) + ' 个；实例 ' + (meta.instances || 0) + ' 台（已按 TotalCount 翻完所有页）。</div>';
     if (!meta.profiles || !meta.profiles.length) {
       scanTip += '<div style="margin-top:4px;font-size:12px;color:#cf1322;">⚠️ 当前页面未配置任何阿里云凭证，请先在凭证管理中添加目标账号的 AK/SK。</div>';
@@ -7105,7 +7112,7 @@ async function queryNodeToInstance() {
     if (ipMap.__errs && ipMap.__errs.length) {
       errTip = '<div style="margin-top:6px;font-size:12px;color:#cf1322;">⚠️ 部分地域扫描失败 ' + ipMap.__errs.length
         + ' 项：<details style="display:inline;"><summary style="cursor:pointer;">展开明细</summary><ul style="padding-left:18px;">'
-        + ipMap.__errs.slice(0, 20).map(function (e) { return '<li>' + escapeHtml(e) + '</li>'; }).join('') + '</ul></details></div>';
+        + ipMap.__errs.slice(0, 20).map(function (e) { return '<li>' + nlEscapeHtml(e) + '</li>'; }).join('') + '</ul></details></div>';
     }
 
     var html = '<div style="background:#f6ffed;border:1px solid #b7eb8f;padding:12px;border-radius:6px;">'
@@ -7115,9 +7122,9 @@ async function queryNodeToInstance() {
       + '<button class="btn btn-sm btn-primary nl-copy" data-k="inst">📋 复制实例ID列表</button>'
       + '<button class="btn btn-sm btn-primary nl-csv" style="margin-left:6px;">⬇️ 下载CSV</button>'
       + '</div>'
-      + '<textarea id="nlOutPairs" style="display:none;">' + escapeHtml(pairs) + '</textarea>'
-      + '<textarea id="nlOutInst" style="display:none;">' + escapeHtml(instOnly) + '</textarea>'
-      + '<textarea id="nlOutCsv" style="display:none;">' + escapeHtml(csv) + '</textarea>'
+      + '<textarea id="nlOutPairs" style="display:none;">' + nlEscapeHtml(pairs) + '</textarea>'
+      + '<textarea id="nlOutInst" style="display:none;">' + nlEscapeHtml(instOnly) + '</textarea>'
+      + '<textarea id="nlOutCsv" style="display:none;">' + nlEscapeHtml(csv) + '</textarea>'
       + '<div style="max-height:360px;overflow:auto;border:1px solid #eee;background:#fff;">'
       + '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="background:#f0f0f0;">'
       + ['节点ID','实例ID','公网IP','内网IP','地域','节点状态','阿里云账号','备注'].map(function (h) {
@@ -7125,14 +7132,14 @@ async function queryNodeToInstance() {
         }).join('') + '</tr></thead><tbody>'
       + rows.map(function (r) {
           return '<tr>'
-            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;">' + escapeHtml(r.id) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;color:' + (r.matched ? '#1677ff' : '#999') + ';font-weight:' + (r.matched ? '600' : '400') + ';">' + escapeHtml(r.instanceId) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.publicIp) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;color:#666;">' + escapeHtml(r.innerIp) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.region) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.nodeStatus) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;">' + escapeHtml(r.profile) + '</td>'
-            + '<td style="padding:6px;border:1px solid #eee;color:' + (r.matched ? '#52c41a' : '#cf1322') + ';">' + escapeHtml(r.reason || '命中') + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;">' + nlEscapeHtml(r.id) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;font-family:monospace;color:' + (r.matched ? '#1677ff' : '#999') + ';font-weight:' + (r.matched ? '600' : '400') + ';">' + nlEscapeHtml(r.instanceId) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + nlEscapeHtml(r.publicIp) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;color:#666;">' + nlEscapeHtml(r.innerIp) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + nlEscapeHtml(r.region) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + nlEscapeHtml(r.nodeStatus) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;">' + nlEscapeHtml(r.profile) + '</td>'
+            + '<td style="padding:6px;border:1px solid #eee;color:' + (r.matched ? '#52c41a' : '#cf1322') + ';">' + nlEscapeHtml(r.reason || '命中') + '</td>'
             + '</tr>';
         }).join('')
       + '</tbody></table></div>'
@@ -7160,8 +7167,8 @@ async function queryNodeToInstance() {
     var msg = (e && e.message) || String(e);
     var hint = /not even a token|invalid token|token.*格式/i.test(msg)
       ? '　👉 若从 F12 的 Authorization 头复制，请只粘贴 token 值本身（页面已自动去掉 Bearer 前缀；仍失败说明 token 串不完整，请重新复制）' : '';
-    out.innerHTML = '<span style="color:#cf1322;">❌ 查询失败：' + escapeHtml(msg) + '</span>'
-      + (hint ? '<div style="color:#cf1322;font-size:12px;margin-top:6px;">' + escapeHtml(hint) + '</div>' : '');
+    out.innerHTML = '<span style="color:#cf1322;">❌ 查询失败：' + nlEscapeHtml(msg) + '</span>'
+      + (hint ? '<div style="color:#cf1322;font-size:12px;margin-top:6px;">' + nlEscapeHtml(hint) + '</div>' : '');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔍 查询实例ID'; }
   }

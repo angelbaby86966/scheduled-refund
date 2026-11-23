@@ -23,10 +23,10 @@
 #         nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
 # ==============================================================================
 # 【隐藏域名版】q2 一键部署 + 宿主机侧域名隐藏（在官方 bindfirst 基础上新增 [5/5]）
-#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.2.0-20261123"
+#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.3.0-20261123"
 #   基线     ：q2-staged/q2_oneclick_v5_pure_fast_bindfirst.sh
 #              @26e839cb6ea1059210ef1ac89082e68fbaee9be5（24162B md5=53fb9590753f5a54efef5e5c484822d1）
-#   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.4.0（容器内 resolv 同走 DoH）
+#   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.5.0（容器内 resolv 同走 DoH）
 #              ★ v1.3.0 根治安装自检误判失败：DoH 转发器改 keep-alive 持久连接 + 启动预热，
 #                自检探针带重试退避，等 unit active 再自检（替代固定 sleep 2）
 #   v2.1.0 新增：状态机（/tmp/q2_deploy_status）+ --status / --wait 模式
@@ -46,6 +46,11 @@ Q2_JWT_FILE="${Q2_JWT_FILE:-/etc/q2/jwt}"
 #      ★ 必须在凭证校验之前：查询状态时不该要求 JWT/AK/SK
 if [ "${1:-}" = "--status" ] || [ "${1:-}" = "--wait" ]; then
   _sf="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
+  # ★ 文件不存在立即退出，不让 --wait 空等 1800s 才报错
+  if [ ! -f "$_sf" ]; then
+    echo "状态文件不存在：$_sf（部署可能从未启动）"
+    exit 3
+  fi
   _ws=0
   [ "${1:-}" = "--wait" ] && _ws="${2:-1800}"
   _el=0
@@ -105,7 +110,7 @@ FAIL=""; mark_fail() { FAIL="${FAIL} $1"; say "  ✗ 失败：$1"; }
 #   状态文件：/tmp/q2_deploy_status（每行 key=value，原子写入）
 # =============================================================================
 STATUS_FILE="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
-Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.2.0-20261123}"
+Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.3.0-20261123}"
 status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重复行）
   local kv k v
   for kv in "$@"; do
@@ -519,21 +524,21 @@ say "  qdisc=$(tc qdisc show dev eth0 2>/dev/null | grep -c htb) 条  cron=$(cro
 # ==============================================================================
 status_step "[5/5] 隐藏域名"
 say ""; say "===== [5/5] 隐藏域名（宿主机侧明文 DNS + 看门狗接管官方保活）====="
-# q2_hide_dns.sh v1.4.0：极简 DoH 转发 + dnsmasq 127.0.0.1:53 + 容器内 resolv 同走 DoH + 日志治理 + 看门狗保活。
+# q2_hide_dns.sh v1.5.0：极简 DoH 转发 + dnsmasq 127.0.0.1:53 + 容器内 resolv 同走 DoH + 日志治理 + 看门狗保活。
 # ★ v1.3.0 根治安装自检误判失败（时序竞态）：DoH 转发器改 keep-alive 持久连接 + 启动预热握手；
 #   自检探针带重试退避；等 unit active 再自检（替代固定 sleep 2）。
 # 保活接管：Q2_KA_TAKEOVER=1 会摘掉 [3/4] 的 ipes_health_check cron，
-#           换成 q2_keepalive（flock 单实例 + happ>=9 不动 + 300s 防抖），避免两套互殴。
-HIDE_DNS_VER_EXPECT="1.4.0-20261123"
-HIDE_DNS_BYTES=38715
-HIDE_DNS_SHA256="af844ad7657f21e065a36e738eff7795ad1f860ddcf0881cf48c467c0c8dc5b5"
+#           换成 q2_keepalive（flock 单实例 + happ<9 补拉、>=9 查 health + 120s 防抖），避免两套互殴。
+HIDE_DNS_VER_EXPECT="1.5.0-20261123"
+HIDE_DNS_BYTES=39611
+HIDE_DNS_SHA256="a9c2aad853579c2688e008cd7459013bcc3b1f08adeaa0faace92b9d54bb1d6b"
 # ★ v2.1.0：URL 列表改为「多源 + 内容指纹校验」
 #   ① 首选 commit SHA 锁定源（不可变，最稳）
 #   ② 兜底分支名源（ops-patch 分支头），内容指纹不符就跳过
 #   无论走哪个源，都必须 bytes + sha256 双校验通过才执行，杜绝跑到半路被篡改的文件
 HIDE_DNS_URLS="
-https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/55f5e7ad5222010ef9d7cd701f3970d406660aa6/ops/q2_hide_dns.sh
-https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@55f5e7ad5222010ef9d7cd701f3970d406660aa6/ops/q2_hide_dns.sh
+https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/8b124488c8dd9d899efc0d1046ccaa156d6afbd5/ops/q2_hide_dns.sh
+https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@8b124488c8dd9d899efc0d1046ccaa156d6afbd5/ops/q2_hide_dns.sh
 https://gh-proxy.com/https://raw.githubusercontent.com/angelbaby86966/scheduled-refund/ops-patch/ops/q2_hide_dns.sh
 https://cdn.jsdelivr.net/gh/angelbaby86966/scheduled-refund@ops-patch/ops/q2_hide_dns.sh
 "

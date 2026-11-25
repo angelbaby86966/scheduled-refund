@@ -248,6 +248,40 @@ fi
 status_step "[2/4] 部署+9路+SN回填"
 say ""; say "===== [2/4] 部署：docker+预拉 ∥ Q2组件 → Q2业务 → 9路 → 真SN回填 ====="
 
+# ---- O1-a0：把 OSS docker 安装脚本的公网源改写为内网源（根治公网限速）----
+# 背景：OSS 的 install_docker-ce_v2.sh 写死 mirrors.aliyun.com / mirrors.cloud.tencent.com
+#       公网 CDN，实测仅 ~35KB/s；阿里云内网 mirrors.cloud.aliyuncs.com 实测 ~74MB/s（快约2000倍）。
+# 切口：本脚本每次把 OSS 安装脚本 curl 到 /tmp/_dk.sh 再 bash，故在 bash 前 sed 改写，
+#       无需 OSS 写权限、不改 OSS 脚本本体；对 docker 已就绪的机器完全不触发。
+patch_docker_repo_intranet() {
+  local dk=/tmp/_dk.sh
+  [ -s "$dk" ] || return 0
+  # 只替换安装脚本内的源 URL 字面量，不碰任何业务逻辑
+  sed -i \
+    -e 's#https://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+    -e 's#http://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+    -e 's#https://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+    -e 's#http://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+    -e 's#https://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+    -e 's#http://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+    -e 's#https://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+    -e 's#http://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+    "$dk" 2>/dev/null
+  # 禁 fastestmirror（它会对公网源测速卡死）——OSS 脚本未处理，这里补上
+  if [ -f /etc/yum/pluginconf.d/fastestmirror.conf ]; then
+    sed -i 's/^enabled=1/enabled=0/' /etc/yum/pluginconf.d/fastestmirror.conf 2>/dev/null
+  fi
+  if grep -q '^plugins=1' /etc/yum.conf 2>/dev/null; then
+    sed -i 's/^plugins=1/plugins=0/' /etc/yum.conf 2>/dev/null
+  fi
+  if grep -qE 'mirrors\.(aliyun\.com|cloud\.tencent\.com)/(docker-ce|centos)' "$dk"; then
+    say "  ⚠️ 内网源改写有公网残留，按原样继续（可能仍慢）"
+  else
+    say "  [2.2] ✅ docker 安装脚本已切内网源 + 禁 fastestmirror"
+  fi
+  return 0
+}
+
 # ---- O1-a：docker 安装（已就绪则跳过）+ 镜像预拉取 ----
 install_docker_and_prepull() {
   local rc=0
@@ -256,6 +290,7 @@ install_docker_and_prepull() {
   else
     say "  [2.2] 安装 docker…"
     if ! { curl -fsSL -m 300 "$OSS/install_docker/install_docker-ce_v2.sh" -o /tmp/_dk.sh 2>/dev/null \
+        && patch_docker_repo_intranet \
         && bash /tmp/_dk.sh; }; then
       say "  ✗ docker 安装失败"; rc=1
     fi

@@ -3,7 +3,7 @@
  * 纯前端版本：直接调用阿里云 API，无需后端服务器
  * 支持管理员/普通用户角色管理 + 多账号数据隔离
  */
-console.log('%c[app.js] v118 已加载 - 「排除实例」已在云端三套定时执行器统一生效（读取 schedule_exclude_instance_ids + fail-closed 硬拦截）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
+console.log('%c[app.js] v119 已加载 - 修复立即退订排除实例被误退（byRegion 源头过滤 + 执行器兜底 excludeMap）', 'background:#3b82f6;color:white;padding:4px 8px;font-weight:bold;border-radius:4px;');
 console.log('[app.js] 加载时间:', new Date().toISOString(), 'WB_SUPABASE_FUNCTIONS:', window.WB_SUPABASE_FUNCTIONS);
 
 // ====== 用户命名空间（多账号数据隔离） ======
@@ -2868,10 +2868,14 @@ async function refundCurrentCredInstances(credName, excludeMap) {
         }
       }
 
-      byRegion[rid] = instances;
+      // ★修复(v119)：byRegion 必须只放【过滤后】的实例。
+      // 原实现先 byRegion[rid]=instances(全量)，排除判断只 continue 掉 allInstances，
+      // 而第2步退订传的是 byRegion → 被排除实例照样进入退订队列（历史误退根因）。
+      byRegion[rid] = [];
       for (var j = 0; j < instances.length; j++) {
         var _iid = instances[j].InstanceId;
-        if (excludeMap && excludeMap[_iid]) { excludedCount++; continue; } // 排除实例：跳过退订
+        if (excludeMap && excludeMap[_iid]) { excludedCount++; continue; } // 排除实例：不进退订队列
+        byRegion[rid].push(instances[j]);                                  // ★只把非排除实例交给退订执行器
         allInstances.push({ regionId: rid, instanceId: _iid, name: instances[j].InstanceName, status: instances[j].Status });
       }
     } catch (err) {
@@ -2895,7 +2899,7 @@ async function refundCurrentCredInstances(credName, excludeMap) {
   }
 
   // 第2步：按地域并行退订（参考 scheduled-refund：全局有界并发 + 令牌桶限速，限流自动退避）
-  var rt = await refundByRegionParallel(byRegion, { recordFailures: true });
+  var rt = await refundByRegionParallel(byRegion, { recordFailures: true, excludeMap: excludeMap });
   totals.success = rt.success; totals.skipped = rt.skipped;
   totals.locked = rt.locked; totals.fail = rt.fail;
   return totals;
@@ -3500,7 +3504,7 @@ async function executeScheduledRefund() {
       }
 
       log('🔄 第 ' + _round + ' 轮：退订 ' + allInstances.length + ' 台（参考 scheduled-refund：全局有界并发≤' + REFUND_CONCURRENCY + '，QPS≤' + REFUND_QPS + '/s，限流自动退避）...', 'warn');
-      var rt = await refundByRegionParallel(byRegion, { recordFailures: true });
+      var rt = await refundByRegionParallel(byRegion, { recordFailures: true, excludeMap: _exclMap });
       var success = rt.success, skip = rt.skipped, fail = rt.fail + rt.locked;
       _profSuccess += success; _profSkip += skip; _profFail += fail;
 
@@ -5982,6 +5986,10 @@ async function refundByRegionParallel(byRegion, opts) {
   var persistedSkips = loadPersistedRefundSkips();
   var persistedCount = persistedSkips.size;
   var skippedFromPersist = 0;
+  // ★兜底(v119)：执行器层再按 excludeMap 过滤一次，防止任何调用方传入未过滤的 byRegion。
+  // 立即退订与定时补跑均传 excludeMap；即便源头漏过滤，这里也不会把排除实例加入退订队列。
+  var excludeMap = opts.excludeMap || null;
+  var skippedFromExclude = 0;
   var tasks = [];
   Object.keys(byRegion).forEach(function (rid) {
     var arr = byRegion[rid] || [];
@@ -5991,6 +5999,7 @@ async function refundByRegionParallel(byRegion, opts) {
     for (var i = 0; i < arr.length; i++) {
       var it = arr[i];
       var iid = it.InstanceId || it.instanceId;
+      if (excludeMap && excludeMap[iid]) { skippedFromExclude++; continue; } // ★排除实例：绝不退订
       if (persistedSkips.has(iid)) {
         skippedFromPersist++;
         continue;
@@ -5998,8 +6007,11 @@ async function refundByRegionParallel(byRegion, opts) {
       tasks.push({ rid: rid, iid: iid });
       regionTasks++;
     }
-    log('   🌏 [' + regionName + '] 共 ' + arr.length + ' 台' + (regionTasks < arr.length ? '，过滤掉 ' + (arr.length - regionTasks) + ' 台已记录' : '') + '待退订', 'info');
+    log('   🌏 [' + regionName + '] 共 ' + arr.length + ' 台' + (regionTasks < arr.length ? '，过滤掉 ' + (arr.length - regionTasks) + ' 台（排除/已记录）' : '') + '待退订', 'info');
   });
+  if (skippedFromExclude > 0) {
+    log('🚫 执行器兜底：按排除实例列表拦下 ' + skippedFromExclude + ' 台（不调用退订 API）', 'success');
+  }
   if (skippedFromPersist > 0) {
     log('   🧹 本地已记录 ' + persistedCount + ' 台已退订/不可退，其中 ' + skippedFromPersist + ' 台在本轮直接跳过（不调用 API）', 'info');
   }

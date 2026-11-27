@@ -19,11 +19,16 @@
 #   回退开关：
 #     Q2_SKIP_PATCH=1   不 patch 官方脚本（sleep 90s 原样保留）
 #
-#   用法：export Q2_JWT=xxx Q2_AK=xxx Q2_SK=xxx 后
-#         nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
+#   用法（凭证二选一：env 或 外置文件，env 优先）：
+#     ① 外置文件（推荐，避免命令行明文）：
+#        echo '<token>' > /etc/q2/jwt ; echo '<AK>' > /etc/q2/ak ; echo '<SK>' > /etc/q2/sk
+#        chmod 600 /etc/q2/jwt /etc/q2/ak /etc/q2/sk
+#     ② export Q2_JWT=xxx Q2_AK=xxx Q2_SK=xxx
+#     然后：nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
+#   凭证文件位置：JWT=/etc/q2/jwt  AK=/etc/q2/ak  SK=/etc/q2/sk（可用 Q2_*_FILE 覆盖）
 # ==============================================================================
 # 【隐藏域名版】q2 一键部署 + 宿主机侧域名隐藏（在官方 bindfirst 基础上新增 [5/5]）
-#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.5.0-20261127"
+#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.5.2-20261127"
 #   基线     ：q2-staged/q2_oneclick_v5_pure_fast_bindfirst.sh
 #              @26e839cb6ea1059210ef1ac89082e68fbaee9be5（24162B md5=53fb9590753f5a54efef5e5c484822d1）
 #   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.5.0（容器内 resolv 同走 DoH）
@@ -42,6 +47,8 @@
 #
 # ==============================================================================
 Q2_JWT_FILE="${Q2_JWT_FILE:-/etc/q2/jwt}"
+Q2_AK_FILE="${Q2_AK_FILE:-/etc/q2/ak}"
+Q2_SK_FILE="${Q2_SK_FILE:-/etc/q2/sk}"
 # ---- 外部查询模式（--status 打印状态；--wait 阻塞等待终态后打印）----
 #      ★ 必须在凭证校验之前：查询状态时不该要求 JWT/AK/SK
 if [ "${1:-}" = "--status" ] || [ "${1:-}" = "--wait" ]; then
@@ -73,14 +80,21 @@ if [ "${1:-}" = "--status" ] || [ "${1:-}" = "--wait" ]; then
   exit 2   # 仍在运行（--wait 超时）
 fi
 
+# ── 凭证：env 优先，外置文件兜底；脚本不内置任何密钥，三者缺一即报错退出 ──
+#     JWT=/etc/q2/jwt   AK=/etc/q2/ak   SK=/etc/q2/sk（可分别用 Q2_*_FILE 覆盖）
 if [ -z "${Q2_JWT:-}" ] && [ -f "$Q2_JWT_FILE" ]; then
   Q2_JWT="$(cat "$Q2_JWT_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
-: "${Q2_JWT:?未找到 JWT：请 export Q2_JWT=xxx，或 echo <新token> > $Q2_JWT_FILE（脚本已不再内置密钥）}"
+: "${Q2_JWT:?未找到 JWT：请 export Q2_JWT=xxx，或 echo '<token>' > $Q2_JWT_FILE}"
 JWT="$Q2_JWT"
-# ── 渠道/管理员凭证全部外置：脚本不再内置任何密钥，缺失即报错退出 ──
-: "${Q2_AK:?未找到渠道 AK：请 export Q2_AK=xxx（脚本已去除内置凭证，以外置为准）}"
-: "${Q2_SK:?未找到渠道 SK：请 export Q2_SK=xxx（脚本已去除内置凭证，以外置为准）}"
+if [ -z "${Q2_AK:-}" ] && [ -f "$Q2_AK_FILE" ]; then
+  Q2_AK="$(cat "$Q2_AK_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+if [ -z "${Q2_SK:-}" ] && [ -f "$Q2_SK_FILE" ]; then
+  Q2_SK="$(cat "$Q2_SK_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+: "${Q2_AK:?未找到渠道 AK：请 export Q2_AK=xxx，或 echo '<AK>' > $Q2_AK_FILE}"
+: "${Q2_SK:?未找到渠道 SK：请 export Q2_SK=xxx，或 echo '<SK>' > $Q2_SK_FILE}"
 CHAN_AK="$Q2_AK"
 CHAN_SK="$Q2_SK"
 ISP="${Q2_ISP:-联通}"
@@ -110,7 +124,7 @@ FAIL=""; mark_fail() { FAIL="${FAIL} $1"; say "  ✗ 失败：$1"; }
 #   状态文件：/tmp/q2_deploy_status（每行 key=value，原子写入）
 # =============================================================================
 STATUS_FILE="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
-Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.5.0-20261127}"
+Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.5.2-20261127}"
 status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重复行）
   local kv k v
   for kv in "$@"; do

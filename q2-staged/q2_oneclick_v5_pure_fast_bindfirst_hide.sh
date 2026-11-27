@@ -278,10 +278,14 @@ q2_ensure_intra_dns() {
     _ip=$(getent ahostsv4 "$ih" 2>/dev/null | awk 'NR==1{print $1}')
     if [ -n "$_ip" ]; then
       _code=$(curl --noproxy '*' -s -o /dev/null -m 8 -w '%{http_code}' "http://${ih}/docker-ce/" 2>/dev/null)
-      if [ -n "$_code" ] && [ "$_code" != "000" ]; then
-        say "  [2.2] DNS 自愈成功：${ih} → ${_ip}（HTTP ${_code}），内网源可用"
-        return 0
-      fi
+      # ★ 只认 2xx/3xx/4xx：4xx(403/404) 说明主机可达、路径无索引而已，仍算内网源可用；
+      #   5xx(如公网线路回 502) 和 000(连不上) 一律不算，否则会误判可用又切到解析不了的内网源。
+      case "$_code" in
+        2[0-9][0-9]|3[0-9][0-9]|4[0-9][0-9])
+          say "  [2.2] DNS 自愈成功：${ih} → ${_ip}（HTTP ${_code}），内网源可用"
+          return 0
+          ;;
+      esac
     fi
     sleep 2
   done

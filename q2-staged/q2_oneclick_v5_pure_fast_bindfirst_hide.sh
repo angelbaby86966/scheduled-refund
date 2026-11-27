@@ -23,7 +23,7 @@
 #         nohup bash q2_oneclick_v5_pure_fast_bindfirst.sh > /tmp/q2_v5.log 2>&1 &
 # ==============================================================================
 # 【隐藏域名版】q2 一键部署 + 宿主机侧域名隐藏（在官方 bindfirst 基础上新增 [5/5]）
-#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.4.0-20261123"
+#   版本指纹：Q2_BINDFIRST_HIDE_REV="v5-pure-fast-bindfirst-hide-2.5.0-20261127"
 #   基线     ：q2-staged/q2_oneclick_v5_pure_fast_bindfirst.sh
 #              @26e839cb6ea1059210ef1ac89082e68fbaee9be5（24162B md5=53fb9590753f5a54efef5e5c484822d1）
 #   新增步骤 ：[5/5] 下载并运行 q2_hide_dns.sh v1.5.0（容器内 resolv 同走 DoH）
@@ -110,7 +110,7 @@ FAIL=""; mark_fail() { FAIL="${FAIL} $1"; say "  ✗ 失败：$1"; }
 #   状态文件：/tmp/q2_deploy_status（每行 key=value，原子写入）
 # =============================================================================
 STATUS_FILE="${Q2_STATUS_FILE:-/tmp/q2_deploy_status}"
-Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.4.0-20261123}"
+Q2_BINDFIRST_HIDE_REV="${Q2_BINDFIRST_HIDE_REV:-v5-pure-fast-bindfirst-hide-2.5.0-20261127}"
 status_set() { # key value...  —— 逐 key 覆盖写（不追加，避免重复行）
   local kv k v
   for kv in "$@"; do
@@ -253,6 +253,43 @@ say ""; say "===== [2/4] 部署：docker+预拉 ∥ Q2组件 → Q2业务 → 9�
 #       公网 CDN，实测仅 ~35KB/s；阿里云内网 mirrors.cloud.aliyuncs.com 实测 ~74MB/s（快约2000倍）。
 # 切口：本脚本每次把 OSS 安装脚本 curl 到 /tmp/_dk.sh 再 bash，故在 bash 前 sed 改写，
 #       无需 OSS 写权限、不改 OSS 脚本本体；对 docker 已就绪的机器完全不触发。
+# ---- DNS 根治（2026-11-27）：新机初始公网 DNS 解析不了 mirrors.cloud.aliyuncs.com →
+#      强行切内网源后 curl#6 → docker 装不上 → happ/SN/容器全链断裂。
+#      100.100.2.2/100.100.2.5 是阿里云全地域 VPC 内网 DNS，只有阿里云机器可达。
+#      幂等注入 + 「getent 解析 + curl 连通」双验证 + 最多 5 次重试（10s），不再试一次就放弃。
+#      注意：用重定向写 resolv.conf（保留符号链接目标），不用 sed -i（会切断 symlink）。
+Q2_INTRA_DNS_BAK="/etc/resolv.conf.q2intra.bak"
+q2_ensure_intra_dns() {
+  local ih="mirrors.cloud.aliyuncs.com"
+  local _tmp _code _ip _i _ns
+  # 原始 resolv.conf 只备份一次；隐藏域名脚本在 [5/5] 会自行改写，不冲突
+  [ -f "$Q2_INTRA_DNS_BAK" ] || cp -p /etc/resolv.conf "$Q2_INTRA_DNS_BAK" 2>/dev/null
+  _tmp=$(mktemp /tmp/q2_resolv.XXXXXX 2>/dev/null) || _tmp="/tmp/q2_resolv.$$"
+  {
+    echo "nameserver 100.100.2.2"
+    echo "nameserver 100.100.2.5"
+    grep -vE '^nameserver[[:space:]]+100\.100\.2\.' /etc/resolv.conf 2>/dev/null
+  } > "$_tmp" 2>/dev/null
+  if [ -s "$_tmp" ]; then
+    cat "$_tmp" > /etc/resolv.conf 2>/dev/null
+  fi
+  rm -f "$_tmp" 2>/dev/null
+  for _i in 1 2 3 4 5; do
+    _ip=$(getent ahostsv4 "$ih" 2>/dev/null | awk 'NR==1{print $1}')
+    if [ -n "$_ip" ]; then
+      _code=$(curl --noproxy '*' -s -o /dev/null -m 8 -w '%{http_code}' "http://${ih}/docker-ce/" 2>/dev/null)
+      if [ -n "$_code" ] && [ "$_code" != "000" ]; then
+        say "  [2.2] DNS 自愈成功：${ih} → ${_ip}（HTTP ${_code}），内网源可用"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  _ns=$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  say "  [2.2] ⚠️ DNS 自愈失败：${ih} 解析/连通不可用（nameserver=${_ns:-none}）"
+  return 1
+}
+
 patch_docker_repo_intranet() {
   local dk=/tmp/_dk.sh
   [ -s "$dk" ] || return 0
@@ -265,25 +302,8 @@ patch_docker_repo_intranet() {
     sed -i 's/^plugins=1/plugins=0/' /etc/yum.conf 2>/dev/null
   fi
 
-  # ---- DNS 兜底：内网域名必须能解析，否则强行切内网源会 curl#6 解析失败 → docker 装不上 ----
-  # 部分新机初始 resolv.conf 是公网 DNS(8.8.8.8/114.114.114.114)，解析不了 mirrors.cloud.aliyuncs.com。
-  local ih=mirrors.cloud.aliyuncs.com
-  local dns_ok=0
-  if getent hosts ${ih} >/dev/null 2>&1; then
-    dns_ok=1
-  else
-    # 临时注入阿里云内网 DNS（100.100.2.2/100.100.2.5 全地域通用），再试
-    cp /etc/resolv.conf /etc/resolv.conf.q2intra.bak 2>/dev/null
-    if ! grep -q '^nameserver 100.100.2.2' /etc/resolv.conf 2>/dev/null; then
-      sed -i '1i nameserver 100.100.2.2\nnameserver 100.100.2.5' /etc/resolv.conf 2>/dev/null
-    fi
-    sleep 2
-    if getent hosts ${ih} >/dev/null 2>&1; then
-      dns_ok=1
-    fi
-  fi
-
-  if [ "${dns_ok}" = 1 ]; then
+  # ---- DNS 自愈：先幂等注入内网 DNS 并双验证，通过才切内网源；失败则安全回退公网源 ----
+  if q2_ensure_intra_dns; then
     # 内网域名可解析 → 切成内网源（快 2000 倍）
     sed -i \
       -e 's#https://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
@@ -301,12 +321,12 @@ patch_docker_repo_intranet() {
       say "  [2.2] ✅ docker 安装脚本已切内网源 + 禁 fastestmirror（内网域名可解析）"
     fi
   else
-    # 内网域名解析不了 → 保留 OSS 原公网源（慢但能装），回退 DNS 改动，绝不切内网
-    if [ -f /etc/resolv.conf.q2intra.bak ]; then
-      cp /etc/resolv.conf.q2intra.bak /etc/resolv.conf 2>/dev/null
-      rm -f /etc/resolv.conf.q2intra.bak 2>/dev/null
+    # 内网 DNS 自愈失败 → 恢复原始 DNS + 保留 OSS 原公网源（慢但能装），绝不切内网
+    if [ -f "$Q2_INTRA_DNS_BAK" ]; then
+      cp -p "$Q2_INTRA_DNS_BAK" /etc/resolv.conf 2>/dev/null
+      rm -f "$Q2_INTRA_DNS_BAK" 2>/dev/null
     fi
-    say "  [2.2] ⚠️ 内网域名无法解析，回退公网源（较慢但可安装）+ 已禁 fastestmirror"
+    say "  [2.2] ⚠️ 内网 DNS 自愈失败，回退公网源（较慢但可安装）+ 已禁 fastestmirror"
   fi
   return 0
 }

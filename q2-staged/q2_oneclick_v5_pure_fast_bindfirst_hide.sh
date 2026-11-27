@@ -256,28 +256,57 @@ say ""; say "===== [2/4] 部署：docker+预拉 ∥ Q2组件 → Q2业务 → 9�
 patch_docker_repo_intranet() {
   local dk=/tmp/_dk.sh
   [ -s "$dk" ] || return 0
-  # 只替换安装脚本内的源 URL 字面量，不碰任何业务逻辑
-  sed -i \
-    -e 's#https://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
-    -e 's#http://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
-    -e 's#https://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
-    -e 's#http://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
-    -e 's#https://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
-    -e 's#http://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
-    -e 's#https://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
-    -e 's#http://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
-    "$dk" 2>/dev/null
-  # 禁 fastestmirror（它会对公网源测速卡死）——OSS 脚本未处理，这里补上
+
+  # 禁 fastestmirror（它会对公网源测速卡死）——OSS 脚本未处理，这里补上（无论走内外网都禁）
   if [ -f /etc/yum/pluginconf.d/fastestmirror.conf ]; then
     sed -i 's/^enabled=1/enabled=0/' /etc/yum/pluginconf.d/fastestmirror.conf 2>/dev/null
   fi
   if grep -q '^plugins=1' /etc/yum.conf 2>/dev/null; then
     sed -i 's/^plugins=1/plugins=0/' /etc/yum.conf 2>/dev/null
   fi
-  if grep -qE 'mirrors\.(aliyun\.com|cloud\.tencent\.com)/(docker-ce|centos)' "$dk"; then
-    say "  ⚠️ 内网源改写有公网残留，按原样继续（可能仍慢）"
+
+  # ---- DNS 兜底：内网域名必须能解析，否则强行切内网源会 curl#6 解析失败 → docker 装不上 ----
+  # 部分新机初始 resolv.conf 是公网 DNS(8.8.8.8/114.114.114.114)，解析不了 mirrors.cloud.aliyuncs.com。
+  local ih=mirrors.cloud.aliyuncs.com
+  local dns_ok=0
+  if getent hosts ${ih} >/dev/null 2>&1; then
+    dns_ok=1
   else
-    say "  [2.2] ✅ docker 安装脚本已切内网源 + 禁 fastestmirror"
+    # 临时注入阿里云内网 DNS（100.100.2.2/100.100.2.5 全地域通用），再试
+    cp /etc/resolv.conf /etc/resolv.conf.q2intra.bak 2>/dev/null
+    if ! grep -q '^nameserver 100.100.2.2' /etc/resolv.conf 2>/dev/null; then
+      sed -i '1i nameserver 100.100.2.2\nnameserver 100.100.2.5' /etc/resolv.conf 2>/dev/null
+    fi
+    sleep 2
+    if getent hosts ${ih} >/dev/null 2>&1; then
+      dns_ok=1
+    fi
+  fi
+
+  if [ "${dns_ok}" = 1 ]; then
+    # 内网域名可解析 → 切成内网源（快 2000 倍）
+    sed -i \
+      -e 's#https://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+      -e 's#http://mirrors\.aliyun\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+      -e 's#https://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+      -e 's#http://mirrors\.cloud\.tencent\.com/docker-ce#http://mirrors.cloud.aliyuncs.com/docker-ce#g' \
+      -e 's#https://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+      -e 's#http://mirrors\.aliyun\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+      -e 's#https://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+      -e 's#http://mirrors\.cloud\.tencent\.com/centos#http://mirrors.cloud.aliyuncs.com/centos#g' \
+      "$dk" 2>/dev/null
+    if grep -qE 'mirrors\.(aliyun\.com|cloud\.tencent\.com)/(docker-ce|centos)' "$dk"; then
+      say "  ⚠️ 内网源改写有公网残留，按原样继续（可能仍慢）"
+    else
+      say "  [2.2] ✅ docker 安装脚本已切内网源 + 禁 fastestmirror（内网域名可解析）"
+    fi
+  else
+    # 内网域名解析不了 → 保留 OSS 原公网源（慢但能装），回退 DNS 改动，绝不切内网
+    if [ -f /etc/resolv.conf.q2intra.bak ]; then
+      cp /etc/resolv.conf.q2intra.bak /etc/resolv.conf 2>/dev/null
+      rm -f /etc/resolv.conf.q2intra.bak 2>/dev/null
+    fi
+    say "  [2.2] ⚠️ 内网域名无法解析，回退公网源（较慢但可安装）+ 已禁 fastestmirror"
   fi
   return 0
 }
